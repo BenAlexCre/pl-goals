@@ -1,0 +1,334 @@
+# Current State
+
+Last reviewed: 2026-08-03.
+
+This file is the **canonical, frequently-updated record of what's true about the
+running system right now** — open bugs, unverified assumptions, half-built features,
+repository hygiene issues. Everything on this page is expected to age. Check the "Last
+reviewed" date above against recent commits before trusting it, and update this file
+(per `CLAUDE.md`) whenever a significant feature lands, a bug here is fixed, or a new
+one is found — see [session-log.md](./session-log.md) for the running record of when
+that happens.
+
+Stable facts (how the system is built, what a table means, what an endpoint does)
+belong in [architecture.md](./architecture.md), [database.md](./database.md),
+[api.md](./api.md), [features.md](./features.md), or [decisions.md](./decisions.md)
+instead, and are only linked from here — not repeated. That split is the whole point
+of this file: one place to check "is this still true," instead of a fact drifting out
+of sync across five documents because it was only updated in one.
+
+## How these documents fit together
+
+| Document | Owns | Changes... |
+|---|---|---|
+| **current-state.md** (this file) | Open issues, unverified assumptions, what's confirmed working right now | Every session, whenever something is checked, fixed, or newly found |
+| [session-log.md](./session-log.md) | Chronological record of *what happened in each session* | Every session (append-only) |
+| [changelog.md](./changelog.md) | Chronological record of *what shipped* (features, fixes, migrations) | Whenever something ships (append-only) |
+| [roadmap.md](./roadmap.md) | Prioritized plan for what to do about open issues, and unbuilt features | Whenever priorities change |
+| [architecture.md](./architecture.md) | Stack, request flow, directory structure, security model — how the system is put together | Rarely — only when the structure actually changes |
+| [database.md](./database.md) | Schema, RLS policies, triggers, cron jobs — reference material | Only with a new migration |
+| [api.md](./api.md) | Edge function and external-API contracts — reference material | Only when an endpoint's behavior changes |
+| [features.md](./features.md) | Inventory of what's reachable in the product today | Whenever a feature ships, is removed, or is found to be unwired |
+| [decisions.md](./decisions.md) | Why non-obvious choices were made (ADR-style), append-only | Whenever a new non-obvious architectural choice is made |
+| [project-board.md](./project-board.md) | Kanban work tracker (Backlog/Ready/In Progress/Blocked/Testing/Done), cards reference `ISSUE-N` ids | Every session — kept current by `/checkpoint` |
+| [business-rules.md](./business-rules.md) | Product/business rules (when picks lock, how scoring and ties work, payment rules, permissions) — rules, not implementation | Only when an actual game/business rule changes, not when its implementation does |
+| [engineering-principles.md](./engineering-principles.md) | Coding standards and conventions (folder structure, naming, React/Supabase/SQL patterns, error handling, testing) | Rarely — only when a convention changes |
+
+A useful rule of thumb when you're not sure where something belongs: if the sentence
+you're about to write starts with "right now..." or "as of today...", it belongs in
+this file. If it starts with "the system is designed so that...", it belongs in
+architecture/database/api/features. If it starts with "we chose X because...", it
+belongs in decisions.md.
+
+## Repository snapshot
+
+- **Stack:** React 18 + Vite frontend, Supabase (Postgres + Auth + Edge Functions +
+  `pg_cron`) backend. No custom application server. Full detail:
+  [architecture.md](./architecture.md).
+- **Product:** a private Premier League "goals pot" prediction game — full detail:
+  [architecture.md § What this system is](./architecture.md#what-this-system-is).
+- **Tests:** none exist (ISSUE-16 below).
+- **CI/CD:** none found in the repo (no `.github/workflows/`, no other CI config).
+- **Version control:** one commit exists locally, no remote is configured yet
+  (`git remote -v` returns nothing). The repository's root `.gitignore` has been
+  populated and the secrets/artifacts that were briefly committed have been removed
+  from reachable history — see [Resolved issues](#resolved-issues), ISSUE-5 and
+  ISSUE-14.
+
+## What's confirmed working
+
+Confirmed by reading the code; **not** confirmed by running it against a live database
+or browser (see the [Verification status](#verification-status) table for what's
+actually been checked end-to-end):
+
+- Auth (sign up / sign in / forgot password), session handling, protected routes.
+- Browsing pots, members, gameweeks, and fixtures.
+- The `/pot/:potId/picks` flow (`PicksPage` + `hooks/useEntry.js`) for building and
+  submitting a 5-pick entry, with deadline and eligibility checks.
+- The scheduled pipeline shape `sync-fixtures` (daily) → `compute-deadlines` (hourly)
+  → `compute-scores` (every 3 min) → `settle-gameweek` (every 30 min) is internally
+  consistent — *whether it produces correct live output* depends on ISSUE-2 and
+  ISSUE-3 below, which are unverified.
+
+## Issue register
+
+Each issue has a stable `ISSUE-N` id — use it when cross-referencing from other
+documents or from commit messages, instead of re-describing the issue. IDs are never
+reused; when an issue is fixed, move its entry to
+[Resolved issues](#resolved-issues) rather than deleting it, so the history of "this
+was once broken" survives.
+
+### P0 — verify or fix before building further on pots/scoring
+
+These block confident work on anything downstream of them, because other decisions
+depend on their answers.
+
+#### ISSUE-1 — Pot creation likely violates its own RLS policy
+Both pot-creation code paths (`hooks/usePots.js:useCreatePot` and
+`components/pot/potManager.jsx:handleCreatePot`) insert the creator into
+`pot_members` as `role: 'admin'` immediately after creating the pot. The RLS policy
+governing that insert, `pot_members_insert_admin`, requires
+`is_pot_admin(pot_id) or is_app_admin()` — and `is_pot_admin` checks for an
+*existing* `pot_members` row with `role = 'admin'` for that pot, which cannot exist
+yet, since this insert is the first membership row. See the policy definition and
+mechanism in [database.md § Row Level Security summary](./database.md#row-level-security-summary)
+and the policy shape in [architecture.md § Security model](./architecture.md#security-model).
+**Status: unverified.** The deployed database may differ from the migrations in this
+repo (there is no git history, so there's no guarantee the migrations were the last
+thing applied) — this needs to be checked against the live Supabase project by
+attempting pot creation as a non-admin user, or by inspecting the live policy
+definitions directly. If confirmed, ordinary users cannot create pots today. Plan:
+[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+
+#### ISSUE-2 — `fixture_player_status` table missing from migrations
+Live, reachable frontend code (`hooks/useEntry.js:useFixturePlayerStatuses`,
+`hooks/useLiveScores.js`, `pages/GameweekPage.jsx`) reads from and subscribes to a
+`fixture_player_status` table that is not defined in any file under
+`supabase/migrations/`. Full column-level detail:
+[database.md § Schema drift](./database.md#schema-drift). **Status: unverified.**
+Either the deployed database has this table from an unversioned/manual change, in
+which case a migration should be written to capture its current shape, or the
+gameweek page's player-appearance UI (starting/bench/subbed badges) is currently
+broken against a from-migrations-only database. Plan:
+[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+
+#### ISSUE-3 — `player_fixture_goals` materialized view is never refreshed
+`compute-scores` (edge function, on a 3-minute cron) reads live goal counts from the
+`player_fixture_goals` materialized view. Nothing in the repository — no edge
+function, no cron job, no script — ever calls
+`select public.refresh_player_fixture_goals()`. Mechanism detail:
+[database.md § player_fixture_goals](./database.md#player_fixture_goals-materialized-view).
+**Status: unverified.** If nothing refreshes this view out-of-band (e.g. a
+dashboard-configured cron job not captured in `supabase/migrations/`), live scoring
+is silently computing results against stale — possibly permanently empty — goal
+counts, with no error raised anywhere. Plan:
+[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+
+#### ISSUE-4 — `sync-live-events` edge function is referenced but doesn't exist
+`supabase/migrations/003_cron_jobs.sql` schedules a call to
+`/functions/v1/sync-live-events` every 2 minutes, and `AdminDashboard.jsx` has a
+button that calls it manually. No `supabase/functions/sync-live-events/` directory
+exists anywhere in the repo. Endpoint-level detail:
+[api.md § Referenced but not implemented](./api.md#referenced-but-not-implemented-sync-live-events).
+The only code that actually populates `fixture_events` with live goals/cards/subs is
+a set of Playwright scripts meant to be run manually on someone's machine
+(`frontend/scripts/ws-live-events.js` and the `sync-whoscored-*` scripts), scraping
+WhoScored.com — see [architecture.md § Three football data providers](./architecture.md#three-football-data-providers).
+**Status: confirmed absent from the repo** (this is a directory-listing fact, not
+something that needs live-database verification) — what's unverified is whether the
+cron job is silently failing every 2 minutes in production, or whether it was
+deliberately removed/replaced by the manual scraper workflow. Plan:
+[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+
+### P1 — features that are half-built or internally inconsistent
+
+#### ISSUE-6 — Payments UI isn't wired up; `compute-scores` will void every entry
+`entry_payments`, `admin-actions`' `mark_paid`/`mark_unpaid` actions, and the
+auto-void-on-unpaid logic in `compute-scores` are all implemented and consistent with
+each other (see [api.md § admin-actions](./api.md#post-functionsv1admin-actions) and
+[database.md § entry_payments](./database.md#entry_payments)). The UI components that
+would let an admin actually mark someone paid — `components/admin/MemberTable.jsx`
+and `PaymentTable.jsx` — exist but are never imported by `AdminDashboard.jsx` or any
+other page. Every entry is created with `is_paid: false` by default and nothing in
+the reachable UI can change that. **Status: confirmed.** Every entry in every pot
+will be voided the first time `compute-scores` runs against real data, unless
+payments are being marked paid directly through the Supabase dashboard as a manual
+workaround. See also [decisions.md § Unpaid entries are voided automatically](./decisions.md#unpaid-entries-are-voided-automatically-at-scoring-time-not-at-submission-time)
+for the reasoning behind the design this breaks. Plan:
+[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+#### ISSUE-7 — Two pick-building flows enforce different eligibility rules
+`PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
+goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly
+excludes them (`.neq('position', 'Goalkeeper')`), a rule that exists only in that one
+component. Both flows independently query `available_players_by_gameweek`
+(see [database.md § available_players_by_gameweek](./database.md#available_players_by_gameweek-view))
+rather than sharing a single eligibility function. **Status: confirmed** (this is
+directly readable from both components' source, no live verification needed). A user
+who reaches the app through different links/pages can get a different eligible-player
+list for the same gameweek. This is a symptom of ISSUE-10 (two parallel data-fetching
+patterns), not an independent root cause. Plan:
+[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+#### ISSUE-8 — No self-serve pot-join flow
+`pots.invite_code` exists in the schema (unique-constrained — see
+[database.md § pots](./database.md#pots)) but no frontend code reads, generates, or
+redeems it. The only ways to become a pot member are (a) being the creator, or (b) an
+existing pot admin using `admin-actions`' `add_member` action — which itself has no
+UI trigger (the components that would call it are the same unwired `MemberTable.jsx`
+from ISSUE-6). **Status: confirmed.** This looks like a feature that was started
+(the column and its unique constraint exist) and not finished. Plan:
+[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+#### ISSUE-9 — `/admin` has no UI-level role gate
+`App.jsx`'s route table puts `/admin` behind `ProtectedRoute` (must be signed in) but
+not behind any admin check — any authenticated user can navigate to it and trigger
+`sync-fixtures`, `compute-scores`, and `settle-gameweek`. Of the edge functions it
+calls, only `admin-actions` checks the caller's role server-side; the
+sync/compute/settle functions have no auth check at all (see
+[api.md § Edge Functions](./api.md#2-edge-functions) for each function's auth
+posture). **Status: confirmed.** Low real-world severity today since `AdminDashboard`
+doesn't call `admin-actions` (see ISSUE-6), but the sync/compute/settle triggers are
+live and callable by anyone. Plan:
+[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+#### ISSUE-17 — Leaderboard ranking has no tie-break rule
+`settle-gameweek` ranks pot members purely by `picks_won` descending
+(`.order('picks_won', { ascending: false })`, then a JS `.sort((a, b) => b.picks_won -
+a.picks_won)`) with no secondary sort key anywhere in the query or the code. Two
+members with equal `picks_won` receive different, sequential ranks based on whatever
+order the rows happen to arrive in from Postgres — not a documented or deterministic
+rule (submission time, season-long strike rate, alphabetical, or anything else).
+Endpoint detail: [api.md § settle-gameweek](./api.md#post-functionsv1settle-gameweek).
+**Status: confirmed** (readable directly from the edge function's source, no live
+verification needed). Discovered while writing
+[business-rules.md](./business-rules.md), which could not state a tie-break rule
+because none currently exists in the system. Since pots involve real money (see
+[business-rules.md § Payment rules](./business-rules.md#payment-rules)), an
+undefined tie-break on the leaderboard is a fairness gap, not just a cosmetic one.
+Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
+
+#### ISSUE-10 — Duplicated data-fetching pattern
+`pages/PotDetail.jsx` and `components/pot/potManager.jsx` re-implement data
+fetching/mutation with local `useState`/`useEffect` + direct `supabase.from(...)`
+calls, duplicating logic that already exists as TanStack Query hooks in
+`hooks/usePots.js` and `hooks/useEntry.js`, which every other page uses. Structural
+detail: [architecture.md § Two competing data-fetching patterns](./architecture.md#two-competing-data-fetching-patterns);
+likely origin: [decisions.md § Two parallel data-fetching patterns](./decisions.md#apparent-drift-not-a-decision-two-parallel-data-fetching-patterns).
+**Status: confirmed.** ISSUE-7 (diverging eligibility rules) is a direct consequence
+of this duplication — every rule implemented in both places is a rule that can
+silently diverge. Plan:
+[roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+
+#### ISSUE-11 — Dead code, including a latent case-sensitivity import bug
+`components/entryBuilder.jsx`, `lib/gameAPI.js`, `lib/footballDataProvider.js`, and
+`lib/whoScored.js` have no importers anywhere in the reachable app (confirmed by
+grepping for each module's name across `frontend/src`). `entryBuilder.jsx` additionally
+imports `from '../lib/gameApi'` (lowercase `Api`) when the actual file is
+`lib/gameAPI.js` (uppercase) — this resolves on case-insensitive filesystems (Windows,
+default macOS) but would fail to resolve on a case-sensitive one (Linux — i.e. most CI
+runners and production containers), so this component would break a Linux build the
+moment anything imports it. `lib/whoScored.js` is additionally misplaced: it's a
+Node/Playwright script (not browser code) sitting inside the Vite-bundled `src/lib`
+tree. The two RPCs `gameAPI.js` calls, `get_or_create_entry` and `save_entry_picks`,
+are also absent from the migrations (see [database.md § Schema drift](./database.md#schema-drift))
+— lower priority than ISSUE-2 since this code path is unreachable today. **Status:
+confirmed.** Plan: [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+
+#### ISSUE-12 — Overlapping, unused football-data.org sync scripts
+Three standalone Node scripts (`frontend/scripts/fullSyncInsert.js`,
+`fullSyncPlayers.js`, `syncFootballData.js`) each independently implement
+similar-but-not-identical upsert logic against football-data.org v4, none of them
+invoked by the running app, cron, or any edge function. See
+[architecture.md § Three football data providers](./architecture.md#three-football-data-providers)
+and [decisions.md § Provider abstraction was planned but never completed](./decisions.md#provider-abstraction-was-planned-but-never-completed)
+for how this relates to the (also unused) `footballDataProvider.js` abstraction.
+**Status: confirmed.** Plan: [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+
+#### ISSUE-13 — Duplicate `.env` files
+A root-level `.env` and `frontend/.env.local` contain the same keys (Supabase URL/
+anon key/service-role key, football-data.org key, competition code/season). The root
+copy doesn't appear to be read by anything — see
+[architecture.md § Environment configuration](./architecture.md#environment-configuration)
+for the reasoning. Related to, but distinct from, the more urgent security question
+in ISSUE-5 (the root copy isn't gitignored). **Status: confirmed.** Plan:
+[roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+
+#### ISSUE-18 — `useAuth.js` logs the signed-in user's email to the browser console
+`hooks/useAuth.js`'s `onAuthStateChange` handler calls `console.log('auth changed',
+session?.user?.id, session?.user?.email)` on every auth state change. Low severity —
+visible only to the signed-in user in their own browser devtools, not exposed to
+anyone else — but it's a debug statement that shouldn't have shipped, and it's the
+kind of thing [engineering-principles.md § Logging](./engineering-principles.md#logging)
+now exists to prevent recurring. **Status: confirmed.** Plan:
+[roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+
+### P3 — known product gaps (unbuilt, not broken)
+
+#### ISSUE-15 — Overall (cross-gameweek) leaderboard is never populated
+`hooks/useLeaderboard.js` queries `leaderboard_snapshots` for `is_overall = true` when
+no specific gameweek is requested, but `settle-gameweek` only ever writes
+`is_overall: false` rows — see
+[database.md § leaderboard_snapshots](./database.md#leaderboard_snapshots) and
+[api.md § settle-gameweek](./api.md#post-functionsv1settle-gameweek). **Status:
+confirmed.** The season-long leaderboard view will always render empty. Plan:
+[roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
+
+#### ISSUE-16 — No automated tests
+No test runner is configured in `frontend/package.json` (no `test` script, no Jest/
+Vitest/Playwright-test dependency — Playwright is present only as a scraping tool,
+see [architecture.md § Three football data providers](./architecture.md#three-football-data-providers)),
+and no `*.test.*`/`*.spec.*` files exist anywhere in the repo. **Status: confirmed.**
+Given how much business logic lives in RLS policies, triggers, and edge functions
+(see [database.md § Functions & triggers](./database.md#functions--triggers)), this is
+a real regression risk with no safety net. Plan:
+[roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
+
+## Resolved issues
+
+#### ISSUE-5 — Repository has no git history; secrets aren't excluded from version control
+**Resolved 2026-08-03.** The repository's single prior commit had, in fact, already
+committed the root `.env` (containing a live Supabase service-role key, anon key, and
+an api-football key) plus both Playwright chrome-profile directories (ISSUE-14),
+because the root `.gitignore` was a 0-byte empty file — the risk this issue originally
+described ("must be fixed before the first commit") had already materialized by the
+time it was written. Since no remote was ever configured (`git remote -v` returned
+nothing) and nothing had been pushed anywhere, the fix was a local history reset
+rather than a filter-branch/BFG rewrite: the sole commit was un-made
+(`git update-ref -d refs/heads/master`), `.env` and the chrome-profile directories were
+untracked (`git rm --cached`, files kept on disk), a comprehensive root `.gitignore`
+was added, and a `.env.example` with placeholder values was created. The repository
+was then re-committed clean, so the secret no longer exists in any reachable commit.
+**Residual, non-blocking:** the original commit object is still present locally as a
+dangling object (recoverable via `git reflog`) until `git reflog expire --expire=now
+--all && git gc --prune=now` is run — this is an irreversible prune, left for the repo
+owner to run deliberately rather than performed automatically. See
+[session-log.md](./session-log.md) for the full session record.
+
+#### ISSUE-14 — Chrome profile directories in the working tree
+**Resolved 2026-08-03**, as part of the ISSUE-5 fix above — both
+`frontend/.chrome-profile/` and `frontend/chrome-profile/` were untracked from git
+(kept on disk) and are now excluded by the new root `.gitignore`. Whether to delete
+them from disk entirely (they're only needed if the WhoScored scraper workflow
+continues, per ISSUE-4) is a separate, not-yet-made decision.
+
+*(when a future issue is fixed and verified, move its entry here with the date, and a
+reference to the commit/PR that fixed it, instead of deleting it.)*
+
+## Verification status
+
+Which P0 items have actually been checked against the live Supabase project, as
+opposed to inferred from the migrations in this repo:
+
+| Issue | Checked against live DB? | Date | Result |
+|---|---|---|---|
+| ISSUE-1 (pot creation RLS) | No | — | — |
+| ISSUE-2 (`fixture_player_status`) | No | — | — |
+| ISSUE-3 (materialized view refresh) | No | — | — |
+| ISSUE-4 (`sync-live-events` cron failures) | No | — | — |
+
+Update this table the first time each item is actually checked, even if the result is
+"confirmed broken" — an unverified guess and a confirmed fact should not look the same
+on this page.
