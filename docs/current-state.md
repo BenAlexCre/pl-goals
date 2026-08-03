@@ -117,12 +117,45 @@ HTTP call at all — confirming the failure is specifically about the missing
 settings/secrets, not RLS or application logic. Direct consequence: `fixture_events`
 and `player_fixture_goals` are both empty — the entire scoring pipeline has never
 processed real data. **This makes ISSUE-3's "matview never refreshed" concern moot in
-practice** (there's nothing to refresh yet) but does not resolve it. **Status: still
-unresolved.** Fix is operational, not a migration: set the two Postgres GUC settings
-(or migrate every cron job onto the Vault-secret pattern consistently) before any of
-Milestone 4's cron-driven Edge Functions can be trusted to run.
+practice** (there's nothing to refresh yet) but does not resolve it. **Status: partially resolved, one layer still open.** Both missing Postgres GUC
+settings (`app.settings.supabase_url`, `app.settings.service_role_key`) are now set
+and correct — confirmed via a real post-fix cron run returning a structured HTTP
+response rather than a connection error. **A second, previously-masked root cause
+was found and fixed**: `app.settings.supabase_url` initially pointed at
+`http://127.0.0.1:54321` (host-only), which pg_net's in-container HTTP worker can't
+reach — corrected to `http://kong:8000` (the Docker-internal address). **A third,
+still-open root cause was found**: this local Kong instance requires an `apikey`
+header to route to `/functions/v1/*`, but `003_cron_jobs.sql`'s `cron.schedule()`
+calls only ever send `Authorization: Bearer` — every cron-triggered Edge Function
+call is rejected with `401 Missing authorization header`, confirmed by direct
+reproduction (a manually-added `apikey` header succeeds; the cron jobs' actual
+headers do not). **Applied 2026-08-03**: `006_fix_cron_job_headers.sql` unscheduled and re-scheduled
+the five affected jobs (new jobids 8–12) with both `Authorization` and `apikey`
+headers. Confirmed via `net._http_response`: `compute-scores-every-3-min` returned a
+real `200` on its first post-fix run — genuine end-to-end success, not just "cron
+didn't error." `compute-deadlines-hourly` and `settle-gameweek-every-30-min` were
+rescheduled identically but hadn't ticked again at verification time; `sync-fixtures-daily`
+won't tick until its next 05:00 UTC slot. All three are expected to succeed
+identically, not yet independently confirmed. `003_cron_jobs.sql` itself is
+untouched, as required. `sync-live-events-every-2-min` will
+continue failing even after this fix, separately, because the function it calls
+doesn't exist (`ISSUE-4`) — confirmed via both a direct curl 404 and, now, a real
+post-fix cron-triggered 404, distinguishing this from the
+apikey issue. See `session-log.md` for the full investigation.
 
 #### ISSUE-20 — Prototype tables have RLS disabled and full anonymous write access
+
+**Narrowed, 2026-08-03.** The replacement schema (`004`/`005`) is now live:
+`pot_prizes`, `game_entries` and its three per-mode children, `pot_standings_snapshots`,
+and `notifications` all shipped with RLS enabled and correct policies from creation
+— confirmed live, 10 policies across 7 tables, zero gap window. **The original
+finding below still applies, unchanged, to the 7 old prototype tables specifically**
+(`fixture_player_status`, `gameweek_pots`, `lms_entries`, `lms_picks`,
+`predictor_entries`, `predictor_picks`, `whoscored_fixture_map_staging`) — they were
+deliberately left untouched by `004`/`005` (per the "isolate, don't delete yet"
+plan) and remain exactly as exposed as ever. Closing this fully requires
+`deployment-checklist.md`'s Phase 8 (final removal of the isolated prototype
+objects), not yet done.
 **Confirmed live and still open.** `fixture_player_status`, `gameweek_pots`,
 `lms_entries`, `lms_picks`, `predictor_entries`, `predictor_picks`, and
 `whoscored_fixture_map_staging` all have `relrowsecurity = false` and full
@@ -154,10 +187,55 @@ names — `game_type`, `predictor_cycle_mode`, `lms_status`-equivalent — and w
 collide until the originals are removed). Most likely origin: these objects were
 created through Supabase Studio's no-code Table Editor, which executes as
 `supabase_admin` rather than the project owner's own `postgres` credential — see
-`session-log.md` for the full investigation. **Status: unresolved** — needs either
-the Supabase Dashboard's own delete UI (same privilege level that created these
-objects) or a Supabase support request. Blocks both ISSUE-20's fix and applying
-`004`/`005`.
+`session-log.md` for the full investigation. **Status: unresolved, but scope is now
+split into two tracks.** Track A — the four prototype columns added to the
+otherwise-`postgres`-owned `pots` table (`game_type`, `entry_fee`, `end_gameweek_id`,
+`predictor_cycle_mode`) — has **no ownership blocker**: `postgres` owns `pots` and
+can drop them directly, confirmed safe since both live rows sit at column defaults.
+Track B — the 7 tables, 11 functions, 1 debug view, and the 4 enum types those
+columns/tables reference — genuinely needs the Supabase Dashboard's delete UI (same
+privilege level that created these objects) or a Supabase support request. Blocks
+both ISSUE-20's permanent fix and applying `004`/`005`. See `session-log.md` for the
+full remediation plan, including which Dashboard surface to try first.
+
+**Execution attempt, 2026-08-03 (evening session):** ran the reviewed six-object
+isolation transaction (2 type renames + 4 column drops) as a single `begin`/`commit`
+block. It failed immediately on the first statement (`alter type public.game_type
+rename ...`) with `must be owner of type game_type` — direct, repeated confirmation
+that Track B's privilege gap is real and applies equally inside this local Docker
+stack, not just a hosted project (local Supabase's Postgres image deliberately
+mirrors the hosted platform's `postgres`/`supabase_admin` separation). The
+transaction rolled back cleanly with zero side effects (verified). **Lesson for the
+plan, not just a status update:** Track A (the 4 `pots` column drops) and Track B
+(the 2 type renames) must not be combined into one transaction — Track A remains
+immediately executable by `postgres`; Track B still needs the Dashboard/support
+path. `deployment-checklist.md`'s Phase 4 has been corrected to reflect this.
+
+**Resolved, 2026-08-03 (later the same evening).** Track B was completed via the
+Supabase Dashboard: `game_type` and `predictor_cycle_mode` renamed to
+`*_prototype_deprecated` (confirmed live, still `supabase_admin`-owned — renaming
+doesn't change ownership, only frees the name). Track A followed immediately
+(4 `pots` columns dropped, `postgres`-privileged, zero data loss — both rows still
+present, still named "Ben Test"). `004_game_engine_shared_platform.sql` and
+`005_game_engine_shared_platform_rls.sql` then applied with **zero errors across
+every statement**. Full verification: 7 new tables, all `postgres`-owned; 14 FKs,
+all correct (`restrict` on money tables, `cascade` on genuinely dependent child
+rows); 21 indexes; 5 triggers (including the new contract-immutability trigger);
+10 RLS policies across all 7 new tables, RLS enabled on all of them; every
+pre-existing table's row count unchanged. **ISSUE-21's Track A and Track B are both
+closed for the two colliding objects.** The 7 original prototype tables, 11
+functions, 1 debug view, and 2 non-colliding types (`lms_status`,
+`player_match_status`) remain untouched, exactly as the "isolate, don't delete yet"
+plan intended — final removal is `deployment-checklist.md` Phase 8, not done here.
+
+**Extends to `cron.job` too, confirmed 2026-08-03**: applying
+`006_fix_cron_job_headers.sql` found the same split one level further — `cron.job`
+has a `username` column, and `cron.unschedule(name)` only reaches jobs owned by the
+calling role. `sync-live-events-every-5-min` (jobid 7) is `supabase_admin`-owned
+(same as `lock-due-entries-every-minute`, jobid 6, which `006` never needed to
+touch) and could not be removed by `postgres`. Low severity — it just keeps failing
+on its pre-existing Vault error every 5 minutes, no data or security impact — but
+folded into Track B's scope rather than treated as a separate issue.
 
 #### ISSUE-2 — `fixture_player_status` table missing from migrations
 Live, reachable frontend code (`hooks/useEntry.js:useFixturePlayerStatuses`,

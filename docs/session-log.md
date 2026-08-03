@@ -13,6 +13,95 @@ from here.
 
 ---
 
+## 2026-08-03 (7) — Track B resolved; shared platform schema deployed
+
+**Prompted by:** continuing the deployment checklist. `006_fix_cron_job_headers.sql`
+was applied first (5 jobs fixed, 1 confirmed `200` end-to-end; the redundant
+`supabase_admin`-owned `sync-live-events-every-5-min` job left alone per explicit
+instruction, deferred to Track B). A first attempt to begin Track B (renaming the
+two colliding enum types) failed identically to the prior session's attempt —
+`must be owner of type game_type` — confirming nothing had changed. The user then
+completed the rename via the Supabase Dashboard directly.
+
+**Verified before proceeding** (not assumed): `game_type`/`predictor_cycle_mode` no
+longer exist under their original names; `*_prototype_deprecated` versions exist,
+still `supabase_admin`-owned. This cleared the way for Track A (4 `pots` columns
+dropped — `postgres`-privileged, zero data loss, confirmed) and then
+`004_game_engine_shared_platform.sql` / `005_game_engine_shared_platform_rls.sql`,
+both applied with **zero errors across every statement**.
+
+**Full verification performed, not assumed:** all 7 new tables exist and are
+`postgres`-owned; all 14 foreign keys present with correct `restrict`/`cascade`
+behavior per `schema-review.md`'s findings; 21 indexes; 5 triggers including the
+new `trg_pots_contract_immutable`; 10 RLS policies across all 7 tables with RLS
+enabled on every one; the 3 relevant functions `postgres`-owned; every pre-existing
+table's row count unchanged (`pots`=2, `pot_members`=1, `entry_payments`=1,
+`user_entries`=1, `user_entry_picks`=5). Cross-checked
+`supabase/functions/_shared/game-engine/types.ts` against the deployed schema
+field-by-field — exact match, no changes needed.
+
+**Result:** ISSUE-21 is resolved for the two objects that blocked deployment.
+ISSUE-20 is narrowed, not closed — the new schema is fully RLS-protected from
+creation, but the 7 original prototype tables remain exactly as exposed as before,
+deliberately untouched (Phase 8 of `deployment-checklist.md`, not yet done). The
+`sync-live-events-every-5-min` cron job and the 7 tables/11 functions/1 view/2
+non-colliding types are the complete remaining Track B/Phase 8 scope. Milestone 4
+has not begun.
+
+---
+
+## 2026-08-03 (6) — Local infrastructure diagnosed and partially fixed; six-object isolation attempted and correctly rolled back
+
+**Prompted by:** continuing the deployment checklist after Phase 1 (the two
+`app.settings.*` GUCs) was applied. A key scoping correction landed first: the
+database investigated all session is the **local Docker Supabase stack**, not a
+hosted project — confirmed via `inet_server_addr()` returning a Docker bridge
+address and `docker ps` showing the `supabase_*_pl-goals` container set. The user
+directed treating local Docker as the authoritative environment going forward and
+not comparing against any hosted project.
+
+**Edge runtime root cause:** not "simply stopped" — `supabase_vector_pl-goals`
+(the analytics log-shipping sidecar, unrelated to Edge Functions) was stuck in a
+Docker container-name conflict that aborted `supabase start` before it ever reached
+`edgeRuntime`. Fixed by removing the stale container and cycling `supabase stop` /
+`supabase start`. Verified directly via curl (401 for a real function, 404 for a
+nonexistent one) before trusting cron to prove it.
+
+**A second cron root cause found and fixed:** `app.settings.supabase_url` was set to
+`http://127.0.0.1:54321` — valid from the host, meaningless from inside the Postgres
+container where pg_net's HTTP worker actually runs. Corrected to `http://kong:8000`
+(Docker-internal DNS, confirmed via `docker network inspect`).
+
+**A third cron root cause found, not yet fixed:** this local Kong requires an
+`apikey` header to route to `/functions/v1/*`; `003_cron_jobs.sql` only ever sends
+`Authorization: Bearer`. Reproduced directly (curl with `apikey` added succeeds;
+without it, 401). Needs a new migration updating the cron job definitions — `003`
+itself isn't rewritten in place, per `engineering-principles.md`. Not written this
+session.
+
+**Six-object isolation transaction — approved, executed, correctly rolled back.**
+Ran the reviewed transaction (2 enum renames + 4 `pots` column drops) as a single
+`begin`/`commit` block. Failed immediately on the first statement — `must be owner
+of type game_type` — a direct, repeated confirmation that the ownership split
+(ISSUE-21) is real inside local Docker too, not just a hosted-project concern.
+Rolled back cleanly, zero side effects, verified. The mistake was combining Track A
+(the `postgres`-privileged column drops) and Track B (the `supabase_admin`-privileged
+type renames) into one transaction — corrected in `deployment-checklist.md` to run
+them separately, Track B first.
+
+**`/health` and `/drift` run** (the commands created earlier this session, now
+exercised for the first time): confirmed infrastructure/database/edge-runtime
+healthy, cron partially healthy (SQL layer fixed, HTTP delivery still blocked by the
+apikey gap), security still fully open (ISSUE-20 unchanged), docs one step stale
+(corrected in this session). No unexpected drift beyond what's already tracked.
+
+**Result:** ISSUE-19 is two-thirds resolved with one precisely-diagnosed remaining
+gap; ISSUE-20 is unchanged and open; ISSUE-21's Track A is ready and safe to execute
+independently, Track B still needs Dashboard/support access. Milestone 4 has not
+begun.
+
+---
+
 ## 2026-08-03 (5) — Live-evidence priority review, drift investigation, and the start of a three-game-mode platform rebuild
 
 **Prompted by:** a request to verify (using live Postgres/GitHub MCP evidence, not
