@@ -23,6 +23,13 @@ same player twice raises their threshold to 2 goals, etc.), the pick wins. Pots 
 leaderboard per gameweek and, by design, an overall season leaderboard too (though the
 overall leaderboard is currently never populated — ISSUE-15).
 
+**Forward-looking note (2026-08-03):** the product is being rebuilt to launch with
+three first-class game modes (Pick 5, Last Man Standing, Score Predictor) on a shared
+platform. [game-engine.md](./game-engine.md) is now the authoritative architecture
+specification for that rebuild — everything below in this document describes the
+system **as it exists today** (Pick 5 only); it will be updated to reflect the new
+architecture as each milestone actually ships, not before.
+
 The current data source is the Premier League (see `supabase/seed/seed_season.sql`),
 but the schema and edge functions are written generically against "leagues/seasons,"
 and there is evidence in `frontend/scripts/` of earlier/parallel work targeting the

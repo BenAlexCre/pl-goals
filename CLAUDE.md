@@ -492,3 +492,53 @@ If uncertain:
 Ask.
 
 Never guess.
+
+# MCP Usage
+
+Use MCP servers when they provide more reliable information than static code analysis.
+
+Filesystem
+
+- Repository navigation
+- Source inspection
+
+GitHub
+
+- Commits
+- Branches
+- PRs
+- Issues
+
+PostgreSQL
+
+- Schema
+- Tables
+- RLS
+- Functions
+- Triggers
+- Data validation
+
+Browser
+
+- UI debugging
+- Network requests
+- Console errors
+
+Playwright
+
+- Automated testing
+- Screenshots
+- Regression verification
+
+Docker
+
+- Container health
+- Logs
+- Networks
+- Volumes
+
+Prefer evidence from MCPs over assumptions.
+
+Do not invoke every MCP unnecessarily.
+
+Use only the minimum required for the task.

@@ -152,3 +152,60 @@ UI to mark a payment. Live status: [current-state.md ISSUE-6](./current-state.md
 Once payments UI exists, this design still leaves open a real product question worth
 deciding deliberately: should the deadline for marking paid be before or after the
 pick deadline?
+
+---
+
+## Three-game-mode platform rebuild: shared `game_entries` parent, not per-mode entry tables
+
+**What:** The product is being rebuilt to launch with three first-class game modes
+(Pick 5, Last Man Standing, Score Predictor), each pot locked to exactly one
+immutable `game_type`. Rather than three independent entry/pick table sets, entries
+share one parent table (`game_entries`) with thin, mode-specific extension tables
+(`game_entry_pick5`, `game_entry_lms`, `game_entry_predictor`); picks stay fully
+separate and typed per mode (`pick5_picks`/`lms_picks`/`predictor_picks`), never a
+polymorphic JSON table. Full specification: [game-engine.md](./game-engine.md).
+
+**Why:** three real, simultaneously-launching modes genuinely share the entry
+concept (a pot/user pairing with a payout and a settlement lifecycle) — building it
+three times would triple the payment-integration, RLS, and dashboard-query surface
+for no benefit. Picks stay separate because the three modes reference genuinely
+different foreign keys (players, teams, fixtures/scores) that a JSON payload
+couldn't be FK-constrained against without giving up real referential integrity.
+
+**What it rules out:** hybrid pots (a pot can never contain more than one game
+mode's entries — enforced structurally, not just by policy) and any future
+temptation to store a pick as an untyped blob for "flexibility." Also rules out
+preserving the previously-undocumented `supabase_admin`-owned LMS/Predictor
+prototype objects as the actual implementation — they're treated as a signal of
+business intent only; two real bugs were found in them during reverse-engineering
+(a referenced-but-never-created `lms_tiebreak_picks` table, and a `'winner'` enum
+value used but never added), confirming they were never a working reference to
+preserve. See [current-state.md ISSUE-20/ISSUE-21](./current-state.md#issue-20--prototype-tables-have-rls-disabled-and-full-anonymous-write-access)
+for the live state of the objects being replaced.
+
+---
+
+## Settlement logic lives in Edge Functions only, never in SQL functions
+
+**What:** All game-mode business logic — validation, scoring, settlement, payouts,
+standings — is implemented in TypeScript inside Edge Functions (the "Game Engine,"
+[game-engine.md § GE-6](./game-engine.md#ge-6-the-game-engine-contract)), dispatched
+by `pots.game_type`. SQL functions are limited to deriving or defaulting a column
+value from the row(s) being written (`set_updated_at`, `create_entry_payment`,
+`prevent_pot_contract_change`) — never orchestrating a multi-step business process.
+
+**Why:** this is a return to the pattern the original `compute-scores`/`settle-gameweek`
+Edge Functions already established, after the retired prototype broke from it. The
+prototype's SQL-function approach (`settle_gameweek`, `settle_lms_gameweek`,
+`settle_predictor_gameweek`, `settle_predictor_season`, `compute_live_scores`)
+produced two confirmed bugs and, for a time, an `anon`-callable `EXECUTE` grant on
+money-adjacent functions with no internal authorization check — see
+`session-log.md`'s Phase C. TypeScript in Edge Functions is unit-testable in
+isolation (Deno's built-in test runner, no new dependency) in a way raw PL/pgSQL
+functions in this codebase have not been.
+
+**What it rules out:** any future temptation to "just add a quick SQL function" for
+settlement convenience. A greenfield architectural review
+([schema-review.md](./schema-review.md)) is the standard this and every future
+migration is now held to, specifically to catch this kind of drift before it ships
+rather than after.

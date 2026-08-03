@@ -32,47 +32,49 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
-- **Payments UI** — `ISSUE-6` (P1) → [current-state.md](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry)
+- **Payments UI** — `ISSUE-6` (P1) → [current-state.md](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry). Scope now expands beyond Pick 5 — see [game-engine.md § GE-4.3/GE-4.4](./game-engine.md#ge-43-entry_payments-generalized).
 - **Reconcile the two pick-building flows** — `ISSUE-7` (P1) → [current-state.md](./current-state.md#issue-7--two-pick-building-flows-enforce-different-eligibility-rules)
-- **Finish or remove invite-code join flow** — `ISSUE-8` (P1) → [current-state.md](./current-state.md#issue-8--no-self-serve-pot-join-flow)
+- **Finish or remove invite-code join flow** — `ISSUE-8` (P1) → [current-state.md](./current-state.md#issue-8--no-self-serve-pot-join-flow). Redemption RPC (`redeem_invite()`) is drafted in `004_game_engine_shared_platform.sql`, deliberately missing `max_members`/`status` checks until Milestone 7 gives it a UI caller.
 - **Gate `/admin` behind a role check** — `ISSUE-9` (P1) → [current-state.md](./current-state.md#issue-9--admin-has-no-ui-level-role-gate)
-- **Define a leaderboard tie-break rule** — `ISSUE-17` (P1) → [current-state.md](./current-state.md#issue-17--leaderboard-ranking-has-no-tie-break-rule)
+- **Define a leaderboard tie-break rule** — `ISSUE-17` (P1) → [current-state.md](./current-state.md#issue-17--leaderboard-ranking-has-no-tie-break-rule). Now explicitly scoped into Milestone 4 (Pick 5) — see [game-engine.md § GE-5.1](./game-engine.md#ge-51-pick-5).
 - **Standardize on one data-fetching pattern** — `ISSUE-10` (P2) → [current-state.md](./current-state.md#issue-10--duplicated-data-fetching-pattern)
 - **Delete or finish dead code** (`entryBuilder.jsx`, `gameAPI.js`, `footballDataProvider.js`, `whoScored.js`) — `ISSUE-11` (P2) → [current-state.md](./current-state.md#issue-11--dead-code-including-a-latent-case-sensitivity-import-bug)
 - **Consolidate football-data.org sync scripts** — `ISSUE-12` (P2) → [current-state.md](./current-state.md#issue-12--overlapping-unused-football-dataorg-sync-scripts)
 - **Resolve duplicate `.env` files** — `ISSUE-13` (P2) → [current-state.md](./current-state.md#issue-13--duplicate-env-files)
 - **Remove debug `console.log` in `useAuth.js`** — `ISSUE-18` (P2) → [current-state.md](./current-state.md#issue-18--useauthjs-logs-the-signed-in-users-email-to-the-browser-console)
-- **Overall (cross-gameweek) leaderboard** — `ISSUE-15` (P3) → [current-state.md](./current-state.md#issue-15--overall-cross-gameweek-leaderboard-is-never-populated)
-- **Automated tests** — `ISSUE-16` (P3) → [current-state.md](./current-state.md#issue-16--no-automated-tests)
-- **Notifications** (deadline reminders, results) — no issue id, net-new feature → [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken)
+- **Overall (cross-gameweek) leaderboard** — `ISSUE-15` (P3) → [current-state.md](./current-state.md#issue-15--overall-cross-gameweek-leaderboard-is-never-populated). Design now exists (`pot_standings_snapshots`, [game-engine.md § GE-4.6](./game-engine.md#ge-46-pot_standings_snapshots)), implementation lands with Milestone 4.
+- **Automated tests** — `ISSUE-16` (P3) → [current-state.md](./current-state.md#issue-16--no-automated-tests). Partially addressed for new code going forward: the Game Engine framework has its own Deno test suite (Milestone 3); the original frontend/edge-function code this issue describes is still untested.
+- **Notifications** (deadline reminders, results) — no issue id, net-new feature → schema seam now exists (`notifications` table, [game-engine.md § GE-4.8](./game-engine.md#ge-48-notifications)); delivery mechanism still undesigned, deferred to Milestone 7.
 - **Avatar upload** — no issue id, net-new feature → [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken)
 
 ## Ready
 
-*(nothing ready right now — see [Blocked](#blocked) for what's queued behind live
-Supabase access)*
+- **Milestone 4 — Pick 5 implementation** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Approved to begin; not yet started. Reference implementation for LMS/Predictor; built as a sequence of small, individually-approved vertical slices (entry creation → pick submission → validation → locking → goal calculation → scoring → settlement → notifications → standings/leaderboard).
 
 ## In Progress
 
-*(nothing in progress right now)*
+*(nothing in progress right now — Milestone 4 is approved but not yet started)*
 
 ## Blocked
 
-- **Verify pot creation against live RLS policies** — `ISSUE-1` (P0) → [current-state.md](./current-state.md#issue-1--pot-creation-likely-violates-its-own-rls-policy).
-  Blocked on: live Supabase project access (dashboard or connected CLI) to test as a non-admin user.
-- **Verify `fixture_player_status` exists in the deployed schema** — `ISSUE-2` (P0) → [current-state.md](./current-state.md#issue-2--fixture_player_status-table-missing-from-migrations).
-  Blocked on: live Supabase project access to inspect the actual deployed schema.
+- **ISSUE-19 — cron-triggered Edge Function pipeline has a 100% failure rate** → [current-state.md](./current-state.md#issue-19--cron-triggered-edge-function-pipeline-has-a-100-failure-rate). Confirmed live, P0. Blocked on: an operational fix (setting `app.settings.supabase_url`/`service_role_key`, or migrating every cron job onto the Vault-secret pattern), not code.
+- **ISSUE-20 — prototype tables have RLS disabled and full anonymous write access** → [current-state.md](./current-state.md#issue-20--prototype-tables-have-rls-disabled-and-full-anonymous-write-access). Confirmed live, still exploitable, P0. Blocked on: ISSUE-21.
+- **ISSUE-21 — `postgres` role cannot alter `supabase_admin`-owned prototype objects** → [current-state.md](./current-state.md#issue-21--postgres-role-cannot-alter-supabase_admin-owned-prototype-objects). Blocks ISSUE-20's fix and applying `004`/`005`. Blocked on: Supabase Dashboard delete UI or a Supabase support request.
 - **Verify what (if anything) refreshes `player_fixture_goals`** — `ISSUE-3` (P0) → [current-state.md](./current-state.md#issue-3--player_fixture_goals-materialized-view-is-never-refreshed).
-  Blocked on: live Supabase project access to check for a dashboard-configured cron job not captured in migrations.
+  Live-verified as never refreshed; moot in practice until ISSUE-19 is fixed (nothing reaches it to refresh).
 - **Decide the live-events ingestion story** — `ISSUE-4` (P0) → [current-state.md](./current-state.md#issue-4--sync-live-events-edge-function-is-referenced-but-doesnt-exist).
-  Blocked on: a product decision (rebuild `sync-live-events` on api-football vs. formalize the WhoScored scraper), not a technical blocker — see [roadmap.md § P0 item 4](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+  Blocked on: a product decision (rebuild `sync-live-events` on api-football vs. formalize the WhoScored scraper), separate from the ISSUE-19 config fix both cron variants also need.
 
 ## Testing
 
-*(nothing in testing right now — no code changes have shipped yet)*
+*(nothing in testing right now — the Game Engine framework's own test suite lives with
+its code under `supabase/functions/_shared/game-engine/`, verified locally by the repo
+owner per `session-log.md`; no application feature has shipped yet)*
 
 ## Done
 
+- **Milestones 1–3: three-game-mode platform architecture, shared schema design, Game Engine framework** — 2026-08-03. No single `ISSUE-N` (this is the strategic rebuild superseding the retired LMS/Predictor prototype). See [game-engine.md](./game-engine.md), [schema-review.md](./schema-review.md), [session-log.md](./session-log.md#2026-08-03-5--live-evidence-priority-review-drift-investigation-and-the-start-of-a-three-game-mode-platform-rebuild). Framework verified by the repo owner running the Deno test suite locally.
+- **Live-evidence drift investigation: `/drift` command created; ISSUE-19/20/21 discovered and logged; ISSUE-1/2/3/4 verified against the live database** — 2026-08-03. See [session-log.md](./session-log.md#2026-08-03-5--live-evidence-priority-review-drift-investigation-and-the-start-of-a-three-game-mode-platform-rebuild).
 - **Repository hygiene remediation: secrets and Chrome-profile data removed from git tracking, comprehensive `.gitignore` added, `.env.example` created** — `ISSUE-5`, `ISSUE-14` (both P0/P2) → [current-state.md § Resolved issues](./current-state.md#resolved-issues). 2026-08-03. See [session-log.md](./session-log.md).
 - **Documentation restructure: issue register, cross-references, doc ownership map** — 2026-08-03. No `ISSUE-N` (this was the documentation work that created the issue-tracking system itself). See [session-log.md](./session-log.md#2026-08-03-2--documentation-restructure-remove-duplication-add-cross-references).
 - **Initial documentation pass: `docs/` created from a full codebase audit** — 2026-08-03. No `ISSUE-N`. See [session-log.md](./session-log.md#2026-08-03-1--initial-documentation-pass).

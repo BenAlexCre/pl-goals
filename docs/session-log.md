@@ -13,6 +13,114 @@ from here.
 
 ---
 
+## 2026-08-03 (5) — Live-evidence priority review, drift investigation, and the start of a three-game-mode platform rebuild
+
+**Prompted by:** a request to verify (using live Postgres/GitHub MCP evidence, not
+documentation alone) whether ISSUE-1 was still the highest-priority issue, followed by
+a long, multi-part session that escalated through a full drift investigation, an
+emergency-security attempt, an ownership investigation, and — on discovering the
+undocumented prototype objects represented real, wanted product features — a full
+architecture-and-implementation restart for a three-game-mode platform (Pick 5, Last
+Man Standing, Score Predictor). This is one continuous session; the entry below is
+grouped by phase rather than by every individual turn.
+
+**Phase A — Live-evidence priority review.** Queried the live Supabase project
+directly (Postgres MCP) rather than trusting the docs. Found: ISSUE-1 is actually
+**resolved** live (an undocumented RLS policy fixes the circularity) — the documented
+P0 was stale. Found something far more severe and previously unknown: **every
+cron-triggered Edge Function has a 100% failure rate since the earliest recorded run**
+(missing `app.settings.supabase_url`/`service_role_key`), now `ISSUE-19`. Also found
+6 undocumented tables (`gameweek_pots`, `lms_entries`, `lms_picks`, `predictor_entries`,
+`predictor_picks`, `whoscored_fixture_map_staging`) plus `fixture_player_status`, all
+owned by `supabase_admin` rather than `postgres`.
+
+**Phase B — `/preflight` drift investigation and reconciliation planning.** Full
+table/view/function/trigger/policy/extension/index/column comparison between live
+Postgres and `supabase/migrations/`. Produced a categorized drift report (Missing
+migration / Expected / Unexpected / Manual production change) and a reconciliation
+plan. Created `.claude/commands/drift.md` (a new mandatory pre-release command) at the
+user's request.
+
+**Phase C — Emergency security attempt, blocked.** Designed and got approval for a
+Phase 1 fix (enable RLS + minimum policies on the 7 exposed tables, revoke `EXECUTE`
+on the related settlement functions and `lock_gameweek_entries()`). **Execution
+failed**: `must be owner of table fixture_player_status`. Investigated why — every
+prototype object is owned by `supabase_admin`, not `postgres`; `postgres` has no
+privilege over `supabase_admin`'s objects by Supabase's own platform design. Most
+likely origin: these objects were created via Supabase Studio's no-code Table Editor,
+which executes as `supabase_admin`, not the SQL Editor/CLI path (which uses
+`postgres` and produced everything in `001`–`003`). **This fix was never applied —
+ISSUE-20 (the live RLS/anon-write exposure) and ISSUE-21 (the ownership split) are
+both still open.**
+
+**Phase D — Strategic pivot.** The user determined the undocumented LMS/Predictor
+objects represented a real, wanted product direction, not just tech debt: the
+application will launch with three fully production-ready game modes (Pick 5, Last
+Man Standing, Score Predictor), one game mode per pot, immutable after creation. The
+prototype objects are treated as a signal of business intent only — reverse-engineered
+for what they were trying to do (including finding two real bugs in the process: an
+`lms_tiebreak_picks` table referenced but never created, and a `'winner'` value used
+but never added to the `lms_status` enum), not preserved as an implementation.
+
+**Phase E — Milestones 1–3, designed, reviewed, and built.**
+- **Milestone 1** — [docs/game-engine.md](./game-engine.md) created as the
+  authoritative architecture specification: shared platform vs. mode-specific
+  boundary, the `game_entries` shared-parent entry architecture (chosen over three
+  fully independent entry systems, and over a polymorphic JSON picks table), an
+  eight-method Game Engine lifecycle contract, a `game_type`-keyed dispatcher,
+  Edge-Functions-only settlement (SQL functions retired), and a `GE-N` traceability
+  scheme mirroring `ISSUE-N`.
+- **Milestone 2** — `supabase/migrations/004_game_engine_shared_platform.sql` and
+  `005_game_engine_shared_platform_rls.sql` drafted (shared schema, payments,
+  `pot_prizes`, `game_entries` + three thin per-mode children, standings,
+  invitations, notifications). Then put through a full greenfield architectural
+  review (`docs/schema-review.md`) that found real issues in the first draft —
+  most seriously, `on delete cascade` on the two money-holding tables (`pot_prizes`,
+  `game_entries`), which could silently destroy payout records, and an internal
+  inconsistency where three different tables represented the same "gameweek- vs.
+  season-scoped" concept three different ways. Findings were classified
+  Critical/Required-before-launch/Recommended/Optional; every Critical and
+  Required-before-launch item was applied (cascade → restrict, a unified
+  `pot_scope` enum, a redundant `settled` column removed, the immutability trigger
+  broadened beyond just `game_type`, missing `check` constraints added,
+  `pot_prizes.updated_at` added, column-level RLS narrowing on two `update`
+  policies); Recommended/Optional items (extra indexes, `redeem_invite()`'s
+  `max_members`/`status` checks, removing `pots.game_type`'s default) were
+  deliberately deferred, not silently applied. A re-review confirmed the changes
+  were internally consistent with no new issues introduced. **Neither migration has
+  been applied to the live database** — blocked by ISSUE-21 (they recreate several
+  object names `supabase_admin` still owns).
+- **Milestone 3** — the Game Engine framework itself, under
+  `supabase/functions/_shared/game-engine/` (`types.ts`, `contracts.ts`,
+  `dispatcher.ts`, `errors.ts`, `index.ts`): the `GameEngine` interface, the
+  `GameEngineContext` dependency-injection boundary, and a registration/resolution
+  dispatcher — deliberately zero mode-specific logic, zero scoring, zero
+  settlement. Verified via a dedicated `TestGameEngine` fixture
+  (`__fixtures__/test-game-engine.ts`, explicitly marked framework-verification-only,
+  never imported by production code) and `framework-verification.test.ts`, proving
+  registration, resolution, the unknown-engine error path, duplicate-registration
+  handling, and — the one thing the earlier `dispatcher.test.ts` couldn't prove —
+  that dependency injection actually carries the same object references through the
+  dispatcher, not just that the types line up. **The user ran these tests locally
+  and confirmed all pass.** `docs/game-engine.md` was rewritten a second time to
+  incorporate the Milestone 2 review outcomes and add the sections requested as the
+  document's final, authoritative form: shared services, folder structure,
+  dependency boundaries, five Mermaid sequence diagrams (submission, locking,
+  scoring, settlement, notifications), and ten architectural invariants.
+
+**Result:** the repository now has a complete, reviewed, framework-verified
+architecture and skeleton for the three-game-mode rebuild, entirely as
+not-yet-applied migrations and not-yet-wired-in code — nothing described in this
+entry is live. Two genuinely urgent, independent-of-this-rebuild issues remain fully
+open on the live project: ISSUE-19 (the cron pipeline has never worked) and ISSUE-20
+(a live, unauthenticated read/write exposure on money-adjacent tables), both blocked
+in different ways by ISSUE-21 (the ownership split). Milestone 4 (Pick 5
+implementation, as the reference implementation for the other two modes) is approved
+to begin but has not started, pending a fresh `/checkpoint`-triggered review of this
+entry.
+
+---
+
 ## 2026-08-03 (4) — Repository hygiene remediation: secrets and browser-profile data removed from git tracking
 
 **Prompted by:** user request to run `/preflight` for repository hygiene ahead of the

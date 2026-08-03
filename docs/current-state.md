@@ -33,6 +33,8 @@ of sync across five documents because it was only updated in one.
 | [project-board.md](./project-board.md) | Kanban work tracker (Backlog/Ready/In Progress/Blocked/Testing/Done), cards reference `ISSUE-N` ids | Every session — kept current by `/checkpoint` |
 | [business-rules.md](./business-rules.md) | Product/business rules (when picks lock, how scoring and ties work, payment rules, permissions) — rules, not implementation | Only when an actual game/business rule changes, not when its implementation does |
 | [engineering-principles.md](./engineering-principles.md) | Coding standards and conventions (folder structure, naming, React/Supabase/SQL patterns, error handling, testing) | Rarely — only when a convention changes |
+| [game-engine.md](./game-engine.md) | **Authoritative forward-looking architecture spec** for the three-game-mode platform rebuild (Pick 5, Last Man Standing, Score Predictor) — shared entities, Game Engine contract, dispatcher, folder structure, sequence diagrams, invariants | Whenever a milestone lands or an architectural decision changes; cited by `GE-N` id |
+| [schema-review.md](./schema-review.md) | Point-in-time architectural review of the Milestone 2 migrations (`004`/`005`) — findings ranked Critical/High/Medium/Low | Snapshot document — a new review gets a new file or a dated addendum, not a rewrite of this one |
 
 A useful rule of thumb when you're not sure where something belongs: if the sentence
 you're about to write starts with "right now..." or "as of today...", it belongs in
@@ -49,11 +51,27 @@ belongs in decisions.md.
   [architecture.md § What this system is](./architecture.md#what-this-system-is).
 - **Tests:** none exist (ISSUE-16 below).
 - **CI/CD:** none found in the repo (no `.github/workflows/`, no other CI config).
-- **Version control:** one commit exists locally, no remote is configured yet
-  (`git remote -v` returns nothing). The repository's root `.gitignore` has been
+- **Version control:** the repository has one clean commit, pushed to
+  `origin/main` (`github.com/BenAlexCre/pl-goals`). The root `.gitignore` has been
   populated and the secrets/artifacts that were briefly committed have been removed
   from reachable history — see [Resolved issues](#resolved-issues), ISSUE-5 and
   ISSUE-14.
+- **Strategic direction (2026-08-03):** the product is being rebuilt as a
+  three-game-mode platform (Pick 5, Last Man Standing, Score Predictor), all
+  launch-quality, all first-class — see [game-engine.md](./game-engine.md), now the
+  authoritative architecture spec. Milestones 1–3 (specification, shared schema
+  design, Game Engine framework) are complete and verified; Milestone 4 (Pick 5
+  implementation) has not started — see
+  [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). **Nothing from
+  this effort is live yet**: `supabase/migrations/004_game_engine_shared_platform.sql`
+  and `005_game_engine_shared_platform_rls.sql` exist in the repo but cannot be
+  applied to the live database until the prototype objects blocking them are removed
+  (ISSUE-21), and the Game Engine framework code
+  (`supabase/functions/_shared/game-engine/`) is unwired to any deployed Edge
+  Function. The previously-undocumented `supabase_admin`-owned LMS/Predictor
+  prototype tables/functions this replaces are treated as retired business-intent
+  signal, not a preserved implementation — see
+  [game-engine.md § GE-15](./game-engine.md#ge-15-explicitly-deferred--not-carried-forward).
 
 ## What's confirmed working
 
@@ -83,22 +101,63 @@ was once broken" survives.
 These block confident work on anything downstream of them, because other decisions
 depend on their answers.
 
-#### ISSUE-1 — Pot creation likely violates its own RLS policy
-Both pot-creation code paths (`hooks/usePots.js:useCreatePot` and
-`components/pot/potManager.jsx:handleCreatePot`) insert the creator into
-`pot_members` as `role: 'admin'` immediately after creating the pot. The RLS policy
-governing that insert, `pot_members_insert_admin`, requires
-`is_pot_admin(pot_id) or is_app_admin()` — and `is_pot_admin` checks for an
-*existing* `pot_members` row with `role = 'admin'` for that pot, which cannot exist
-yet, since this insert is the first membership row. See the policy definition and
-mechanism in [database.md § Row Level Security summary](./database.md#row-level-security-summary)
-and the policy shape in [architecture.md § Security model](./architecture.md#security-model).
-**Status: unverified.** The deployed database may differ from the migrations in this
-repo (there is no git history, so there's no guarantee the migrations were the last
-thing applied) — this needs to be checked against the live Supabase project by
-attempting pot creation as a non-admin user, or by inspecting the live policy
-definitions directly. If confirmed, ordinary users cannot create pots today. Plan:
-[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+#### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
+**Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
+(26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
+calls an Edge Function (`sync-fixtures-daily`, `compute-deadlines-hourly`,
+`compute-scores-every-3-min`, `settle-gameweek-every-30-min`, both
+`sync-live-events-*` variants) has failed **every single time it has ever run** —
+e.g. `compute-scores-every-3-min` is 4,256/4,256 failed, `sync-live-events-every-2-min`
+is 6,382/6,382 failed. Root cause: `app.settings.supabase_url` and
+`app.settings.service_role_key` were never set on the database
+(`ERROR: unrecognized configuration parameter`), and the newer Vault-secret variant
+of the live-events job fails separately because `vault.decrypted_secrets` has zero
+rows. The only job that has ever succeeded, `lock-due-entries-every-minute`, makes no
+HTTP call at all — confirming the failure is specifically about the missing
+settings/secrets, not RLS or application logic. Direct consequence: `fixture_events`
+and `player_fixture_goals` are both empty — the entire scoring pipeline has never
+processed real data. **This makes ISSUE-3's "matview never refreshed" concern moot in
+practice** (there's nothing to refresh yet) but does not resolve it. **Status: still
+unresolved.** Fix is operational, not a migration: set the two Postgres GUC settings
+(or migrate every cron job onto the Vault-secret pattern consistently) before any of
+Milestone 4's cron-driven Edge Functions can be trusted to run.
+
+#### ISSUE-20 — Prototype tables have RLS disabled and full anonymous write access
+**Confirmed live and still open.** `fixture_player_status`, `gameweek_pots`,
+`lms_entries`, `lms_picks`, `predictor_entries`, `predictor_picks`, and
+`whoscored_fixture_map_staging` all have `relrowsecurity = false` and full
+`SELECT/INSERT/UPDATE/DELETE` grants to both `anon` and `authenticated` — meaning
+anyone with the public (non-secret) anon key can currently read and write
+`gameweek_pots.total_pot`, `lms_entries.payout_amount`/`status`, and
+`predictor_entries.payout_amount`/`total_points` with no authentication at all. A
+fix (enable RLS + minimum policies + revoke `EXECUTE` on the five related
+non-`security definer` settlement functions and `lock_gameweek_entries()`) was
+designed and approved but **could not be applied**: all of these objects are owned
+by `supabase_admin`, and the project's `postgres` role has no privilege to alter
+objects it doesn't own — see ISSUE-21. The subsequent strategic decision to rebuild
+these game modes from scratch (see [game-engine.md](./game-engine.md)) means the fix
+is now "replace, not patch," but **the live exposure has not been closed** — it
+remains exploitable until the prototype objects are actually dropped or their
+ownership is resolved. Treat as live and urgent independent of the Game Engine
+rebuild's timeline.
+
+#### ISSUE-21 — `postgres` role cannot alter `supabase_admin`-owned prototype objects
+**Confirmed live**, 2026-08-03. Every object identified as "missing migration" in the
+drift investigation (7 tables, 11 functions, 1 debug view) is owned by
+`supabase_admin`; every object defined in `supabase/migrations/001`–`003` is owned by
+`postgres`. `postgres` is not a member of `supabase_admin` (by Supabase's own,
+deliberate platform design — this isolation is normal, not a misconfiguration) and
+has no privilege to `ALTER`/`DROP` anything `supabase_admin` owns, including enabling
+RLS (ISSUE-20) or dropping the prototype tables to make way for
+`004_game_engine_shared_platform.sql` (which recreates several of the same object
+names — `game_type`, `predictor_cycle_mode`, `lms_status`-equivalent — and will
+collide until the originals are removed). Most likely origin: these objects were
+created through Supabase Studio's no-code Table Editor, which executes as
+`supabase_admin` rather than the project owner's own `postgres` credential — see
+`session-log.md` for the full investigation. **Status: unresolved** — needs either
+the Supabase Dashboard's own delete UI (same privilege level that created these
+objects) or a Supabase support request. Blocks both ISSUE-20's fix and applying
+`004`/`005`.
 
 #### ISSUE-2 — `fixture_player_status` table missing from migrations
 Live, reachable frontend code (`hooks/useEntry.js:useFixturePlayerStatuses`,
@@ -288,6 +347,18 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-1 — Pot creation likely violates its own RLS policy
+**Resolved, confirmed live 2026-08-03** (verification, not a fix performed this
+session). Live inspection of `pg_policy` on `pot_members` found an additional policy,
+`"users can insert own admin membership"` (`insert with check ((user_id = auth.uid())
+and (role = 'admin'::member_role))`), that isn't in `002_rls_policies.sql` — it lets
+a user insert themselves as the first admin without needing to already be one,
+directly resolving the circularity this issue originally described. **Not captured
+in any migration** — same root cause as ISSUE-21 (an out-of-band change, likely via
+the Supabase SQL Editor given `pot_members` is `postgres`-owned). Recommend this
+policy gets captured properly in the Milestone 2+ baseline migration rather than
+left as an undocumented fact about the live database.
+
 #### ISSUE-5 — Repository has no git history; secrets aren't excluded from version control
 **Resolved 2026-08-03.** The repository's single prior commit had, in fact, already
 committed the root `.env` (containing a live Supabase service-role key, anon key, and
@@ -324,10 +395,13 @@ opposed to inferred from the migrations in this repo:
 
 | Issue | Checked against live DB? | Date | Result |
 |---|---|---|---|
-| ISSUE-1 (pot creation RLS) | No | — | — |
-| ISSUE-2 (`fixture_player_status`) | No | — | — |
-| ISSUE-3 (materialized view refresh) | No | — | — |
-| ISSUE-4 (`sync-live-events` cron failures) | No | — | — |
+| ISSUE-1 (pot creation RLS) | **Yes** | 2026-08-03 | Resolved — an undocumented policy fixes it, see [Resolved issues](#resolved-issues) |
+| ISSUE-2 (`fixture_player_status`) | **Yes** | 2026-08-03 | Table exists live — confirms this is a migration gap, not a broken frontend |
+| ISSUE-3 (materialized view refresh) | **Yes** | 2026-08-03 | Confirmed never refreshed — but moot in practice today, since ISSUE-19 means no data ever reaches it anyway |
+| ISSUE-4 (`sync-live-events` cron failures) | **Yes** | 2026-08-03 | Confirmed failing on every run — see ISSUE-19 for the full pipeline-wide root cause |
+| ISSUE-19 (cron pipeline failure) | **Yes** | 2026-08-03 | Confirmed 100% failure rate since the earliest recorded run — see entry above |
+| ISSUE-20 (prototype RLS/anon-write exposure) | **Yes** | 2026-08-03 | Confirmed live and still open |
+| ISSUE-21 (ownership split) | **Yes** | 2026-08-03 | Confirmed live and still open |
 
 Update this table the first time each item is actually checked, even if the result is
 "confirmed broken" — an unverified guess and a confirmed fact should not look the same

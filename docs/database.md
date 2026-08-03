@@ -16,6 +16,14 @@ system), [api.md](./api.md) (what reads/writes it via edge functions).
 Engine: Postgres 17 (`supabase/config.toml`, `major_version = 17`). Extensions:
 `uuid-ossp`, `pg_cron`, `pg_trgm`.
 
+**Not yet reflected below:** `004_game_engine_shared_platform.sql` and
+`005_game_engine_shared_platform_rls.sql` exist in `supabase/migrations/` but have
+not been applied to the live database (blocked by
+[current-state.md ISSUE-21](./current-state.md#issue-21--postgres-role-cannot-alter-supabase_admin-owned-prototype-objects))
+and are not described in this document yet. See [game-engine.md](./game-engine.md)
+for the schema they define and [schema-review.md](./schema-review.md) for the design
+review behind their current form.
+
 ## Enums
 
 | Type | Values |
