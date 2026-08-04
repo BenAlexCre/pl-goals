@@ -306,6 +306,16 @@ list for the same gameweek. This is a symptom of ISSUE-10 (two parallel data-fet
 patterns), not an independent root cause. Plan:
 [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
+**Partially addressed 2026-08-04, for the new implementation only.** Milestone 4
+Slice 2's `Pick5Engine.validateEntry()`
+(`supabase/functions/_shared/game-engine/pick5/engine.ts`) picks one rule and
+enforces it server-side: **goalkeepers are excluded** — a decision made explicitly
+for this slice (confirmed with the repo owner) rather than inherited from either
+prototype flow. This does **not** resolve ISSUE-7 as originally described: `PicksPage`
+and `PotDetail.jsx` are unchanged, still diverge from each other, and neither is wired
+to the new engine yet. Close this issue for real only once the frontend cuts over to
+`submit-pick5-picks` and the two old flows are retired.
+
 #### ISSUE-8 — No self-serve pot-join flow
 `pots.invite_code` exists in the schema (unique-constrained — see
 [database.md § pots](./database.md#pots)) but no frontend code reads, generates, or
@@ -510,6 +520,23 @@ for a problem that no longer exists would add unneeded complexity. No longer
 blocks any Milestone 4+ slice. See [session-log.md](./session-log.md) for the
 full investigation record, both the original root-cause phase and this
 re-verification.
+
+#### ISSUE-23 — `available_players_by_gameweek` never filtered out non-playing staff ('Coach')
+**Discovered and resolved 2026-08-04**, while building `Pick5Engine.validateEntry()`
+(Milestone 4, Slice 2). `public.players.position` has a live `'Coach'` value —
+confirmed via `select distinct position from public.players`, which returned
+`Coach, Defence, Goalkeeper, Midfield, Offence` — and
+`available_players_by_gameweek` (`001_initial_schema.sql`) never excluded it. A
+coach cannot score a goal, so any mode reading this view could have offered one as a
+pickable/predictable "player." Not a product decision like ISSUE-7's goalkeeper
+question — a coach is never a legitimate pick under any mode's rules, so this was
+fixed at the shared view level, not inside Pick 5's own code:
+`008_fix_available_players_view_excludes_coaches.sql` adds `and (p.position is null
+or p.position <> 'Coach')` to the view. Verified live: `select distinct position from
+available_players_by_gameweek` now returns only `Defence, Goalkeeper, Midfield,
+Offence` — `Goalkeeper` still present at the view level, correctly, since excluding
+it is Pick 5-specific business logic (ISSUE-7's resolution, above), not a shared-view
+concern.
 
 #### ISSUE-14 — Chrome profile directories in the working tree
 **Resolved 2026-08-03**, as part of the ISSUE-5 fix above — both

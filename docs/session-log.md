@@ -13,6 +13,115 @@ from here.
 
 ---
 
+## 2026-08-04 (11) — Milestone 4, Slice 2: Pick 5 pick submission
+
+**Goal:** implement pick submission for Pick 5 as the next vertical slice, per
+docs/game-engine.md § GE-12, following the same small-slice/checkpoint
+discipline as Slice 1 — production quality, no temporary implementations,
+every schema change as a migration, fully-typed Edge Function, tests, docs
+kept in sync, stop before Slice 3.
+
+**Decision needed before implementation:** `Pick5Engine.validateEntry()`
+needs a goalkeeper eligibility rule, and `ISSUE-7`/`business-rules.md` are
+explicit that the prototype's two pick-building flows disagree and no rule
+can be asserted. Asked the repo owner directly rather than inventing one:
+**goalkeepers are excluded** in the new implementation.
+
+**What was built:**
+- `007_pick5_picks.sql` — the `pick5_picks` table (mirrors the retired
+  prototype's `user_entry_picks` shape: `pick_position`, `player_id`,
+  `goal_threshold`, `goals_scored`, `result`), RLS enabled with **only** a
+  select-for-members policy (no client insert/update/delete — every write
+  goes through the new Edge Function, matching `game_entry_pick5`'s existing
+  pattern). Ported the prototype's goal-threshold-recompute trigger, but
+  found and fixed a real bug while porting it: the original only handled
+  INSERT/DELETE; this implementation's picks are written via `upsert` on
+  `(game_entry_id, pick_position)`, so a resubmission runs as UPDATEs, which
+  the original trigger shape would have silently ignored, leaving stale
+  thresholds. Added `update of player_id` to the trigger and rewrote the
+  function to recompute **both** the old and new player's counts on a
+  position change. Proved this exact scenario live via direct SQL before
+  building the Edge Function, then proved it again end-to-end through the
+  real API afterward.
+- `_shared/game-engine/pick5/` (`engine.ts`, `errors.ts`, `index.ts`,
+  `engine.test.ts`) — `Pick5Engine`, the first real `GameEngine`
+  implementation (GE-6). `validateEntry()` is fully implemented: exactly 5
+  picks, duplicates allowed, each player checked against
+  `available_players_by_gameweek` for the entry's gameweek, goalkeepers
+  rejected. The other seven lifecycle methods throw
+  `GameEngineNotImplementedError('pick5', ...)`, per the pattern
+  `errors.ts` already documented for incremental landing. Registers itself
+  via `registerEngine('pick5', ...)` as an import-time side effect — `pick5`
+  is now resolvable through the dispatcher for the first time.
+- `submit-pick5-picks/` (`index.ts`, `validate.ts`, `validate.test.ts`) —
+  same auth pattern as `get-or-create-pick5-entry` (user-scoped client for
+  identity, service-role client for writes). Checks ownership/pot-type
+  explicitly, then calls `resolveEngine('pick5').validateEntry()` before
+  writing anything; a `Pick5ValidationError` maps to `400`, anything else to
+  `500`. Picks are written via `upsert` (not delete+insert), so a rejected
+  resubmission can never partially clobber a previously-valid pick set.
+- **`008_fix_available_players_view_excludes_coaches.sql`** — a second,
+  unplanned finding while building eligibility checks:
+  `select distinct position from players` returned `Coach` as a live value
+  alongside the real playing positions, and `available_players_by_gameweek`
+  never filtered it out (logged as `ISSUE-23`, resolved immediately). Fixed
+  at the shared view level, not inside `Pick5Engine` — unlike goalkeeper
+  exclusion, this isn't a product decision (a coach cannot score under any
+  mode's rules), and Score Predictor (Milestone 6) will read the same view
+  for goalscorer candidates.
+- `frontend/src/hooks/usePick5Entry.js` — added `useSubmitPick5Picks()`,
+  same shape as Slice 1's hook. Not wired into a page yet, same as Slice 1.
+- **Doc-consistency fix, not a new decision**: `game-engine.md` § GE-8.1
+  described "the RLS policy plus a trigger calling `validateEntry()` again"
+  — impossible to reconcile with GE-6 (`validateEntry()` is TypeScript,
+  invoked by an Edge Function) and GE-10 (no business logic in SQL).
+  Rewrote GE-8.1 to describe what was actually built: Edge Function →
+  `Pick5Engine.validateEntry()` → service-role write, with no
+  client-reachable insert policy on the pick table at all. Also updated
+  GE-4.5, GE-7, GE-9, GE-12, GE-17, and the document's own status header to
+  reflect Slice 2's actual state — `database.md` deliberately left alone,
+  consistent with Slice 1 (still tracked as pending a full Milestone-4-scale
+  update, not a per-slice one).
+
+**Verification:**
+- 39/39 Deno unit tests pass (21 new: 11 for `Pick5Engine.validateEntry()`
+  covering exact-5, duplicates, goalkeeper rejection, coach rejection,
+  ineligible/unknown player rejection, non-pending-entry rejection,
+  malformed-pick rejection, and de-duplication of repeated player IDs before
+  querying; 10 for `submit-pick5-picks`'s request validation; existing
+  dispatcher/framework/Slice-1 suites unaffected).
+- Migration `007` applied via `supabase db push --local` after first running
+  `supabase migration repair --status applied 004 005 006` — **found a
+  pre-existing gap**: `004`–`006` had been applied directly via `psql`
+  earlier this project (not through the CLI), so
+  `supabase_migrations.schema_migrations` only listed `001`–`003`. Left
+  uncorrected, the next `db push` would have tried to re-run `004`–`006` and
+  conflicted. Repaired (bookkeeping only, no SQL re-executed) rather than
+  left for a future surprise.
+- Full clean restart (`supabase stop`/`start`) so the Edge Runtime picked up
+  the new `submit-pick5-picks` directory (same lesson as Slice 1 — hot
+  reload doesn't cover new function directories).
+- Direct SQL proof of the trigger fix (insert 5 picks with duplicates,
+  confirm thresholds; update one pick's `player_id`, confirm both the old
+  and new player's thresholds recompute correctly) before writing any
+  application code.
+- Live end-to-end proof via a real `@supabase/supabase-js` client (brand-new
+  user, real JWT, `functions.invoke()`, zero manual headers — same rigor as
+  the `ISSUE-22` re-verification): valid 5-pick submission succeeds and
+  produces correct thresholds; goalkeeper pick rejected `400` and leaves the
+  previous valid picks untouched; a legitimate resubmission changing one
+  pick's player correctly reflows thresholds for both players; wrong pick
+  count rejected `400`; missing auth header rejected `401`; a second user
+  reading the first user's `pick5_picks` gets an empty, RLS-filtered result.
+  All test data and the temporary verification script were removed
+  afterward; row counts confirmed back to baseline.
+
+**Status:** Slice 2 implemented and fully verified live. **Not committed** —
+per instruction, awaiting the repo owner's review and explicit approval
+before Slice 3 begins.
+
+---
+
 ## 2026-08-04 (10) — ISSUE-22 re-verified and confirmed fixed by CLI/Edge Runtime upgrade
 
 **Goal:** re-verify ISSUE-22 from scratch against a freshly-upgraded local

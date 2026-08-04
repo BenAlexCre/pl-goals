@@ -49,11 +49,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4, Slice 2 — Pick submission** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Next slice, not started, pending review of Slice 1.
+- **Milestone 4, Slice 3** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 2 is approved. Candidates: `lockEntries()` wiring into `compute-deadlines`, or `calculateScore()`.
 
 ## In Progress
 
-*(nothing in progress — Slice 1 complete, awaiting review before Slice 2 begins)*
+*(nothing in progress — Slice 2 implemented and verified, awaiting review/approval before Slice 3 begins)*
 
 ## Blocked
 
@@ -66,9 +66,7 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Testing
 
-*(nothing in testing right now — the Game Engine framework's own test suite lives with
-its code under `supabase/functions/_shared/game-engine/`, verified locally by the repo
-owner per `session-log.md`; no application feature has shipped yet)*
+- **Milestone 4, Slice 2 — Pick submission** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `submit-pick5-picks` Edge Function + `Pick5Engine.validateEntry()` (the first real Game Engine contract implementation) + `pick5_picks` table (`007`) + `available_players_by_gameweek` fix (`008`, `ISSUE-23`). 39/39 Deno unit tests pass; verified live end-to-end (valid submission, goalkeeper rejection, wrong-count rejection, no-auth 401, cross-user RLS denial, and the threshold-recompute-on-resubmit fix) via a real `supabase.functions.invoke()` client. **Not yet committed** — awaiting review/approval (see `session-log.md`).
 
 ## Done
 

@@ -29,3 +29,30 @@ export function useGetOrCreatePick5Entry() {
     },
   })
 }
+
+// Milestone 4, Slice 2 (pick submission) — docs/game-engine.md § GE-5.1/GE-6.
+// Calls submit-pick5-picks, which runs Pick5Engine.validateEntry() (the Game
+// Engine contract, for real, for the first time) before writing to
+// pick5_picks. playerIds must be an array of exactly 5 player IDs (duplicates
+// allowed — picking the same player more than once is a legitimate strategy,
+// see docs/business-rules.md § How scoring works).
+//
+// Not wired into any page yet, same as useGetOrCreatePick5Entry — pairs with
+// a picks UI, which is follow-up scope, not this slice.
+export function useSubmitPick5Picks() {
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ gameEntryId, playerIds }) => {
+      const { data, error } = await supabase.functions.invoke('submit-pick5-picks', {
+        body: { game_entry_id: gameEntryId, player_ids: playerIds },
+      })
+      if (error) throw error
+      if (data?.error) throw new Error(data.error)
+      return data.picks
+    },
+    onSuccess: (_picks, vars) => {
+      qc.invalidateQueries({ queryKey: ['pick5-picks', vars.gameEntryId] })
+    },
+  })
+}

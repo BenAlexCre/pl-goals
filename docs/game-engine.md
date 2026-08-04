@@ -1,13 +1,15 @@
 # Game Engine — Architectural Specification
 
-Last reviewed: 2026-08-03. Status: **authoritative.** This document is now the blueprint
+Last reviewed: 2026-08-04. Status: **authoritative.** This document is now the blueprint
 every migration, Edge Function, frontend page, RLS policy, and test is measured against.
 Milestone 1 (this specification) and Milestone 2 (shared schema) are complete and have
 passed a full architectural review — see [schema-review.md](./schema-review.md) for the
 review itself and `session-log.md` for what was applied versus deliberately deferred.
 Milestone 3 (the Game Engine framework — folder structure, interfaces, dispatcher, shared
-types, dependency injection) is complete as of this revision; no game mode logic, scoring,
-or settlement exists yet. See [GE-12](#ge-12-milestone-plan) for exact status per milestone.
+types, dependency injection) is complete. Milestone 4 (Pick 5) is in progress: Slice 1
+(entry creation) and Slice 2 (pick submission — the first real `validateEntry()`
+implementation, `Pick5Engine`) are done; scoring, locking, and settlement don't exist yet.
+See [GE-12](#ge-12-milestone-plan) for exact status per milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
 described in [current-state.md](./current-state.md) — those objects communicated *business
@@ -137,6 +139,16 @@ game_entries
   └── game_entry_predictor  (game_entry_id, total_points, exact_score_count, correct_scorer_count)
 ```
 
+**Milestone 4, Slice 2** added `pick5_picks` (`007_pick5_picks.sql`): one row per
+`(game_entry_id, pick_position)`, `player_id`, `goal_threshold`/`goals_scored`/`result`
+— mirrors the retired prototype's `user_entry_picks` shape exactly (that part of the
+prototype was correct; see [GE-15](#ge-15-explicitly-deferred--not-carried-forward)).
+Unlike `game_entries` (which has client-reachable `insert`/`update` policies, even if
+the current Edge Function doesn't use them), `pick5_picks` has **no client-insert
+policy at all**, same as `game_entry_pick5` — every write goes through
+`submit-pick5-picks`, which calls `Pick5Engine.validateEntry()` first. See
+[GE-8.1](#ge-81-submission-flow)'s revised text for why.
+
 Each carries a `check` constraint guarding against a provably-invalid state discovered
 during the review (`picks_won <= picks_total`; `current_cycle >= 1`; `competitive_status =
 'eliminated'` iff `eliminated_gameweek_id is not null`; every count `>= 0`).
@@ -223,19 +235,28 @@ Supabase client.
 
 **Implemented as of Milestone 3** — `supabase/functions/_shared/game-engine/dispatcher.ts`.
 A single registry, keyed by `GameType`, resolved via `resolveEngine(gameType)`. Edge
-functions never branch on `game_type` directly. No mode is registered yet — calling
-`resolveEngine('pick5')` today throws `UnknownGameTypeError`, correctly, since no Pick 5
-implementation exists until Milestone 4. Registration is a one-line side-effecting import
+functions never branch on `game_type` directly. **As of Milestone 4 Slice 2**, `pick5` is
+registered — any Edge Function importing
+`_shared/game-engine/pick5/index.ts` triggers `registerEngine('pick5', new Pick5Engine())`
+as a side effect before that function's handler runs. `resolveEngine('last_man_standing')`
+and `resolveEngine('score_predictor')` still throw `UnknownGameTypeError`, correctly, since
+neither mode exists yet (Milestones 5/6). Registration is a one-line side-effecting import
 each mode's own module performs when it lands — the dispatcher has zero import-time
 knowledge of any mode, in either direction (see [GE-18](#ge-18-dependency-boundaries)).
 
 ## GE-8. Flows (narrative — see [GE-19](#ge-19-sequence-diagrams) for the diagrams)
 
 ### GE-8.1 Submission flow
-Browser (RLS-enforced) → insert/update into the mode's pick table, gated by `game_entries.status
-= 'pending'` in the RLS policy → `validateEntry()` runs client-side first for fast feedback;
-server-side enforcement is the RLS policy plus a trigger calling `validateEntry()` again —
-client checks are a UX nicety, never the enforcement mechanism.
+**Revised in Milestone 4, Slice 2** (`submit-pick5-picks`) to match GE-6/GE-10 exactly
+— the original text below described a SQL trigger calling `validateEntry()`, which
+can't be true (`validateEntry()` is a TypeScript method per GE-6, and GE-10 forbids
+business logic in SQL). Actual flow: Browser → Edge Function (`submit-pick5-picks`)
+→ `Pick5Engine.validateEntry()` (server-side, authoritative) → on success, a
+service-role write to the mode's pick table. The pick table itself has **no
+client-insert RLS policy** (`007_pick5_picks.sql`) — the Edge Function is the only
+write path, so there's no separate trigger-based enforcement layer to keep in sync
+with the TypeScript rule. Client-side `validateEntry()`-equivalent checks are a UX
+nicety only, same as before, never the enforcement mechanism.
 
 ### GE-8.2 Locking flow
 `pg_cron` → Edge Function → dispatcher → each mode's `lockEntries()` → `game_entries.status =
@@ -273,6 +294,7 @@ Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, whic
 | `settle-gameweek` | Extended to drive settlement via the dispatcher (not yet wired) |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
+| `submit-pick5-picks` (new, Milestone 4 Slice 2) | First Edge Function to call a real dispatcher-resolved Game Engine method — `resolveEngine('pick5').validateEntry(ctx, entry, picks)`. Writes `pick5_picks` via upsert on `(game_entry_id, pick_position)` only after validation passes |
 | Prototype SQL functions (`settle_gameweek`, `settle_lms_gameweek`, `settle_predictor_gameweek`, `settle_predictor_season`, `compute_live_scores`) | Retired, not ported |
 
 **Milestone 3 note:** the framework module exists standalone and is not yet imported by any
@@ -311,7 +333,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 1 | Architecture finalized, specification produced and approved | **Done** |
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
-| 4 | Pick 5 implementation | Not started |
+| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation) and Slice 2 (pick submission, first real `validateEntry()` implementation) done; Slice 3+ (locking, scoring, settlement, standings) not started |
 | 5 | Last Man Standing implementation | Not started |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
@@ -396,7 +418,10 @@ supabase/functions/
       __fixtures__/
         test-game-engine.ts        FRAMEWORK VERIFICATION ONLY — never imported by production code
       index.ts                     barrel export
-      pick5/                       Milestone 4 — empty until then
+      pick5/                       Milestone 4 — validateEntry() implemented (Slice 2);
+                                    lockEntries/calculateScore/settle/generateStandings/
+                                    determineWinner/awardPrize/notifyUsers all still throw
+                                    GameEngineNotImplementedError, pending later slices
       lms/                         Milestone 5 — empty until then
       predictor/                   Milestone 6 — empty until then
   compute-scores/                  existing — will import _shared/game-engine (Milestone 4+)
@@ -404,6 +429,9 @@ supabase/functions/
   settle-gameweek/                 existing — will import _shared/game-engine (Milestone 4+)
   admin-actions/                   existing — unchanged
   sync-fixtures/                   existing — unchanged
+  get-or-create-pick5-entry/       NEW — Milestone 4 Slice 1 (not a dispatcher call, see GE-9)
+  submit-pick5-picks/              NEW — Milestone 4 Slice 2, first real dispatcher call
+                                    (resolveEngine('pick5').validateEntry())
 ```
 
 Each mode's future subdirectory (`pick5/`, `lms/`, `predictor/`) will contain exactly one
