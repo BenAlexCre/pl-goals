@@ -98,60 +98,6 @@ was once broken" survives.
 
 ### P0 — verify or fix before building further on pots/scoring
 
-#### ISSUE-22 — Edge Runtime's default JWT verification rejects GoTrue's ES256 tokens; no authenticated Edge Function call works locally
-**Confirmed live, root cause proven 2026-08-03–04** (title kept for stable anchor
-continuity — see below for why "Kong" was the wrong initial suspect). A real user
-session token (from a genuine sign-up/sign-in against local Auth) is rejected on
-**every** Edge Function tested, including the pre-existing, unrelated
-`admin-actions` — not specific to Slice 1's new code.
-
-**Root cause, proven by direct inspection, not inferred:**
-1. Kong has **no JWT plugin enabled at all** (`KONG_PLUGINS=request-transformer,cors`)
-   — it cannot be the component rejecting the token. Its `request-transformer` Lua
-   config (read directly from `/home/kong/kong.yml`) substitutes in a hardcoded
-   legacy HS256 demo JWT *only* when the `apikey` header exactly matches the known
-   publishable/secret key — this is why adding `apikey` "fixed" cron
-   ([ISSUE-19](#issue-19--cron-triggered-edge-function-pipeline-has-a-100-failure-rate)):
-   it wasn't Kong requiring the header for routing, it was Kong swapping in a
-   working token. A real user's Authorization header, which doesn't match that
-   substitution rule, passes through to the backend **completely unmodified**.
-2. GoTrue is correctly configured (`GOTRUE_JWT_VALIDMETHODS=HS256,RS256,ES256`, a
-   real ES256 key present, `kid` matches issued tokens exactly) — not the faulty
-   component either.
-3. **The Edge Runtime container is the actual culprit**: `SUPABASE_INTERNAL_FUNCTIONS_CONFIG`
-   shows `verifyJWT: true` by default for every function (nothing in `config.toml`
-   overrides this), and its only verification credential is
-   `SUPABASE_INTERNAL_JWT_SECRET` — a single legacy shared HS256 secret, with no
-   configured awareness of GoTrue's ES256 key at all. Any real ES256 token fails
-   unconditionally, before any function code runs.
-
-**Distinguished from an application bug**: the no-auth-header test correctly
-reached the function's own code and returned its own error, for `admin-actions`
-too — the rejection happens entirely upstream, in the Edge Runtime's pre-function
-gate, not in this project's code.
-
-**Known upstream issue, not local misconfiguration.** CLI v2.71.1+ switched the
-local default from HS256 to symmetric-key to ES256 asymmetric signing; installed
-CLI here is v2.75.0 (past that switch). No `config.toml` option exists to opt out
-([supabase/cli#4726](https://github.com/supabase/cli/issues/4726), an open feature
-request, closed without a stated fix). Multiple matching upstream reports remain
-open or closed-without-documented-resolution
-([supabase/supabase#42810](https://github.com/supabase/supabase/issues/42810),
-[#42244](https://github.com/supabase/supabase/issues/42244)). Installed Edge
-Runtime is v1.70.0; latest is v1.74.3 — its changelog from v1.73.10 onward has no
-JWT/ES256 entry, so **upgrading is not proven to fix this**, only worth trying as a
-low-risk next step. A community-confirmed workaround exists (`verify_jwt = false`
-per function, relying on the function's own internal `auth.getUser()` call instead
-— which both `admin-actions` and the new function already do), not yet applied
-here per explicit instruction to prove root cause before implementing anything.
-
-**Status: root cause proven, not yet fixed.** Blocks true end-to-end verification
-of any authenticated user flow in this environment, including every remaining
-Milestone 4+ slice involving a real signed-in user.
-
-These block confident work on anything downstream of them, because other decisions
-depend on their answers.
-
 #### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
 **Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
 (26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
@@ -185,9 +131,11 @@ the five affected jobs (new jobids 8–12) with both `Authorization` and `apikey
 headers. Confirmed via `net._http_response`: `compute-scores-every-3-min` returned a
 real `200` on its first post-fix run — genuine end-to-end success, not just "cron
 didn't error." `compute-deadlines-hourly` and `settle-gameweek-every-30-min` were
-rescheduled identically but hadn't ticked again at verification time; `sync-fixtures-daily`
-won't tick until its next 05:00 UTC slot. All three are expected to succeed
-identically, not yet independently confirmed. `003_cron_jobs.sql` itself is
+rescheduled identically. **Independently confirmed 2026-08-04** via `/health`:
+both have since ticked and `succeeded` with real `net._http_response` rows
+(`compute-deadlines-hourly` at each hour boundary, `settle-gameweek-every-30-min`
+every 30 minutes) — no longer just "expected to succeed." `sync-fixtures-daily`
+still hasn't ticked at a verification time (05:00 UTC schedule). `003_cron_jobs.sql` itself is
 untouched, as required. `sync-live-events-every-2-min` will
 continue failing even after this fix, separately, because the function it calls
 doesn't exist (`ISSUE-4`) — confirmed via both a direct curl 404 and, now, a real
@@ -507,6 +455,62 @@ dangling object (recoverable via `git reflog`) until `git reflog expire --expire
 owner to run deliberately rather than performed automatically. See
 [session-log.md](./session-log.md) for the full session record.
 
+#### ISSUE-22 — Edge Runtime's default JWT verification rejected GoTrue's ES256 tokens; no authenticated Edge Function call worked locally
+**Resolved 2026-08-04, fixed by a Supabase CLI/Edge Runtime upgrade.** Root cause
+was proven 2026-08-03–04 (see git history of this file for the full original
+investigation): the Edge Runtime's internal `verifyJWT` gate (not Kong, not
+GoTrue) only knew a legacy shared HS256 secret and rejected every real,
+ES256-signed user session token unconditionally, before any function code ran —
+tracked upstream at
+[supabase/cli#4453](https://github.com/supabase/cli/issues/4453) (a raw
+`Uint8Array` vs `CryptoKey` type bug in the `jose`-based verification), closed
+"not planned." At the time, upgrading was explicitly "not recommended as a fix"
+because no changelog entry documented a corresponding fix.
+
+**Re-verified from scratch 2026-08-04** after the user upgraded the Supabase CLI:
+- **Versions confirmed, not assumed**: CLI `2.111.0` (was `2.75.0`); Edge Runtime
+  `v1.74.2` (was `v1.70.0`) via `docker inspect`; GoTrue `v2.194.0` (was
+  `v2.186.0`); Kong unchanged at `v2.8.1` (`KONG_PLUGINS=request-transformer,cors`,
+  still no JWT plugin — confirms Kong was never the mechanism, consistent with the
+  original root-cause finding).
+- **Clean restart performed** (`supabase stop` / `supabase start`, genuinely new
+  images pulled, not a reused container), all services healthy before testing
+  (confirmed via `/health`).
+- **Fresh, real-client test**: a brand-new user was signed up and signed in
+  against local Auth (no reused tokens), then called via
+  `supabase.functions.invoke()` — the actual `supabase-js` client path a real
+  frontend uses, zero manual headers — against both `admin-actions` (pre-existing,
+  unrelated function) and `get-or-create-pick5-entry` (Slice 1). JWT header
+  confirmed still `ES256`-signed, same key as before — the client-side signing
+  behavior did not change, only the Edge Runtime's ability to verify it.
+  - `admin-actions` → `403` (not `401`): proves the JWT was verified and accepted;
+    the `403` is the function's own authorization logic correctly rejecting a
+    non-admin user — this is what correct behavior looks like, not a new failure.
+  - `get-or-create-pick5-entry` → genuine `200` success payload
+    (`{created: true, ...}`), a real row written to `game_entries` and
+    `game_entry_pick5`.
+  - Edge Runtime logs captured the definitive mechanism: `"Legacy token type
+    detected, attempting HS256 verification"` immediately followed by successful
+    request-serving log lines for `compute-scores`, `admin-actions`, and
+    `get-or-create-pick5-entry` — the Edge Runtime now differentiates token types
+    instead of assuming HS256 unconditionally, which is the fix.
+- **Classification: ✅ Fixed by update.** Behavior changed from unconditional
+  rejection to correct verification for both a pre-existing function and Slice 1's
+  new function, with no application code changes on either side.
+- Test data (the temporary user, `pot_members`, `game_entries`,
+  `game_entry_pick5` rows) was cleaned up via direct SQL after verification;
+  confirmed `auth.users` and `game_entries` row counts back to their pre-test
+  values.
+
+**Consequence**: the `verify_jwt = false` + `auth.getUser()` workaround
+(objective 5 of the re-verification request) was evaluated as **not applicable**
+— it was only being considered because ISSUE-22 was still open; since the
+upgrade resolves it at the platform level, adopting a per-function workaround
+for a problem that no longer exists would add unneeded complexity. No longer
+blocks any Milestone 4+ slice. See [session-log.md](./session-log.md) for the
+full investigation record, both the original root-cause phase and this
+re-verification.
+
 #### ISSUE-14 — Chrome profile directories in the working tree
 **Resolved 2026-08-03**, as part of the ISSUE-5 fix above — both
 `frontend/.chrome-profile/` and `frontend/chrome-profile/` were untracked from git
@@ -531,6 +535,7 @@ opposed to inferred from the migrations in this repo:
 | ISSUE-19 (cron pipeline failure) | **Yes** | 2026-08-03 | Confirmed 100% failure rate since the earliest recorded run — see entry above |
 | ISSUE-20 (prototype RLS/anon-write exposure) | **Yes** | 2026-08-03 | Confirmed live and still open |
 | ISSUE-21 (ownership split) | **Yes** | 2026-08-03 | Confirmed live and still open |
+| ISSUE-22 (Edge Runtime JWT verification) | **Yes** | 2026-08-04 | Resolved by CLI/Edge Runtime upgrade, see [Resolved issues](#resolved-issues) |
 
 Update this table the first time each item is actually checked, even if the result is
 "confirmed broken" — an unverified guess and a confirmed fact should not look the same

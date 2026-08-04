@@ -13,6 +13,67 @@ from here.
 
 ---
 
+## 2026-08-04 (10) — ISSUE-22 re-verified and confirmed fixed by CLI/Edge Runtime upgrade
+
+**Goal:** re-verify ISSUE-22 from scratch against a freshly-upgraded local
+Supabase CLI, per explicit instruction not to assume the upgrade fixed anything
+without direct evidence, and not to begin Milestone 4 Slice 2 until this was
+resolved and reported.
+
+**What was done:**
+- Confirmed versions directly rather than assuming: CLI `2.111.0` (`supabase
+  --version`), Edge Runtime `v1.74.2` (`docker inspect` on the image tag),
+  GoTrue `v2.194.0`, Kong unchanged at `v2.8.1` with
+  `KONG_PLUGINS=request-transformer,cors` (still no JWT plugin).
+- Performed a clean `supabase stop`/`supabase start`, pulling genuinely new
+  images (Edge Runtime, GoTrue, Postgres, PostgREST, Storage, Realtime,
+  postgres-meta, Studio, Mailpit, Logflare, Vector all updated); confirmed all
+  12 containers healthy except the known non-blocking `vector` restart loop.
+- Ran `/health`: infrastructure, database (GUCs confirmed set and non-empty via
+  `SHOW`/`current_setting`, not just `pg_settings`), Edge Runtime, and Kong all
+  ✅; Kong confirmed to route `/functions/v1/*` correctly using the **exact**
+  header shape the cron jobs actually send (`apikey` + `Authorization: Bearer
+  <service_role_key>`), live `200`. Cron ⚠️ and Security ⚠️ only for
+  already-tracked, pre-existing items (`ISSUE-4`'s missing `sync-live-events`
+  function, the `supabase_admin`-owned prototype cron job deferred to Phase 8,
+  and `ISSUE-20`'s 7 unprotected prototype tables) — no regressions found.
+  Along the way, independently confirmed `compute-deadlines-hourly` and
+  `settle-gameweek-every-30-min` have now actually ticked and succeeded
+  post-`006` (previously only "expected to succeed") — see the ISSUE-19 entry
+  in `current-state.md`.
+- Signed up a brand-new test user against local Auth (no reused tokens), signed
+  in for a fresh session, and called `admin-actions` and
+  `get-or-create-pick5-entry` via `supabase.functions.invoke()` — the real
+  `supabase-js` client path, zero manual headers, exactly as the frontend does.
+  JWT confirmed still ES256-signed (same key as before the upgrade).
+- Result: `admin-actions` → `403` (JWT accepted; correctly denied by the
+  function's own authorization logic, not by the Edge Runtime gate).
+  `get-or-create-pick5-entry` → genuine `200` with a real row written to
+  `game_entries`/`game_entry_pick5`. Edge Runtime logs captured the mechanism:
+  `"Legacy token type detected, attempting HS256 verification"` followed by
+  successful serving of all three functions tested — the Edge Runtime now
+  differentiates token types instead of unconditionally assuming HS256.
+- Classified: **✅ Fixed by update.** Cleaned up all test data (temp user,
+  `pot_members`, `game_entries`, `game_entry_pick5` rows) and the temporary
+  Node test script afterward; confirmed row counts back to pre-test values and
+  no leftover files in the repo.
+- Updated `current-state.md` (ISSUE-22 moved to Resolved issues with full
+  evidence; ISSUE-19's cron confirmation strengthened; verification-status
+  table row added) and `project-board.md` (ISSUE-22 removed from Blocked,
+  added to Done; Slice 1's Done entry updated to note the auth-layer path is
+  now also confirmed).
+
+**Objective 5 (evaluate `verify_jwt=false` + `auth.getUser()`):** not
+applicable — that was only under consideration because ISSUE-22 was still
+open. Since the upgrade fixes it at the platform level, no per-function
+workaround is warranted.
+
+**Final recommendation given to the user:** Slice 1 remains valid and is
+already committed (`de3165d`); no code changes were needed. Milestone 4 Slice
+2 is **not** started — awaiting explicit approval as instructed.
+
+---
+
 ## 2026-08-04 (9) — ISSUE-22 root cause investigation
 
 **Prompted by:** a request to prove ISSUE-22's root cause rather than act on the
