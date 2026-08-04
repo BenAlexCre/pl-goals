@@ -13,6 +13,120 @@ from here.
 
 ---
 
+## 2026-08-04 (9) — ISSUE-22 root cause investigation
+
+**Prompted by:** a request to prove ISSUE-22's root cause rather than act on the
+inferred "Kong expects HS256" hypothesis from the previous entry, and to determine
+whether it's an infrastructure bug, a configuration issue, an application bug, or
+outdated tooling — with an explicit instruction not to implement any workaround
+until the cause was proven.
+
+**Investigated, in order:** `supabase/config.toml` (no `verify_jwt`/`[functions.*]`
+override anywhere); Kong's container environment and its actual declarative config
+at `/home/kong/kong.yml` (had to disable Git Bash's automatic Unix-path-to-Windows-path
+mangling, `MSYS_NO_PATHCONV=1`, to read a container-internal path); GoTrue's
+container environment; the Edge Runtime container's environment; and public
+Supabase CLI/edge-runtime GitHub issues and release changelogs via `WebSearch`/`WebFetch`.
+
+**Found:** the original "Kong requires HS256" hypothesis was wrong in an important
+way — **Kong has no JWT plugin enabled at all** and never validates the token
+itself; it only conditionally *substitutes* a working legacy token via
+`request-transformer` Lua when `apikey` matches a known static key (which is what
+actually made the `ISSUE-19` cron fix work — not "Kong needing the header to
+route," as previously assumed). The real gate is the **Edge Runtime's own
+`verifyJWT: true` default**, checked against a single hardcoded legacy HS256
+secret with no awareness of GoTrue's ES256 key at all. GoTrue itself is correctly
+configured and not at fault. Confirmed via `admin-actions` (pre-existing, untouched
+by Slice 1) failing identically, and the no-auth-header path correctly reaching
+each function's own code — ruling out an application bug entirely.
+
+Cross-referenced against public Supabase issues: this is a known, currently
+unresolved upstream gap (introduced when CLI v2.71.1+ switched the local default to
+ES256 signing with no `config.toml` opt-out — [supabase/cli#4726](https://github.com/supabase/cli/issues/4726),
+still open as a feature request). Checked whether upgrading the installed CLI
+(v2.75.0 → latest v2.111.0) or Edge Runtime (v1.70.0 → latest v1.74.3) is a proven
+fix — it is not: the Edge Runtime changelog from v1.73.10 onward has no JWT/ES256
+entry, and the most specific matching upstream issue
+([supabase/supabase#42810](https://github.com/supabase/supabase/issues/42810)) is
+still open with no maintainer-confirmed fix.
+
+**Result:** root cause proven with direct evidence, not inferred. `current-state.md`'s
+ISSUE-22 entry rewritten to match (heading text kept for anchor stability, body
+fully rewritten). No workaround implemented, no CLI/Edge Runtime upgrade attempted,
+no config changed — per explicit instruction, this was diagnosis only. Decision on
+how to proceed (attempt the upgrade, apply the community-confirmed `verify_jwt =
+false` workaround, or wait on upstream) is with the user.
+
+---
+
+## 2026-08-03 (8) — Milestone 4, Slice 1: Pick 5 entry creation
+
+**Prompted by:** beginning Milestone 4 (Pick 5, the Game Engine reference
+implementation) with Slice 1 only, per the vertical-slice plan in
+[game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan).
+
+**Read first, per "inspect existing code before changing it":** `hooks/useEntry.js`,
+`lib/supabase.js`, `App.jsx`, `hooks/usePots.js`, `hooks/useAdmin.js`,
+`supabase/functions/admin-actions/index.ts`, `pages/PicksPage.jsx`. Confirmed the
+current app is still fully wired to the old `user_entries`/`user_entry_picks`
+schema, untouched by this slice. Also confirmed `useCreatePot()` never sets
+`pots.game_type` — validated that leaving `game_type`'s `default 'pick5'` in place
+(a deliberate Milestone 2 review choice) was the right call, since removing it would
+have broken this exact existing insert.
+
+**Built:** `supabase/functions/get-or-create-pick5-entry/index.ts` (auth pattern
+copied from `admin-actions` — forwarded JWT resolves identity, service-role client
+does the writes, authorization checked explicitly since `game_entry_pick5` has no
+client-insert RLS policy at all), `validate.ts` (pure request validation, split out
+for unit testing) + `validate.test.ts`, and `hooks/usePick5Entry.js` (uses
+`supabase.functions.invoke()`, not the raw-`fetch()` pattern in `useAdmin.js` —
+deliberate: `invoke()` attaches `apikey` automatically).
+
+**Architectural note:** entry creation isn't one of the Game Engine's eight
+lifecycle methods (GE-6) — it's persistence orchestration, not
+scoring/validation/settlement/payout logic — so this stays a plain Edge Function,
+not a dispatcher call. Documented in `game-engine.md`'s Edge Function inventory as a
+deliberate choice, flagged for revisiting if LMS/Predictor need the same shape.
+
+**Verified live, not assumed:**
+- Signed up a real test user against local Auth, added them to a `pick5` pot.
+- Discovered the new function wasn't being served at all — the edge runtime only
+  scans `supabase/functions/` for new directories at container *startup*, not via
+  the "per_worker" hot-reload (that's for changes within already-known functions).
+  A full `supabase stop`/`start` cycle was needed (hit the same stale-`vector`-container
+  conflict as earlier this session; same fix, `docker rm -f`).
+- **Found `ISSUE-22`**: every authenticated call — including to the pre-existing,
+  unrelated `admin-actions` function — gets `Invalid JWT` from Kong. A real user
+  session token decodes to `alg: ES256`; Kong's local config likely still expects
+  `HS256`. Confirmed this is upstream of any function's own code (the no-auth-header
+  path correctly reached the new function and returned its own error, not Kong's).
+  Out of scope to fix in this slice; logged as a new P0.
+- Verified the function's actual database-layer logic directly instead (bypassing
+  the blocked HTTP layer): a fresh entry inserts with correct defaults
+  (`status='pending'`, `payout_amount=0`, `picks_won=0`, `picks_total=5`,
+  `entry_scope='gameweek'`); a duplicate insert correctly hits the
+  `game_entries_gameweek_key` unique constraint, proving the 23505-recovery path in
+  the function is meaningful, not dead code.
+- Cleaned up all test data afterward (two test auth users, test `pot_members`,
+  test `game_entries`/`game_entry_pick5` rows) — verified back to the exact
+  pre-test baseline (4 `auth.users`, 0 `game_entries`).
+
+**Not done, deliberately:** no page/UI wiring yet — entry creation alone isn't a
+meaningful standalone user-facing feature; that wiring belongs with Slice 2 (pick
+submission), when the combined flow becomes something a user would actually use.
+Frontend unit-test tooling (Vitest or equivalent) wasn't set up — `ISSUE-16` (no
+frontend test runner) remains open; testing effort this slice went into the Deno
+test (`validate.test.ts`, not yet run — same "cannot execute Deno locally"
+constraint as Milestone 3) and the live integration verification above instead.
+
+**Result:** Slice 1 is code-complete and its database-layer logic is directly
+verified. Its HTTP/auth-layer behavior — the part a real user would actually
+experience — could not be end-to-end verified due to `ISSUE-22`, discovered during
+this slice's own verification work, not pre-existing knowledge. Waiting for review
+before Slice 2.
+
+---
+
 ## 2026-08-03 (7) — Track B resolved; shared platform schema deployed
 
 **Prompted by:** continuing the deployment checklist. `006_fix_cron_job_headers.sql`

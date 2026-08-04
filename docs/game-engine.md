@@ -272,6 +272,7 @@ Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, whic
 | `compute-scores` | Extended to drive scoring via the dispatcher (not yet wired) |
 | `settle-gameweek` | Extended to drive settlement via the dispatcher (not yet wired) |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
+| `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
 | Prototype SQL functions (`settle_gameweek`, `settle_lms_gameweek`, `settle_predictor_gameweek`, `settle_predictor_season`, `compute_live_scores`) | Retired, not ported |
 
 **Milestone 3 note:** the framework module exists standalone and is not yet imported by any

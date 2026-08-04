@@ -49,14 +49,15 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4 — Pick 5 implementation** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Approved to begin; not yet started. Reference implementation for LMS/Predictor; built as a sequence of small, individually-approved vertical slices (entry creation → pick submission → validation → locking → goal calculation → scoring → settlement → notifications → standings/leaderboard).
+- **Milestone 4, Slice 2 — Pick submission** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Next slice, not started, pending review of Slice 1.
 
 ## In Progress
 
-*(nothing in progress right now — Milestone 4 is approved but not yet started)*
+*(nothing in progress — Slice 1 complete, awaiting review before Slice 2 begins)*
 
 ## Blocked
 
+- **ISSUE-22 — Edge Runtime rejects GoTrue's ES256 tokens (local)** → [current-state.md](./current-state.md#issue-22--edge-runtimes-default-jwt-verification-rejects-gotrues-es256-tokens-no-authenticated-edge-function-call-works-locally). Root cause proven (not Kong — the Edge Runtime's own `verifyJWT` gate, wired to a legacy HS256-only secret). Known, currently-unresolved upstream Supabase issue; upgrading CLI/Edge Runtime not proven to fix it. Blocks true end-to-end verification of any authenticated Edge Function call, including all remaining Milestone 4+ slices. Awaiting a decision on how to proceed.
 - **ISSUE-20 — prototype tables have RLS disabled and full anonymous write access** → [current-state.md](./current-state.md#issue-20--prototype-tables-have-rls-disabled-and-full-anonymous-write-access). Narrowed 2026-08-03 — the new schema ships fully RLS-protected; the 7 original prototype tables remain exposed. Blocked on: Phase 8 of `deployment-checklist.md` (final removal), or a Dashboard/support RLS fix on the old tables directly.
 - **`sync-live-events-every-5-min` cron job removal** — `supabase_admin`-owned, `postgres` cannot unschedule it. Low severity (no data/security impact). Folded into Track B/Phase 8 scope, not tracked separately.
 - **Verify what (if anything) refreshes `player_fixture_goals`** — `ISSUE-3` (P0) → [current-state.md](./current-state.md#issue-3--player_fixture_goals-materialized-view-is-never-refreshed).
@@ -72,6 +73,7 @@ owner per `session-log.md`; no application feature has shipped yet)*
 
 ## Done
 
+- **Milestone 4, Slice 1 — Pick 5 entry creation** — 2026-08-03. `get-or-create-pick5-entry` Edge Function, `hooks/usePick5Entry.js`. Database-layer logic verified directly (live inserts against `game_entries`/`game_entry_pick5`, including the duplicate-prevention path); HTTP/auth-layer verification blocked by `ISSUE-22` (newly found, pre-existing, not this slice's code). See [session-log.md](./session-log.md).
 - **Shared platform schema deployed: `004`/`005` applied, ISSUE-21 resolved for the 2 blocking objects, ISSUE-20 narrowed to only the un-migrated prototype tables, `006` (cron header fix) applied** — 2026-08-03. See [session-log.md](./session-log.md#2026-08-03-7--track-b-resolved-shared-platform-schema-deployed). Fully verified live: 7 tables, 14 FKs, 21 indexes, 5 triggers, 10 RLS policies, zero data loss on any existing table.
 - **Milestones 1–3: three-game-mode platform architecture, shared schema design, Game Engine framework** — 2026-08-03. No single `ISSUE-N` (this is the strategic rebuild superseding the retired LMS/Predictor prototype). See [game-engine.md](./game-engine.md), [schema-review.md](./schema-review.md), [session-log.md](./session-log.md#2026-08-03-5--live-evidence-priority-review-drift-investigation-and-the-start-of-a-three-game-mode-platform-rebuild). Framework verified by the repo owner running the Deno test suite locally.
 - **Live-evidence drift investigation: `/drift` command created; ISSUE-19/20/21 discovered and logged; ISSUE-1/2/3/4 verified against the live database** — 2026-08-03. See [session-log.md](./session-log.md#2026-08-03-5--live-evidence-priority-review-drift-investigation-and-the-start-of-a-three-game-mode-platform-rebuild).

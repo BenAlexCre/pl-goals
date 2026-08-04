@@ -98,6 +98,57 @@ was once broken" survives.
 
 ### P0 — verify or fix before building further on pots/scoring
 
+#### ISSUE-22 — Edge Runtime's default JWT verification rejects GoTrue's ES256 tokens; no authenticated Edge Function call works locally
+**Confirmed live, root cause proven 2026-08-03–04** (title kept for stable anchor
+continuity — see below for why "Kong" was the wrong initial suspect). A real user
+session token (from a genuine sign-up/sign-in against local Auth) is rejected on
+**every** Edge Function tested, including the pre-existing, unrelated
+`admin-actions` — not specific to Slice 1's new code.
+
+**Root cause, proven by direct inspection, not inferred:**
+1. Kong has **no JWT plugin enabled at all** (`KONG_PLUGINS=request-transformer,cors`)
+   — it cannot be the component rejecting the token. Its `request-transformer` Lua
+   config (read directly from `/home/kong/kong.yml`) substitutes in a hardcoded
+   legacy HS256 demo JWT *only* when the `apikey` header exactly matches the known
+   publishable/secret key — this is why adding `apikey` "fixed" cron
+   ([ISSUE-19](#issue-19--cron-triggered-edge-function-pipeline-has-a-100-failure-rate)):
+   it wasn't Kong requiring the header for routing, it was Kong swapping in a
+   working token. A real user's Authorization header, which doesn't match that
+   substitution rule, passes through to the backend **completely unmodified**.
+2. GoTrue is correctly configured (`GOTRUE_JWT_VALIDMETHODS=HS256,RS256,ES256`, a
+   real ES256 key present, `kid` matches issued tokens exactly) — not the faulty
+   component either.
+3. **The Edge Runtime container is the actual culprit**: `SUPABASE_INTERNAL_FUNCTIONS_CONFIG`
+   shows `verifyJWT: true` by default for every function (nothing in `config.toml`
+   overrides this), and its only verification credential is
+   `SUPABASE_INTERNAL_JWT_SECRET` — a single legacy shared HS256 secret, with no
+   configured awareness of GoTrue's ES256 key at all. Any real ES256 token fails
+   unconditionally, before any function code runs.
+
+**Distinguished from an application bug**: the no-auth-header test correctly
+reached the function's own code and returned its own error, for `admin-actions`
+too — the rejection happens entirely upstream, in the Edge Runtime's pre-function
+gate, not in this project's code.
+
+**Known upstream issue, not local misconfiguration.** CLI v2.71.1+ switched the
+local default from HS256 to symmetric-key to ES256 asymmetric signing; installed
+CLI here is v2.75.0 (past that switch). No `config.toml` option exists to opt out
+([supabase/cli#4726](https://github.com/supabase/cli/issues/4726), an open feature
+request, closed without a stated fix). Multiple matching upstream reports remain
+open or closed-without-documented-resolution
+([supabase/supabase#42810](https://github.com/supabase/supabase/issues/42810),
+[#42244](https://github.com/supabase/supabase/issues/42244)). Installed Edge
+Runtime is v1.70.0; latest is v1.74.3 — its changelog from v1.73.10 onward has no
+JWT/ES256 entry, so **upgrading is not proven to fix this**, only worth trying as a
+low-risk next step. A community-confirmed workaround exists (`verify_jwt = false`
+per function, relying on the function's own internal `auth.getUser()` call instead
+— which both `admin-actions` and the new function already do), not yet applied
+here per explicit instruction to prove root cause before implementing anything.
+
+**Status: root cause proven, not yet fixed.** Blocks true end-to-end verification
+of any authenticated user flow in this environment, including every remaining
+Milestone 4+ slice involving a real signed-in user.
+
 These block confident work on anything downstream of them, because other decisions
 depend on their answers.
 
