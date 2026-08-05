@@ -52,7 +52,7 @@ Unknown `action` → `400`. Any thrown error inside the switch → `500` with
 `{ error: message }`.
 
 Frontend caller: `hooks/useAdmin.js:useAdminAction`. Whether anything currently
-invokes that hook, and why not: [current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry).
+invokes that hook, and why not: [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry).
 
 ### `POST /functions/v1/sync-fixtures`
 **Auth:** none enforced by the function itself — see
@@ -91,7 +91,7 @@ finds the earliest non-postponed/cancelled fixture kickoff and sets
 `user_entries` row in that gameweek:
 - if the matching `entry_payments.is_paid` is falsy, voids the entry
   (`is_void = true`) and sets all its picks' `result = 'void'`, then skips scoring
-  (see [current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry)
+  (see [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)
   for why this currently voids everything);
 - otherwise, for each pick, sums `player_fixture_goals.goals` for that player/gameweek
   and compares against `goal_threshold` to set `result` to one of `winning/losing` (if

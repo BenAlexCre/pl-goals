@@ -1,9 +1,10 @@
-// Pick5Engine — the first real GameEngine implementation (GE-6). Milestone 4
-// Slice 2 landed validateEntry(); Slice 3 adds lockEntries(). Every other
-// lifecycle method still throws GameEngineNotImplementedError, per the
-// pattern errors.ts documents for a mode landing incrementally
-// (calculateScore/settle/etc. in later slices, following
-// docs/game-engine.md § GE-12's Milestone 4 sequencing).
+// Pick5Engine — the first real GameEngine implementation (GE-6). Landed
+// incrementally, one method per Milestone 4 slice (docs/game-engine.md §
+// GE-12): validateEntry (Slice 2), lockEntries (Slice 3), calculateScore
+// (Slice 4), settle (Slice 5), generateStandings (Slice 6), determineWinner
+// (Slice 7). awardPrize/notifyUsers still throw
+// GameEngineNotImplementedError, per the pattern errors.ts documents for a
+// mode landing incrementally.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
@@ -534,8 +535,55 @@ export class Pick5Engine implements GameEngine {
     }
   }
 
-  determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {
-    throw new GameEngineNotImplementedError('pick5', 'determineWinner')
+  // GE-6: "Identify the winner(s)." For Pick 5 specifically, "competition end" is
+  // the gameweek just settled, not a season finale — the jackpot is per-gameweek
+  // (GE-4.4: pot_prizes.scope = 'gameweek' for Pick 5, unlike LMS/Predictor's
+  // season-long pots). This method only receives a potId (GE-6's fixed contract),
+  // not a gameweekId, so it identifies "the most recently settled gameweek" from
+  // pot_standings_snapshots itself — correct as long as it's only ever called
+  // right after that gameweek's settle()/generateStandings() pair has run, which
+  // is the only way it's invoked (see settle()'s own comment on why this isn't
+  // wired in yet — Slice 7 doesn't call this method from anywhere; it exists
+  // standalone, ready for Slice 8 to wire in alongside awardPrize()).
+  //
+  // Winners are every user at rank 1 for that gameweek — possibly more than one,
+  // by design, since Slice 6's tie-break rule is "ties share a rank," not a forced
+  // single winner. Splitting a prize among multiple winners is awardPrize()'s job.
+  //
+  // Deliberately does not read pot_prizes at all — "who ranked first" and
+  // "is there a prize configured to award them" are different questions;
+  // conflating them here would make this method's correctness depend on prize
+  // configuration existing, which it doesn't yet (see session-log.md — no
+  // admin flow creates a pot_prizes row anywhere in the current codebase).
+  async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+    const { data: latestGameweek, error: latestError } = await ctx.supabase
+      .from('pot_standings_snapshots')
+      .select('gameweek_id')
+      .eq('pot_id', potId)
+      .not('gameweek_id', 'is', null)
+      .order('gameweek_id', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (latestError) {
+      throw new Error(`Failed to look up the most recent settled gameweek: ${latestError.message}`)
+    }
+    if (!latestGameweek) {
+      return []
+    }
+
+    const { data: winners, error: winnersError } = await ctx.supabase
+      .from('pot_standings_snapshots')
+      .select('user_id')
+      .eq('pot_id', potId)
+      .eq('gameweek_id', (latestGameweek as { gameweek_id: number }).gameweek_id)
+      .eq('rank', 1)
+
+    if (winnersError) {
+      throw new Error(`Failed to look up winners: ${winnersError.message}`)
+    }
+
+    return ((winners ?? []) as { user_id: string }[]).map((w) => w.user_id)
   }
 
   awardPrize(_ctx: GameEngineContext, _potId: string): Promise<void> {

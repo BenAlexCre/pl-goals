@@ -89,7 +89,7 @@ despite `profiles.avatar_url` existing in the schema.
 - **`components/admin/MemberTable.jsx`** and **`PaymentTable.jsx`** — presentational
   components matching the `admin-actions` edge function's `mark_paid`/`mark_unpaid`/
   `add_member`/`remove_member` actions, never imported by any page. Consequence:
-  [current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry).
+  [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry).
 - **`pots.invite_code`** — column exists, nothing generates, displays, or redeems it.
   [current-state.md ISSUE-8](./current-state.md#issue-8--no-self-serve-pot-join-flow).
 

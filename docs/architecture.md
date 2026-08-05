@@ -30,6 +30,20 @@ specification for that rebuild — everything below in this document describes t
 system **as it exists today** (Pick 5 only); it will be updated to reflect the new
 architecture as each milestone actually ships, not before.
 
+**Forward-looking note (2026-08-05): Payment Verification, not payment processing.**
+The application will never integrate a payment gateway (Stripe, PayPal, Revolut's
+API, or any other) and will never collect, hold, or process money. Payment happens
+entirely off-platform; the application's only responsibility is recording whether an
+admin has verified an entry as paid — manually, one at a time, or in bulk via a CSV
+import. This is now a permanent architectural constraint, not a temporary MVP
+simplification — see
+[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing)
+and [business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules).
+Every "payment" mention below refers to this recording/verification function, not
+processing — the codebase's own naming (`entry_payments`, `mark_paid`) predates this
+explicit decision but already matched it in practice, since no payment-provider
+integration has ever existed in this repo.
+
 The current data source is the Premier League (see `supabase/seed/seed_season.sql`),
 but the schema and edge functions are written generically against "leagues/seasons,"
 and there is evidence in `frontend/scripts/` of earlier/parallel work targeting the
@@ -179,6 +193,10 @@ Every edge function is a single `Deno.serve` handler in `index.ts` — there's n
 routing framework, and cross-cutting concerns (CORS, auth-header parsing, service-role
 client construction) are copy-pasted into each function rather than factored into
 `_shared/`. Full behavioral contract for each function: [api.md](./api.md).
+
+`admin-actions`' `mark_paid`/`mark_unpaid` record **Payment Verification** — whether
+an admin has confirmed an off-platform payment happened, never a payment the
+application collected itself. See the Payment Verification note above.
 
 ## Security model
 

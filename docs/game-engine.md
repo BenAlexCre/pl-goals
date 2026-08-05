@@ -9,10 +9,12 @@ Milestone 3 (the Game Engine framework — folder structure, interfaces, dispatc
 types, dependency injection) is complete. Milestone 4 (Pick 5) is in progress: Slice 1
 (entry creation), Slice 2 (pick submission), Slice 3 (locking, wired into
 `compute-deadlines`), Slice 4 (scoring, wired into `compute-scores`), Slice 5
-(settlement — including the payment-void rule, wired into `settle-gameweek`), and Slice 6
-(standings, resolving `ISSUE-15`/`ISSUE-17`, called internally from `settle()` per GE-8.4)
-are done; winner determination, prizes, and notifications don't exist yet. See
-[GE-12](#ge-12-milestone-plan) for exact status per milestone.
+(settlement — including the payment-verification-void rule, wired into
+`settle-gameweek`), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`, called
+internally from `settle()` per GE-8.4), and Slice 7 (`determineWinner()`, implemented
+standalone, not yet wired into `settle()` — see GE-9) are done; prize awarding and
+notifications don't exist yet. See [GE-12](#ge-12-milestone-plan) for exact status per
+milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
 described in [current-state.md](./current-state.md) — those objects communicated *business
@@ -71,7 +73,7 @@ Three game modes launch together, all production-quality, none an "extra":
 |---|---|
 | Auth, users, profiles | Pick selection UI and validation rules |
 | Pots, pot members, invitations | Scoring calculation |
-| Payments | Elimination/points/standing computation |
+| Payment Verification | Elimination/points/standing computation |
 | Fixtures, teams, players, live data sync | Win-condition and payout-split logic |
 | Notifications | — |
 | Admin tooling | — |
@@ -98,13 +100,25 @@ below marked "post-review."
 
 Unchanged — fully mode-agnostic.
 
-### GE-4.3 `entry_payments` (generalized)
+### GE-4.3 `entry_payments` (generalized) — Payment Verification, not payment processing
+
+**Canonical design, decided 2026-08-05** — see
+[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing).
+This table (and every mode's settlement logic that reads it) records **whether an
+admin has verified an entry as paid**, off-platform — never a payment the application
+collected. No mode's `settle()` may ever depend on a payment gateway, Stripe/PayPal/
+Revolut API, or any external payment status; `entry_payments.is_paid` is the only
+signal, and the application controls it entirely (manual single-entry admin action,
+or bulk CSV import — see
+[business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules)
+for the CSV format and requirements; not yet implemented, tracked as `ISSUE-6`).
 
 `gameweek_id` nullable, paired **(post-review)** with an explicit `scope pot_scope not
 null` column and a check constraint tying the two together, rather than relying on
-nullability alone to signal which payment shape a row represents. Non-null `gameweek_id` +
-`scope = 'gameweek'` keeps today's Pick 5 behavior exactly as-is; `gameweek_id null` +
-`scope = 'season'` is a single whole-pot payment for LMS/Predictor.
+nullability alone to signal which payment-verification shape a row represents.
+Non-null `gameweek_id` + `scope = 'gameweek'` keeps today's Pick 5 behavior exactly
+as-is; `gameweek_id null` + `scope = 'season'` is a single whole-pot verification for
+LMS/Predictor.
 
 ### GE-4.4 `pot_prizes`
 
@@ -288,9 +302,13 @@ every live/in-progress gameweek with entries in that mode.
 `generateStandings()` → (only at competition end) `determineWinner()` → `awardPrize()` →
 `notifyUsers()`.
 
-### GE-8.5 Payment flow
+### GE-8.5 Payment Verification flow
 Shared `admin-actions` (`mark_paid`/`mark_unpaid`), unchanged in shape, now writing to the
-generalized `entry_payments` — no mode-specific code in `admin-actions` itself.
+generalized `entry_payments` — no mode-specific code in `admin-actions` itself. Two
+admin-driven paths write the same table: single-entry manual verification, and bulk
+verification via CSV import (identifier = email or phone, validated/previewed before
+any write — see [business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules)).
+Neither exists yet (`ISSUE-6`). No payment gateway is ever a participant in this flow.
 
 ### GE-8.6 Leaderboard flow
 `generateStandings()` writes `pot_standings_snapshots`; the frontend reads that one table
@@ -307,7 +325,7 @@ Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, whic
 | `sync-fixtures`, `sync-live-events` (per `ISSUE-4`) | Unchanged — feeds all three modes identically |
 | `compute-deadlines` | **Milestone 4 Slice 3**: now drives locking via the dispatcher. Deadline computation itself is unchanged; once a gameweek's just-computed `deadline_utc` has already passed, discovers which game types have pending entries for that gameweek (data-driven — no hardcoded `game_type`, GE-7) and calls each one's `lockEntries()`. Now also writes a `sync_runs` row per invocation (previously didn't) |
 | `compute-scores` | **Milestone 4 Slice 4**: now drives scoring via the dispatcher. Old logic (reading/writing `user_entries`/`user_entry_picks`) is unchanged; the new block discovers game types with `locked` entries for each gameweek and calls each one's `calculateScore()`. Response body now also reports `gameEngineDispatches` alongside the pre-existing `processed` count |
-| `settle-gameweek` | **Milestone 4 Slice 5**: now drives `settle()` via the dispatcher, once its existing "all fixtures finished" check passes. Old logic (`user_entries`/`leaderboard_snapshots`) is unchanged. No `sync_runs` write added — GE-19's Settlement diagram doesn't call for one, unlike Locking |
+| `settle-gameweek` | **Milestone 4 Slice 5**: now drives `settle()` via the dispatcher, once its existing "all fixtures finished" check passes. Old logic (`user_entries`/`leaderboard_snapshots`) is unchanged. No `sync_runs` write added — GE-19's Settlement diagram doesn't call for one, unlike Locking. **Not touched in Slice 7** — `Pick5Engine.determineWinner()` exists but is only called by `settle-gameweek` once Slice 8 wires it in alongside `awardPrize()` |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
 | `submit-pick5-picks` (new, Milestone 4 Slice 2) | First Edge Function to call a real dispatcher-resolved Game Engine method — `resolveEngine('pick5').validateEntry(ctx, entry, picks)`. Writes `pick5_picks` via upsert on `(game_entry_id, pick_position)` only after validation passes |
@@ -349,7 +367,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 1 | Architecture finalized, specification produced and approved | **Done** |
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
-| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), and Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`) done; winner determination, prizes, and notifications not started |
+| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), and Slice 7 (`determineWinner()`, standalone) done; prize awarding (blocked on a `pot_prizes` creation flow that doesn't exist yet — see `current-state.md`/`session-log.md`) and notifications not started |
 | 5 | Last Man Standing implementation | Not started |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
@@ -407,7 +425,7 @@ Naming the logical groupings behind [GE-3](#ge-3-platform-vs-game-mode-boundary)
 |---|---|---|
 | **Identity** | Sign-up/sign-in, session, profile | Supabase Auth, `profiles` |
 | **Pot Service** | Pot lifecycle, membership, invitations | `pots`, `pot_members`, `redeem_invite()` |
-| **Payment Service** | Who's paid, how much is in a pot | `entry_payments`, `pot_prizes`, `admin-actions` |
+| **Payment Verification Service** | Who's verified as paid (off-platform), how much is in a pot | `entry_payments`, `pot_prizes`, `admin-actions` — never a payment gateway |
 | **Fixture Data Service** | Leagues, teams, players, fixtures, live events | `sync-fixtures`, `sync-live-events` (per `ISSUE-4`), the reference-data tables |
 | **Standings Service** | Rankings, historical snapshots | `pot_standings_snapshots`, `generateStandings()` |
 | **Notification Service** | User-facing event log | `notifications`, `notifyUsers()` |
@@ -416,7 +434,9 @@ Naming the logical groupings behind [GE-3](#ge-3-platform-vs-game-mode-boundary)
 
 Every service above is implemented once. A game mode never re-implements a service — it
 *calls* one (e.g., a mode's `awardPrize()` reads/writes `pot_prizes` via the Payment
-Service's tables, it doesn't invent its own money-tracking mechanism).
+Verification Service's tables, it doesn't invent its own money-tracking mechanism —
+and never integrates a payment gateway directly, per
+[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing)).
 
 ## GE-17. Folder structure
 
@@ -434,9 +454,11 @@ supabase/functions/
       __fixtures__/
         test-game-engine.ts        FRAMEWORK VERIFICATION ONLY — never imported by production code
       index.ts                     barrel export
-      pick5/                       Milestone 4 — validateEntry() implemented (Slice 2);
-                                    lockEntries/calculateScore/settle/generateStandings/
-                                    determineWinner/awardPrize/notifyUsers all still throw
+      pick5/                       Milestone 4 — validateEntry (Slice 2), lockEntries
+                                    (Slice 3), calculateScore (Slice 4), settle
+                                    (Slice 5), generateStandings (Slice 6), and
+                                    determineWinner (Slice 7) implemented.
+                                    awardPrize/notifyUsers still throw
                                     GameEngineNotImplementedError, pending later slices
       lms/                         Milestone 5 — empty until then
       predictor/                   Milestone 6 — empty until then
@@ -483,7 +505,8 @@ Rules, enforced by convention today and worth a lint rule once more than one mod
   `GameType`/`GameEngine`, never `Pick5Engine` or similar by name. Modes register
   themselves; the dispatcher never reaches out to find them.
 - A mode's subdirectory may import `contracts.ts`/`types.ts`/`errors.ts`, and may import
-  another *service's* shared code (e.g., the future Payment Service helpers), but **never**
+  another *service's* shared code (e.g., the future Payment Verification Service
+  helpers), but **never**
   another mode's subdirectory. `pick5/` must never import from `lms/`.
 - Edge Functions import `dispatcher.ts` (and, once written, the mode registration
   side-effect imports) — they never import a mode's implementation directly.

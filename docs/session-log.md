@@ -13,6 +13,99 @@ from here.
 
 ---
 
+## 2026-08-05 (17) — Milestone 4, Slice 7: Pick 5 winner determination
+
+**Goal:** Slice 6 was committed and pushed; implement the next vertical slice
+— `determineWinner()`, per `docs/game-engine.md` § GE-6/GE-8.4. Stated the
+objective, its relationship to Slice 6, and confirmed no `ISSUE-N` is
+resolved, before writing any code, per this turn's explicit instruction.
+
+**Context carried in from the two prior turns (not re-litigated, per "do not
+revisit previous architectural decisions"):** the repo owner approved
+Payment Verification as the permanent architecture and explicitly confirmed
+`entry_payments` stays as-is unless a concrete technical blocker forces a
+change. Neither came up during this slice — `determineWinner()` doesn't
+touch payment data at all.
+
+**Scoping decision, stated before implementation:** `determineWinner()` was
+built as a complete, standalone, fully-tested method — **not wired into
+`settle()`**. Per GE-8.4's sequence diagram, `determineWinner()` and
+`awardPrize()` are a coupled pair; wiring `determineWinner()` in now, with
+nothing to consume its result, would mean running a real query every
+settlement for a value nobody uses yet. `settle-gameweek/index.ts` was not
+touched this slice — confirmed via `git status` before writing any
+documentation.
+
+**Design question resolved before coding, not left implicit:** GE-6 fixes
+`determineWinner(ctx, potId)`'s signature — no `gameweekId` parameter — but
+Pick 5's jackpot is per-gameweek (`GE-4.4`), not a season finale, so "the
+winner" needed a concrete definition. Resolved as: the rank-1 user(s) of the
+pot's **most recently settled gameweek**, read from
+`pot_standings_snapshots` (ordering by `gameweek_id` descending, excluding
+the `gameweek_id: null` overall row). This is an implementation-level
+design choice justified directly from GE-4.4's existing text, not a new
+product/money decision requiring the repo owner's input — unlike Slice 6's
+tie-break rule, there was nothing genuinely undecided here.
+
+**What was built:**
+- `Pick5Engine.determineWinner(ctx, potId)` — the sixth real Game Engine
+  method. Finds the pot's latest gameweek with standings, then returns
+  every user at `rank = 1` for that gameweek — correctly more than one on a
+  tie, per Slice 6's shared-rank rule. Deliberately does not read
+  `pot_prizes` at all: "who ranked first" and "is there a prize configured
+  to award them" are different questions, and conflating them would make
+  this method's correctness depend on prize configuration that doesn't
+  exist yet (see below).
+- Extended the test fake (`queryBuilder` in `engine.test.ts`) with real
+  `.order()`, `.limit()` (previously a no-op stub — untruncated), `.not()`,
+  and `.maybeSingle()` support, refactoring the row-resolution logic into a
+  shared `resolveRows()` used by both `.then()` and `.maybeSingle()`.
+  `.limit()` not actually limiting anything was a latent gap in the fake
+  from Slice 4 that happened not to matter until this slice's "give me
+  exactly the most recent gameweek" query needed it to be real.
+- 6 new Deno unit tests. 71/71 total pass.
+
+**A concrete gap confirmed, not newly discovered — deliberately not fixed
+this slice:** `pot_prizes` has zero rows, and only a `SELECT` RLS policy —
+no `INSERT` policy, no Edge Function action, no admin flow anywhere in the
+codebase that could ever create one. Checked live before finalizing scope.
+This isn't a surprise on the scale of `ISSUE-24` — `game-engine.md § GE-4.4`
+already called this table "Pick 5's own unbuilt weekly-jackpot feature"
+back in Milestone 2 — but Slice 7's investigation confirms and quantifies
+it precisely: **`awardPrize()` (Slice 8) will have nothing to split until
+something creates a `pot_prizes` row.** Logged as a blocker on Slice 8 in
+`project-board.md`, not as a new `ISSUE-N` (the gap was already named, just
+not previously confirmed against live data).
+
+**Verification:**
+- 71/71 Deno unit tests pass; `deno check` clean (no Edge Function touched
+  this slice, confirmed via `git status`).
+- No migration — no schema change needed.
+- Live end-to-end, via a temporary Deno script run directly against
+  `Pick5Engine` (not through an Edge Function — none calls this method yet,
+  by design). Created 5 real test users (FK-constrained), seeded real
+  `pot_standings_snapshots` rows for two pots across two real gameweeks
+  (one tied at rank 1, one with a clear single winner, plus an unrelated
+  decoy pot and an overall row), then called the real
+  `Pick5Engine.determineWinner()` against the real local database. Result:
+  correctly picked the later gameweek over the earlier one, correctly
+  scoped to the requested pot only, correctly returned `[]` for a pot with
+  no standings at all. (The live seed data happened to have the later
+  gameweek's single-winner case win out over the earlier tied one, so the
+  *multiple-winners* return path was proven directly by the dedicated unit
+  tests rather than this specific live run — noted plainly rather than
+  overstating live coverage.) One mistake caught mid-script: a blind
+  `replace_all` while fixing a gameweek ID corrupted a hardcoded pot UUID
+  (matched "10" inside a hex substring) — caught by re-reading the file
+  before running it, not by the run itself. All test data removed by exact
+  ID afterward: `pot_standings_snapshots` rows and `auth.users` rows, both
+  by their specific IDs, no shared-attribute deletes.
+
+**Status:** Slice 7 implemented and fully verified live. **Not committed**
+— awaiting the repo owner's review and explicit approval before Slice 8.
+
+---
+
 ## 2026-08-05 (16) — Milestone 4, Slice 6: Pick 5 standings, a real upsert bug, and an unrelated undocumented-trigger discovery (ISSUE-24)
 
 **Goal:** Slice 5 was committed and pushed; implement the next vertical

@@ -148,7 +148,7 @@ in before the deadline.
 
 **What it rules out / current risk:** this design assumes payment gets marked before
 `compute-scores` runs — an assumption that doesn't currently hold, since there is no
-UI to mark a payment. Live status: [current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry).
+UI to mark a payment. Live status: [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry).
 Once payments UI exists, this design still leaves open a real product question worth
 deciding deliberately: should the deadline for marking paid be before or after the
 pick deadline?
@@ -209,3 +209,47 @@ settlement convenience. A greenfield architectural review
 ([schema-review.md](./schema-review.md)) is the standard this and every future
 migration is now held to, specifically to catch this kind of drift before it ships
 rather than after.
+
+---
+
+## Payment Verification, not payment processing
+
+**Decided 2026-08-05, explicitly by the repo owner** — unlike every entry above this
+one, this is a directly-stated decision, not inferred from code.
+
+**What:** The application will never collect, process, or hold money. Payment
+collection happens entirely outside the platform (Revolut, bank transfer, cash, or
+any other means two people agree on). The application's only job is to record
+**whether an entry has been verified as paid**, by an admin — either one at a time, or
+in bulk via a CSV import matching members by email or phone number. This formalizes
+and extends what the "[Unpaid entries are voided automatically at scoring time, not
+at submission time](#unpaid-entries-are-voided-automatically-at-scoring-time-not-at-submission-time)"
+entry above already inferred from the code (no payment provider integration exists
+anywhere in the repo) — the difference is that it's now an explicit, permanent design
+constraint, not an artifact of what happened to get built, and it comes with two new
+required admin capabilities that don't exist yet: single-entry manual verification,
+and bulk verification via CSV import (format, validation, and audit requirements in
+[business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules)).
+
+**Why:** Removes an entire category of scope, risk, and compliance burden from the
+MVP — no PCI handling, no payment-gateway integration/webhooks/reconciliation, no
+liability for holding member funds. Pots are private, trust-based groups where
+money already changes hands off-platform in practice (per the original inferred
+decision); the app's job is to be a reliable, auditable record of that, not to
+intermediate it.
+
+**What it rules out:** Any Stripe, PayPal, Revolut-API, or other payment-gateway
+integration, now or later, as part of this application's core design — not merely
+"not yet built." `Pick5Engine.settle()` (Milestone 4, Slice 5) already depends only
+on `entry_payments.is_paid`, a boolean the application controls entirely — this
+decision confirms that dependency is correct and permanent, not a placeholder for a
+future payment-gateway webhook. Any future "collect payment in-app" feature would be
+a reversal of this decision, not an extension of it, and would need its own ADR
+entry here — not a silent addition.
+
+**Status:** documentation updated 2026-08-05 to use "Payment Verification" as the
+canonical term throughout ([architecture.md](./architecture.md),
+[business-rules.md](./business-rules.md), [roadmap.md](./roadmap.md),
+[current-state.md § ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)).
+Implementation (single-entry admin UI, CSV importer) not yet built — see
+`project-board.md` for when it's scheduled.

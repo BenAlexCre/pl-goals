@@ -591,6 +591,30 @@ let fakeIdCounter = 1
 function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) {
   // deno-lint-ignore no-explicit-any
   const filters: ((row: any) => boolean)[] = []
+  let orderSpec: { col: string; ascending: boolean } | null = null
+  let limitCount: number | null = null
+
+  // deno-lint-ignore no-explicit-any
+  function resolveRows(): any[] {
+    let rows = getRows().filter((row) => filters.every((f) => f(row)))
+    if (embedGameEntryPick5FromDb) {
+      rows = rows.map((row) => ({
+        ...row,
+        game_entry_pick5: embedGameEntryPick5FromDb.gameEntryPick5
+          .filter((p) => p.game_entry_id === row.id)
+          .map((p) => ({ picks_won: p.picks_won })),
+      }))
+    }
+    if (orderSpec) {
+      const { col, ascending } = orderSpec
+      rows = [...rows].sort((a, b) => (a[col] > b[col] ? 1 : a[col] < b[col] ? -1 : 0) * (ascending ? 1 : -1))
+    }
+    if (limitCount !== null) {
+      rows = rows.slice(0, limitCount)
+    }
+    return rows
+  }
+
   // deno-lint-ignore no-explicit-any
   const builder: any = {
     select: (_cols?: string) => builder,
@@ -602,12 +626,31 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) 
       filters.push((row) => row[col] === val)
       return builder
     },
+    not: (col: string, op: string, val: unknown) => {
+      if (op !== 'is') throw new Error(`Fake queryBuilder.not() only supports 'is', got: ${op}`)
+      filters.push((row) => row[col] !== val)
+      return builder
+    },
     in: (col: string, vals: unknown[]) => {
       const set = new Set(vals)
       filters.push((row) => set.has(row[col]))
       return builder
     },
-    limit: (_n: number) => builder,
+    order: (col: string, opts?: { ascending?: boolean }) => {
+      orderSpec = { col, ascending: opts?.ascending ?? true }
+      return builder
+    },
+    limit: (n: number) => {
+      limitCount = n
+      return builder
+    },
+    maybeSingle: () => {
+      const rows = resolveRows()
+      if (rows.length > 1) {
+        throw new Error('Fake queryBuilder.maybeSingle() matched more than one row')
+      }
+      return Promise.resolve({ data: rows[0] ?? null, error: null })
+    },
     // deno-lint-ignore no-explicit-any
     insert: (rows: Record<string, unknown>[]) => {
       const table = getRows()
@@ -618,16 +661,7 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) 
     },
     // deno-lint-ignore no-explicit-any
     then: (resolve: (v: { data: any; error: null }) => void) => {
-      let rows = getRows().filter((row) => filters.every((f) => f(row)))
-      if (embedGameEntryPick5FromDb) {
-        rows = rows.map((row) => ({
-          ...row,
-          game_entry_pick5: embedGameEntryPick5FromDb.gameEntryPick5
-            .filter((p) => p.game_entry_id === row.id)
-            .map((p) => ({ picks_won: p.picks_won })),
-        }))
-      }
-      resolve({ data: rows, error: null })
+      resolve({ data: resolveRows(), error: null })
     },
     // deno-lint-ignore no-explicit-any
     update: (patch: Record<string, unknown>) => ({
@@ -953,6 +987,99 @@ Deno.test('generateStandings returns an empty array and writes nothing when the 
 
   assertEquals(result, [])
   assertEquals(db.potStandingsSnapshots.length, 0)
+})
+
+// --- determineWinner() -----------------------------------------------------
+
+Deno.test('determineWinner returns the single rank-1 user of the most recent gameweek', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-a'])
+})
+
+Deno.test('determineWinner returns every tied rank-1 user, not just one (ISSUE-17\'s shared-rank rule)', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 3, score: 1 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(new Set(winners), new Set(['user-a', 'user-b']))
+  assertEquals(winners.length, 2)
+})
+
+Deno.test('determineWinner uses only the most recent gameweek, not every gameweek\'s rank-1', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      // An earlier gameweek's winner must not leak into this gameweek's result.
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-old-winner', rank: 1, score: 5 },
+      { pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-old-winner', rank: 2, score: 1 },
+      { pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-new-winner', rank: 1, score: 4 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-new-winner'])
+})
+
+Deno.test('determineWinner ignores the overall (gameweek_id: null) row when finding the most recent gameweek', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      // The overall row has the same rank/score shape but gameweek_id: null —
+      // must never be mistaken for "the latest gameweek."
+      { pot_id: 'pot-1', gameweek_id: null, user_id: 'user-a', rank: 1, score: 3 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-a'])
+})
+
+Deno.test('determineWinner scopes strictly to the given pot', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-2', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 9 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-a'])
+})
+
+Deno.test('determineWinner returns an empty array when the pot has no standings at all', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb()
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, [])
 })
 
 Deno.test('does not double-count a duplicate pick as two eligibility lookups failing', async () => {

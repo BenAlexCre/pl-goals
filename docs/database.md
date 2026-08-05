@@ -120,7 +120,7 @@ edge function (`mark_paid`/`mark_unpaid`), which — for `mark_unpaid` — also 
 matching `user_entries` row to `is_void = true, status = 'void'`. See
 [api.md § admin-actions](./api.md#post-functionsv1admin-actions) for the full
 request/response contract, and
-[current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry)
+[current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)
 for why this currently has no UI.
 
 ### `user_entries`

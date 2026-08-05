@@ -63,9 +63,19 @@ where noted — none require a code change to start.
 
 ## P1 — close the loop on features that are half-built
 
-6. **(ISSUE-6) Wire up payments.** Render `MemberTable`/`PaymentTable` somewhere
-   reachable (likely a per-pot admin panel), call `useAdminAction` against
-   `mark_paid`/`mark_unpaid`. Without this, `compute-scores` voids every entry.
+6. **(ISSUE-6) Build Payment Verification.** Per the canonical design
+   ([decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing),
+   [business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules)):
+   no payment gateway, ever — the app only records whether an entry has been
+   verified as paid, off-platform. Needs two admin capabilities: (a) mark a single
+   entry paid/unpaid manually (render `MemberTable`/`PaymentTable` somewhere
+   reachable, call `useAdminAction` against `mark_paid`/`mark_unpaid` — the existing
+   unwired components already match this shape), and (b) a CSV bulk importer
+   (`Identifier,Pot,Status,Notes`, identifier = email or phone) that validates every
+   row, previews all changes, reports errors before applying anything, updates only
+   confirmed rows, keeps a full audit trail, and never partially imports without
+   confirmation. Without this, `compute-scores`/`Pick5Engine.settle()` voids every
+   entry.
 7. **(ISSUE-7) Reconcile the two pick-building flows.** Either delete `PotDetail.jsx`'s
    inline picker in favor of linking to `PicksPage`, or extract the eligibility rules
    (goalkeeper exclusion, max-5-of-same-player, deadline lock) into one shared
@@ -80,14 +90,12 @@ where noted — none require a code change to start.
 9. **(ISSUE-9) Gate `/admin` behind an actual role check** in `ProtectedRoute` or a
    dedicated `AdminRoute`, consistent with how `admin-actions` already checks
    `app_metadata.role = 'app_admin'` server-side.
-10. **(ISSUE-17) Define and implement a deterministic leaderboard tie-break rule.**
-    `settle-gameweek` currently ranks purely by `picks_won`, with no secondary key.
-    This is a product decision as much as a technical one, since it decides who gets
-    paid when two members tie — pick a rule (e.g. season-long strike rate, earlier
-    submission time, or an explicit "shared rank" instead of forcing a winner), record
-    it in [business-rules.md § How ties are resolved](./business-rules.md#how-ties-are-resolved),
-    then implement it as an explicit secondary `.order()`/`.sort()` key, not left to
-    incidental row order.
+10. ~~**(ISSUE-17) Define and implement a deterministic leaderboard tie-break rule.**~~
+    **Done** — resolved 2026-08-05 (Milestone 4, Slice 6): standard competition
+    ranking, ties share a rank, no forced winner. Implemented in
+    `Pick5Engine.generateStandings()`. Still open for the retired prototype's
+    `settle-gameweek` leaderboard path, which is out of scope for the new schema's
+    rebuild.
 
 ## P2 — cleanup / consolidation
 
@@ -142,9 +150,9 @@ where noted — none require a code change to start.
    as you go.
 3. Fix whichever of ISSUE-1 through ISSUE-4 turn out to be real bugs, not
    hypothetical ones.
-4. Land ISSUE-6 (payments UI) and ISSUE-17 (tie-break rule) together — both are
-   prerequisites for the leaderboard and payouts to be trustworthy, and ISSUE-17 in
-   particular should be decided before real money is riding on it.
+4. Land ISSUE-6 (Payment Verification: single-entry admin UI + CSV bulk import) — a
+   prerequisite for payouts to be trustworthy. ISSUE-17 (tie-break rule) is already
+   done for the new schema (2026-08-05).
 5. Do the P2 cleanup (ISSUE-10 through ISSUE-14, and ISSUE-18) in one pass — it's
    largely mechanical once the P0/P1 decisions are made, and it shrinks the codebase
    enough to make the rest of P1 and P3 easier to reason about.

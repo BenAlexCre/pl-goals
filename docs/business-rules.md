@@ -101,27 +101,57 @@ not a documented rule to rely on — see
 and [roadmap.md § P1 item 10](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built)
 for the plan to fix this. Once a rule is chosen, it belongs in this section.
 
-## Payment rules
+## Payment verification rules
 
-Every entry starts **unpaid** by default (`entry_payments.is_paid = false`), created
-automatically the moment a member submits an entry for a gameweek — payment status is
-tracked separately from pick submission, so a member can lock in their picks before
-paying. A pot admin (or app admin) marks an entry paid or unpaid; there is currently
-no in-app payment processor, so this presumably reflects an off-platform payment
-(cash, bank transfer) being recorded, not collected, by the app.
+**Canonical design, decided 2026-08-05** — see
+[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing).
+The application never collects, processes, or holds money, and never integrates a
+payment gateway (Stripe, PayPal, Revolut's API, or any other). Payment happens
+entirely off-platform, by whatever means the pot's members agree on — Revolut,
+bank transfer, cash, anything. The application's only responsibility is recording
+**whether an entry has been verified as paid**, by an admin.
 
-**An entry that is not marked paid by the time scoring runs is automatically voided**
-— all of its picks are marked `void` and it's excluded from the leaderboard entirely,
-regardless of how well its picks would have scored. There is currently no UI for a pot
-admin to actually mark an entry paid (see
-[current-state.md ISSUE-6](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry)),
+Every entry starts **unverified** by default (`entry_payments.is_paid = false`),
+created automatically the moment a member submits an entry for a gameweek — payment
+status is tracked separately from pick submission, so a member can lock in their
+picks before their payment is verified. A pot admin (or app admin) verifies an entry
+as paid or unpaid in one of two ways:
+
+- **Single entry** — mark one member's entry as paid, manually, one at a time.
+- **Bulk CSV import** — verify many members' payments in one operation. Format:
+  ```
+  Identifier,Pot,Status,Notes
+  ben@example.com,Premier League Pool,Paid,Revolut
+  adam@example.com,Premier League Pool,Paid,Cash
+  0871234567,Premier League Pool,Paid,Bank Transfer
+  ```
+  `Identifier` matches a member by **email or phone number** — whichever the pot's
+  member record has on file. The importer must: validate every row before touching
+  any data; show a full preview of every change it's about to make; report every
+  validation error up front rather than failing mid-import; apply only rows the
+  admin has explicitly confirmed; keep a full audit trail of what was
+  imported, by whom, and when; and never partially apply an import without explicit
+  confirmation — a batch either goes in as reviewed, or nothing does.
+
+**An entry that is not verified as paid by the time settlement runs is automatically
+voided** — all of its picks are marked `void` and it's excluded from the leaderboard
+entirely, regardless of how well its picks would have scored. Settlement depends
+**only** on `entry_payments.is_paid` — never on any external payment gateway's status,
+by design. This rule is already implemented for the current game engine
+(`Pick5Engine.settle()`, Milestone 4 Slice 5) and, for the retired prototype schema,
+in `compute-scores`. There is currently no UI for a pot admin to actually verify an
+entry as paid, single or bulk (see
+[current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)),
 so in practice every entry is being voided right now — this is a rule the system
 enforces correctly and consistently, it just currently has no way to be satisfied.
 
-Implementation: `entry_payments` table, `create_entry_payment()` trigger,
-`admin-actions`' `mark_paid`/`mark_unpaid` actions
+Implementation today: `entry_payments` table (already has `marked_by`/`marked_at`/
+`notes` columns — a useful head start on the audit-trail requirement above, though
+not sufficient by itself for a full history of bulk-import batches),
+`create_entry_payment()` trigger, `admin-actions`' `mark_paid`/`mark_unpaid` actions
 ([api.md § admin-actions](./api.md#post-functionsv1admin-actions)), and the
-payment check inside `compute-scores`.
+payment-verification check inside `compute-scores`/`Pick5Engine.settle()`. The
+single-entry admin UI and the CSV bulk importer are not yet built.
 
 ## Admin permissions
 

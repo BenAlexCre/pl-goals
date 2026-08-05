@@ -339,33 +339,50 @@ deliberately removed/replaced by the manual scraper workflow. Plan:
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-6 — Payments UI isn't wired up; `compute-scores` will void every entry
+#### ISSUE-6 — Payment Verification has no UI or bulk import; `compute-scores`/`settle` will void every entry
+**Reframed 2026-08-05** — the underlying gap is unchanged, but the target design is
+now explicit: see
+[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing)
+and
+[business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules).
+The application never processes payments or integrates a payment gateway; it only
+records whether an entry has been **verified as paid**, off-platform. Two admin
+capabilities are needed and neither exists yet: (a) mark a single entry
+paid/unpaid manually, (b) bulk-verify via CSV import
+(`Identifier,Pot,Status,Notes`, identifier = email or phone), with validation,
+preview, error reporting, an audit trail, and no partial imports without
+confirmation.
+
 `entry_payments`, `admin-actions`' `mark_paid`/`mark_unpaid` actions, and the
-auto-void-on-unpaid logic in `compute-scores` are all implemented and consistent with
-each other (see [api.md § admin-actions](./api.md#post-functionsv1admin-actions) and
-[database.md § entry_payments](./database.md#entry_payments)). The UI components that
-would let an admin actually mark someone paid — `components/admin/MemberTable.jsx`
-and `PaymentTable.jsx` — exist but are never imported by `AdminDashboard.jsx` or any
-other page. Every entry is created with `is_paid: false` by default and nothing in
-the reachable UI can change that. **Status: confirmed.** Every entry in every pot
-will be voided the first time `compute-scores` runs against real data, unless
-payments are being marked paid directly through the Supabase dashboard as a manual
-workaround. See also [decisions.md § Unpaid entries are voided automatically](./decisions.md#unpaid-entries-are-voided-automatically-at-scoring-time-not-at-submission-time)
+auto-void-on-unverified logic in `compute-scores` are all implemented and consistent
+with each other (see [api.md § admin-actions](./api.md#post-functionsv1admin-actions)
+and [database.md § entry_payments](./database.md#entry_payments)) — this schema
+already fits the Payment Verification model naturally (it was always recording an
+off-platform payment, never processing one). The UI components that would let an
+admin actually verify someone as paid — `components/admin/MemberTable.jsx` and
+`PaymentTable.jsx` — exist but are never imported by `AdminDashboard.jsx` or any
+other page, and there is no CSV importer anywhere in the repo. Every entry is created
+with `is_paid: false` by default and nothing in the reachable UI can change that.
+**Status: confirmed.** Every entry in every pot will be voided the first time
+`compute-scores` runs against real data, unless payments are being verified directly
+through the Supabase dashboard as a manual workaround. See also
+[decisions.md § Unpaid entries are voided automatically](./decisions.md#unpaid-entries-are-voided-automatically-at-scoring-time-not-at-submission-time)
 for the reasoning behind the design this breaks. Plan:
 [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
 **Extends to the new Game Engine schema too, found 2026-08-05 while building
 `Pick5Engine.settle()` (Milestone 4, Slice 5).** `settle()` faithfully implements the
-same payment-void rule against `entry_payments`/`game_entries` — correctly, per
-`business-rules.md`. But `trg_create_entry_payment` (the trigger that auto-creates an
-`entry_payments` row on entry creation) is attached only to `user_entries` (the
-prototype table), not `game_entries` — confirmed via `information_schema.triggers`.
-No Pick 5 entry created through `get-or-create-pick5-entry` (Slice 1) gets a matching
-`entry_payments` row at all, so `settle()` currently voids every new-schema entry too,
-for the same underlying reason as the original issue. Deliberately not fixed as part
-of Slice 5 — extending the trigger to `game_entries` is really this same issue's fix,
-not a settlement concern, and belongs with whatever eventually resolves this ISSUE-6
-for both schemas at once rather than being patched separately here.
+same payment-verification-void rule against `entry_payments`/`game_entries` —
+correctly, per `business-rules.md`. But `trg_create_entry_payment` (the trigger that
+auto-creates an `entry_payments` row on entry creation) is attached only to
+`user_entries` (the prototype table), not `game_entries` — confirmed via
+`information_schema.triggers`. No Pick 5 entry created through
+`get-or-create-pick5-entry` (Slice 1) gets a matching `entry_payments` row at all, so
+`settle()` currently voids every new-schema entry too, for the same underlying reason
+as the original issue. Deliberately not fixed as part of Slice 5 — extending the
+trigger to `game_entries` is really this same issue's fix, not a settlement concern,
+and belongs with whatever slice eventually builds Payment Verification for both
+schemas at once, rather than being patched separately here.
 
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows

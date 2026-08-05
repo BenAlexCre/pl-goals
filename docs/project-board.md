@@ -32,7 +32,7 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
-- **Payments UI** — `ISSUE-6` (P1) → [current-state.md](./current-state.md#issue-6--payments-ui-isnt-wired-up-compute-scores-will-void-every-entry). Scope now expands beyond Pick 5 — see [game-engine.md § GE-4.3/GE-4.4](./game-engine.md#ge-43-entry_payments-generalized).
+- **Payment Verification (single-entry + CSV bulk import)** — `ISSUE-6` (P1) → [current-state.md](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry). No payment gateway, ever — see [decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing). Scope now expands beyond Pick 5 — see [game-engine.md § GE-4.3/GE-4.4](./game-engine.md#ge-43-entry_payments-generalized).
 - **Reconcile the two pick-building flows** — `ISSUE-7` (P1) → [current-state.md](./current-state.md#issue-7--two-pick-building-flows-enforce-different-eligibility-rules)
 - **Finish or remove invite-code join flow** — `ISSUE-8` (P1) → [current-state.md](./current-state.md#issue-8--no-self-serve-pot-join-flow). Redemption RPC (`redeem_invite()`) is drafted in `004_game_engine_shared_platform.sql`, deliberately missing `max_members`/`status` checks until Milestone 7 gives it a UI caller.
 - **Gate `/admin` behind a role check** — `ISSUE-9` (P1) → [current-state.md](./current-state.md#issue-9--admin-has-no-ui-level-role-gate)
@@ -49,11 +49,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4, Slice 7** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 6 is approved. Candidates: `determineWinner()`/`awardPrize()` (money-touching, needs its own careful scoping) or `notifyUsers()`.
+- **Milestone 4, Slice 8** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 7 is approved. Candidate: `awardPrize()`, wiring it and `determineWinner()` (Slice 7) into `settle()` together. **Blocked on a real gap, not just unscoped:** `pot_prizes` has zero rows and no `INSERT` policy or Edge Function action anywhere in the codebase — confirmed live 2026-08-05. There is currently no way, manual or automated, for an admin to configure a gameweek's jackpot amount. `awardPrize()` needs something to split; that creation flow needs to exist first (or be built as part of Slice 8). Not a new issue — `game-engine.md § GE-4.4` already flagged this table as "Pick 5's own unbuilt weekly-jackpot feature" back in Milestone 2; Slice 7 confirmed and quantified it.
 
 ## In Progress
 
-*(nothing in progress — Slice 6 implemented and verified, awaiting review/approval before Slice 7 begins)*
+*(nothing in progress — Slice 7 implemented and verified, awaiting review/approval before Slice 8 begins)*
 
 ## Blocked
 
@@ -67,10 +67,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Testing
 
-- **Milestone 4, Slice 6 — Standings** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.generateStandings()` (the fifth real Game Engine contract implementation), called internally from `settle()` per GE-8.4 — `settle-gameweek/index.ts` itself was not modified. Resolves `ISSUE-15` (overall leaderboard) and `ISSUE-17` (tie-break rule — standard competition ranking, ties share a rank, confirmed with the repo owner). 15 new Deno unit tests (65/65 total pass). A real bug was found and fixed during live verification: `pot_standings_snapshots`' two partial unique indexes can't be targeted by PostgREST's `upsert(onConflict: ...)` — reworked to look up existing rows first and upsert only by `id`. Verified live end-to-end with 3 real users (2 tied, 1 not) — correct shared-rank tie behavior, correct gameweek + overall snapshots, idempotent on a second run. **Also discovered, unrelated to this slice: `ISSUE-24`** (see Blocked). All test data removed by exact ID per the standing cleanup rule. **Not yet committed** — awaiting review/approval (see `session-log.md`).
+- **Milestone 4, Slice 7 — Winner determination** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.determineWinner()` (the sixth real Game Engine contract implementation) — identifies the rank-1 user(s) of a pot's most recently settled gameweek, correctly returning multiple winners on a tie (Slice 6's shared-rank rule). Implemented standalone, deliberately **not wired into `settle()` yet** — no consumer exists until Slice 8's `awardPrize()`. Resolves no `ISSUE-N` (net-new Game Engine build-out). 6 new Deno unit tests (71/71 total pass). Verified live against the real database (not through an Edge Function — none calls this yet — via a temporary script run directly against `Pick5Engine`): correct most-recent-gameweek selection, correct cross-pot scoping, correct empty-case handling. All test data removed by exact ID. **Discovered, documented, does not block this slice:** `pot_prizes` has no creation flow at all (see Ready). **Not yet committed** — awaiting review/approval (see `session-log.md`).
 
 ## Done
 
+- **Milestone 4, Slice 6 — Standings** — 2026-08-05, committed. `Pick5Engine.generateStandings()`, called internally from `settle()`. Resolved `ISSUE-15`/`ISSUE-17`. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 5 — Settlement** — 2026-08-05, committed. `Pick5Engine.settle()` wired into `settle-gameweek` via the dispatcher — implements the payment-void rule deferred from Slice 4. See [session-log.md](./session-log.md).
 - **Milestone 4, Slices 3-4 — Locking and scoring** — 2026-08-05, committed (`be06bbd`). `Pick5Engine.lockEntries()`/`calculateScore()` wired into `compute-deadlines`/`compute-scores`. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 2 — Pick submission** — 2026-08-04. `submit-pick5-picks` Edge Function + `Pick5Engine.validateEntry()` (the first real Game Engine contract implementation) + `pick5_picks` table (`007`) + `available_players_by_gameweek` fix (`008`, `ISSUE-23`). See [session-log.md](./session-log.md).
