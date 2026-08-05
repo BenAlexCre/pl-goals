@@ -430,7 +430,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
 | 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`), and Slice 9 (`notifyUsers()`, domain-event notifications, wired into `awardPrize()`) done — all eight `GameEngine` contract methods now implemented for Pick 5 |
-| 5 | Last Man Standing implementation | Not started |
+| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done, mirroring Pick 5 Slice 1 exactly (season-scoped entry, no schema change needed — `game_entries`/`game_entry_lms` already existed from Milestone 2) |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
 | 8 | End-to-end testing, performance review, security review | Not started |
@@ -532,6 +532,10 @@ supabase/functions/
   get-or-create-pick5-entry/       NEW — Milestone 4 Slice 1 (not a dispatcher call, see GE-9)
   submit-pick5-picks/              NEW — Milestone 4 Slice 2, first real dispatcher call
                                     (resolveEngine('pick5').validateEntry())
+  get-or-create-lms-entry/         NEW — Milestone 5 Slice 1, mirrors get-or-create-pick5-entry
+                                    exactly (not a dispatcher call); the one structural
+                                    difference is a season-scoped entry (no gameweek_id in
+                                    the request), per GE-4.5
 ```
 
 Each mode's future subdirectory (`pick5/`, `lms/`, `predictor/`) will contain exactly one

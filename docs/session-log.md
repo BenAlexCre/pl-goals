@@ -13,6 +13,72 @@ from here.
 
 ---
 
+## 2026-08-05 (26) — Milestone 5 Slice 1: LMS entry creation
+
+**Goal:** Payment Verification was committed and pushed. Instead of Score
+Predictor, the repo owner asked to begin Milestone 5 (Last Man Standing),
+reusing the existing Game Engine/shared platform exactly, using Pick 5 as the
+reference implementation, one vertical slice at a time with a stop-and-review
+gate after each.
+
+**Architecture comparison (before any code):** the `GameEngine` interface,
+dispatcher, and DI context are already fully mode-agnostic — zero changes
+needed. `game_entries` already supports LMS's season-scoped shape
+(`entry_scope='season'`, `gameweek_id` null — the `game_entries_season_key`
+unique index has existed since Milestone 2, unused until now). `game_entry_lms`
+already exists with correct CHECK constraints and RLS. `entry_payments`,
+Payment Verification, `pot_prizes`, prize deductions, `notifications`, and the
+hardening sprint's failure-isolation pattern are all already generic across
+scope. LMS-specific work still needed: pick validation (one team per gameweek,
+"a loss or draw eliminates you" — GE-1's own product vision table already
+states this rule), elimination computation, a new `lms_picks` table (doesn't
+exist yet — the prototype's version is a retired `supabase_admin` object, not
+reused, same stance as everywhere else in this rebuild), and the `LmsEngine`
+class.
+
+**Schema additions for Slice 1: none** — entry creation only needs
+`game_entries`/`game_entry_lms`, both already existing, mirroring Pick 5's own
+Slice 1 exactly (which also needed no migration). `lms_picks` will be designed
+and reviewed when Slice 2 needs it, not before.
+
+**Two open product-rule questions flagged, not blocking Slice 1, not
+invented:** whether `lms_tiebreak_picks` (referenced by the retired prototype,
+never built, explicitly deferred to "properly designed... not before") is
+actually needed — GE-1's "last survivor(s) split the pot" already resolves
+ties without one, so recommended not building it; and same-round-wipeout
+handling (does everyone eliminated in the same gameweek split the pot, or
+does that round roll back). Both will need resolving before Slice 2/4/7.
+
+**Implemented:** `get-or-create-lms-entry` — mirrors
+`get-or-create-pick5-entry` exactly, one structural difference (no
+`gameweek_id` anywhere; the existing-entry lookup and insert use the
+season-scoped shape). Not one of the eight `GameEngine` methods, same
+reasoning as Pick 5's own Slice 1 — persistence orchestration, not
+scoring/validation/settlement/payout logic. No `LmsEngine` class yet, mirroring
+exactly when Pick 5's own Game Engine class first appeared (Slice 2, with
+`validateEntry()`).
+
+**Verification:** 4 new Deno unit tests (110/110 total pass). Live, through
+the real Edge Function (not a script bypassing it): entry creation, full
+idempotency (a second call returns the identical entry, confirmed exactly one
+`game_entries` row exists after both calls), a `pick5`-typed pot correctly
+rejected with a specific message, a non-member correctly rejected, a missing
+`pot_id` correctly rejected. All test data removed by exact ID. One
+infrastructure note: a brand-new Edge Function directory isn't picked up by
+the local Edge Runtime with a plain container restart — needed a full
+`supabase stop`/`supabase start` cycle before `get-or-create-lms-entry`
+appeared in the served-functions list. Not a bug, just a local-dev mechanic
+worth remembering for the next new-function slice.
+
+**Documentation updated:** `game-engine.md` (GE-12 milestone table, file-tree
+note), `project-board.md`.
+
+**Status:** Slice 1 implemented and fully verified. **Not committed** — per
+explicit instruction. Slices 2+ not started — stopping for review after this
+slice, per explicit instruction. Score Predictor not started.
+
+---
+
 ## 2026-08-05 (25) — Payment Verification admin workflow (ISSUE-6 resolved)
 
 **Goal:** with Pick 5's backend, Game Engine, frontend cutover, and hardening
