@@ -13,6 +13,345 @@ from here.
 
 ---
 
+## 2026-08-05 (14) — Full audit and close-out of the Slice 4 sync_runs deletion
+
+**Goal:** before committing Slice 4, fully close out the `sync_runs`
+incident disclosed in entry (13) below — verify the exact scope with
+read-only queries (not assumptions), classify impact, fix the underlying
+cleanup pattern, and confirm Slice 4 is otherwise unaffected and ready.
+This entry does not replace or edit (13) — it's the follow-up audit.
+
+**1. What was actually deleted — verified by query, not assumed.**
+
+Every business/application table checked directly:
+
+| Table | Current count | Finding |
+|---|---|---|
+| `game_entries`, `game_entry_pick5`, `pick5_picks`, `fixture_events`, `player_fixture_goals`, `pot_prizes`, `notifications` | 0 each | Correctly empty — all Slice 3/4 test data was cleaned up by exact ID, nothing orphaned |
+| `pot_members` | 1 | Pre-existing (`pot 37049fcd…`, `user 4e3ec175…`) — not a pot or user this session ever touched |
+| `user_entries` | 1 | Pre-existing prototype row (same pot/user as above), untouched all session |
+| `entry_payments` | 1 | Pre-existing, same pot/user, untouched all session |
+| `auth.users` | 4 | The four original `bentest*@gmail.com` seed accounts (created 2026-06-13/14) — every test account this session created was individually deleted by exact ID; count matches the pre-session baseline exactly |
+
+**Conclusion: no application or business data was lost.** Only `sync_runs`
+(an operational audit log — per `business-rules.md`, visible only to app
+admins, read by nothing in the application's own logic) was affected.
+
+**`sync_runs` scope, precisely:**
+- Directly observed from this session's own tool output (the actual
+  `DELETE n` results returned at the time, not reconstructed after the
+  fact):
+  - Slice 3 cleanup: `delete ... where job_name = 'compute-deadlines'` →
+    **2 rows**. `compute-deadlines` never wrote to `sync_runs` before Slice
+    3 added it (confirmed by reading its pre-Slice-3 source), so both
+    deleted rows were this session's own test invocations. **Zero
+    pre-existing loss.**
+  - Slice 4 cleanup: `delete ... where job_name = 'compute-scores'` →
+    **65 rows**. This session made exactly 2 real test invocations of
+    `compute-scores`. **63 rows were pre-existing, legitimate history —
+    this is the incident**, unchanged from entry (13)'s disclosure.
+- Independent cross-check via the `id` sequence (`sync_runs_id_seq`):
+  current span is `id` 2–225, only 31 rows present — a gap of **193**
+  missing IDs, larger than the 65 (Slice 4) + 2 (Slice 3) = 67 directly
+  attributable to this session's two delete statements. This session ran
+  no other `delete from sync_runs` command, of any shape, at any point —
+  confirmed by reviewing every SQL statement executed. The remaining ~126
+  is **not attributable to anything this session did**; most plausibly it
+  reflects this local project's history predating this session (real
+  `compute-scores`/`compute-deadlines` cron activity, and/or intervals
+  between working sessions), which cannot be reconstructed now that the
+  rows are gone. Reporting this gap honestly rather than forcing a tidy
+  number: **67 rows are fully accounted for and directly attributable to
+  this session (63 of them the actual mistake); the remainder of the
+  sequence gap is real but has no evidence tying it to any action taken
+  here.**
+
+**2. Impact classification: LOW.**
+
+Only operational execution history (`sync_runs`, an audit/observability
+table) was lost. No application data, no financial data (`entry_payments`,
+`pot_prizes`), no user data, no game state (`game_entries`, `pick5_picks`,
+`player_fixture_goals`) was affected — all independently confirmed by
+direct query above, not inferred. Nothing in the application reads
+`sync_runs` for business logic (it's an admin-visible log only), so there
+is no functional regression, only a permanent gap in historical
+observability for `compute-scores` runs between whenever `ISSUE-19` was
+fixed and this cleanup. Not classified "No impact" because real,
+irreversible data loss did occur and matters for auditability — but it is
+not Medium/High/Critical because nothing user-facing, financial, or
+functionally load-bearing was touched.
+
+**3. Root cause and prevention.**
+
+Root cause: cleanup used `delete from sync_runs where job_name = '...'` —
+a condition matching *any* row with that job name, not just the rows this
+session created. This pattern was safe exactly once (Slice 3's
+`compute-deadlines`, which had no pre-existing history) and unsafe the
+second time it was reused without re-checking that assumption
+(`compute-scores`, which has written to `sync_runs` since it was first
+built). Every *other* cleanup statement this session ever ran — for
+`game_entries`, `pot_members`, `auth.users`, `fixture_events` — already
+deleted by exact primary key, never by a shared attribute. `sync_runs` was
+the one inconsistent case.
+
+**Standing rule adopted, effective immediately, for all future test
+cleanup in this project:** never delete by a condition another process
+could also satisfy (job name, table-wide status, a shared column value).
+Always capture the specific ID(s) a test itself creates — read them back
+immediately after creation if the value isn't already known (e.g.
+`select id from sync_runs where job_name = X order by started_at desc
+limit 1`, captured right after invoking the function, before any other
+concurrent activity can add a same-named row) — and delete only by that
+exact ID or ID list. A `where job_name = ...`-shaped delete is never safe
+against a table a real cron job also writes to, regardless of how safe it
+looked for a different, previously-silent table. This rule is stronger
+than "delete by a narrow time window" — `compute-scores` ticks every 3
+minutes, so a live cron run can genuinely land inside any timestamp window
+a test happens to use, and only an exact ID is immune to that. This is
+saved as a standing project memory, not just a note in this file, so it
+carries into future sessions automatically.
+
+**4. Final re-verification.**
+- Full Deno suite: 50/50 pass (unchanged from entry (13) — no code was
+  touched during this audit, only read-only queries were run).
+- `deno check` clean on both extended Edge Functions.
+- `supabase db push --local --dry-run`: database up to date, no pending
+  migrations — confirms `009` is correctly applied and nothing was left
+  dangling from the reverted `010` mistake.
+- Live smoke test of both extended functions post-cleanup:
+  `compute-scores` → `{"success":true,"processed":0,"gameEngineDispatches":0}`,
+  `compute-deadlines` → `{"success":true,"updated":46,"locked":0}` — both
+  run cleanly with zero errors against the now-empty state, confirming
+  Slice 3 and Slice 4's code paths are healthy, not just that they worked
+  once during live testing.
+- `git status`: only the files genuinely changed by Slices 3–4 are
+  present; no stray files, no leftover test scripts.
+
+**Status:** Incident fully closed out. Slice 4 is functionally verified,
+unaffected by the `sync_runs` mistake, and ready for the repo owner's
+commit decision.
+
+---
+
+## 2026-08-05 (13) — Milestone 4, Slice 4: Pick 5 scoring, and a data-loss mistake during cleanup
+
+**Goal:** Slice 3 was approved; implement the next vertical slice —
+`calculateScore()`, per `docs/game-engine.md` § GE-6/GE-8.3. Same
+discipline as before, plus this slice surfaced a genuine incident that
+needs recording honestly, not smoothed over.
+
+**Scoping decisions made before writing code:**
+- `calculateScore()` only touches `game_entries` already `locked` — a
+  `pending` entry's picks can still change (Slice 2), and a `settled` entry
+  (once `settle()` exists) is already finalized. Neither should be scored.
+- Deliberately does **not** implement `business-rules.md`'s "unpaid entries
+  are voided at scoring time" rule. That's real, but it's a finalization
+  concern — the natural home is `settle()` ("Finalize this gameweek's
+  outcome" per GE-6), not scoring. Recorded as the leading candidate for
+  Slice 5 rather than silently building it into this method.
+- Reuses `player_fixture_goals`, inheriting `ISSUE-3` (never auto-refreshed)
+  unchanged — out of scope for this slice.
+
+**What was built:**
+- `Pick5Engine.calculateScore(ctx, gameweekId)` — the third real Game Engine
+  method. Scopes to pick5 pots explicitly (same two-step pattern as
+  `lockEntries()`), checks for a live fixture to decide `winning`/`losing`
+  vs `won`/`lost` (same distinction the retired prototype made, carried
+  forward faithfully per `business-rules.md` § How scoring works), reads
+  `player_fixture_goals` for each picked player, and upserts both
+  `pick5_picks` (`goals_scored`, `result`) and `game_entry_pick5`
+  (`picks_won`) in two batched calls rather than per-row loops.
+- **Real bug caught by reasoning, not by a failing test**: the first draft
+  upserted `pick5_picks` with only `{id, goals_scored, result}`. Postgres
+  validates a candidate row's NOT NULL columns before it knows an
+  `ON CONFLICT DO UPDATE` will fire, so this would have failed on
+  `game_entry_id`/`player_id`/`pick_position` being null — caught during
+  implementation, fixed by fetching and re-sending those columns too, before
+  ever running it. Documented in the code so the reasoning survives, since
+  it's a Postgres upsert subtlety easy to reintroduce elsewhere.
+- `compute-scores/index.ts` extended in place (old `user_entries` logic
+  untouched) — same shape as Slice 3's `compute-deadlines` extension:
+  discovers game types with `locked` entries per gameweek and dispatches
+  `calculateScore()`. Response body gained `gameEngineDispatches` alongside
+  the pre-existing `processed` count.
+- **Incidental fix, not a new decision**: `deno check` on `compute-scores/index.ts`
+  failed on a pre-existing `error.message` access in the catch block (`error`
+  is `unknown` under strict mode) — this file had never been type-checked
+  before (`ISSUE-16`). Fixed with the same `error instanceof Error` pattern
+  already used in `compute-deadlines`, so this slice's own additions could
+  be verified cleanly. Not a behavior change.
+- 6 new Deno unit tests for `calculateScore()` (won/lost vs winning/losing,
+  duplicate-pick threshold counting, non-locked entries left untouched,
+  no-pick5-pots and no-picks no-ops). 50/50 total pass across the whole
+  Game Engine + Pick 5 Edge Function suite.
+
+**A schema mistake, caught and reverted before it mattered:** planned a
+migration adding `idx_player_fixture_goals_gameweek (gameweek_id, player_id)`,
+reasoning it was needed the same way `idx_game_entries_gameweek_status` was
+in Slice 3. Applied it, then discovered `idx_pfg_gameweek (gameweek_id)`
+already existed from `001_initial_schema.sql` — missed on an earlier partial
+read of that file. The new index was genuinely redundant (the existing
+single-column index already serves this exact query efficiently at this
+table's realistic size). Dropped the index, deleted its migration-history
+row, and deleted the migration file — all local-only and never committed,
+so no harm done, but recorded here as a reminder to check *all* existing
+indexes on a table before assuming a schema-review-style gap exists.
+
+**A real mistake that was not caught in time — full account:** while
+cleaning up this slice's live-verification test data, ran
+`delete from sync_runs where job_name = 'compute-scores'` to remove the two
+`sync_runs` rows this session's own test invocations had created. This was
+the same pattern used safely in Slice 3 for `compute-deadlines` — but that
+case was safe only because `compute-deadlines` never wrote to `sync_runs`
+before Slice 3 added it, so no prior rows existed. `compute-scores` has
+written to `sync_runs` on every invocation since it was first built
+(confirmed by reading its original code before editing this slice), and the
+real `compute-scores-every-3-min` cron job has been running successfully
+since `ISSUE-19` was fixed. The broad delete removed **63 pre-existing,
+legitimate `sync_runs` rows**, not just the 2 created by this session's
+test — genuine audit-log history, permanently lost (no backup/undo
+mechanism exists for this). Confirmed the blast radius is limited to
+`sync_runs` specifically: `cron.job_run_details` (the separate, pg_cron-level
+audit log ISSUE-19's original investigation cited) is untouched (27,070 rows
+intact), and no application data (`game_entries`, `pick5_picks`, pots,
+users) was affected. Impact assessed as low-severity — `sync_runs` is an
+observability/audit log, not financial or user-facing data — but this was a
+process failure that should not have happened: every other cleanup step in
+this and prior sessions deleted by specific primary key; this one didn't,
+and it should have. Lesson recorded for future sessions: never delete from
+an audit/log table by a shared filter (job name, table name) that could
+match rows this session didn't create — delete only by the specific IDs a
+test itself produced, exactly as already done for every other table in this
+same cleanup.
+
+**Verification:**
+- 50/50 Deno unit tests pass; `deno check` clean on both extended Edge
+  Functions.
+- Migrations: `009` (from Slice 3, unaffected) confirmed still applied;
+  the mistaken `010` was reverted before commit as described above.
+- Live end-to-end, using real seed data rather than fabricated fixtures:
+  gameweek 2 (already fully scored/finished in the seed data) and its real
+  fixture 39 (team 1 vs team 38). Seeded a `locked` entry with picks
+  {player A ×2, player B ×1, player C ×2} against real player IDs, inserted
+  real `fixture_events` (player A: 2 goals, player C: 1 goal, player B: 0),
+  manually refreshed `player_fixture_goals` (a one-time manual refresh for
+  this test only — does not resolve `ISSUE-3`), then invoked
+  `compute-scores` for real via `curl` with the exact cron header shape.
+  Result matched hand-computed expectations exactly: player A's two picks
+  (threshold 2, scored 2) → `won`; player B's pick (threshold 1, scored 0)
+  → `lost`; player C's two picks (threshold 2, scored 1) → `lost`;
+  `game_entry_pick5.picks_won = 2`. Ran `compute-scores` a second time —
+  identical results, confirming idempotency. Cleaned up `game_entries`
+  (cascades to `game_entry_pick5`/`pick5_picks`), `pot_members`,
+  `fixture_events`, `auth.users`, and refreshed
+  `player_fixture_goals` back to empty — all correctly scoped by specific
+  ID, unlike the `sync_runs` mistake above.
+
+**Status:** Slice 4 implemented and fully verified live, with one disclosed
+data-loss incident from this session's own cleanup (see above — audit-log
+only, no application-data impact). **Not committed** — awaiting the repo
+owner's review and explicit approval before Slice 5.
+
+---
+
+## 2026-08-04 (12) — Milestone 4, Slice 3: Pick 5 locking
+
+**Goal:** implement the next vertical slice after Slice 2 (committed as
+`e6108c5`) — `lockEntries()`, per `docs/game-engine.md` § GE-6/GE-8.2/GE-19.
+Same discipline as before: production quality, no temporary
+implementations, every schema change as a migration, RLS kept correct, unit
+tests, full end-to-end live verification, docs kept in sync, stop before
+Slice 4.
+
+**Scoping decision:** GE-19's Locking sequence diagram already names
+`compute-deadlines` as this flow's Edge Function, and GE-9 already listed it
+as "extended to drive locking via the dispatcher (not yet wired)" — so this
+slice extends that existing function in place rather than creating a new
+one. Deliberately left the old `lock_due_entries()` SQL function and its
+`lock-due-entries-every-minute` cron job untouched — that's prototype-era
+code operating on the old `user_entries` table, out of scope ("do not
+refactor unrelated code").
+
+**What was built:**
+- `Pick5Engine.lockEntries(ctx, gameweekId)` — the second real Game Engine
+  method implementation (after `validateEntry()` in Slice 2). Transitions
+  `game_entries` from `pending` to `locked` for the given gameweek, scoped
+  explicitly to pick5 pots via a two-step lookup (fetch pick5 pot IDs, then
+  update `game_entries` filtered by those pot IDs) rather than relying on
+  "only pick5 entries have a non-null `gameweek_id`" — true today per GE-4.5,
+  but not something this method should silently depend on holding forever
+  (GE-18 mode isolation). Whether the deadline has actually passed is the
+  caller's decision, not this method's — mirrors how `calculateScore()`/
+  `settle()` also take a caller-selected `gameweekId`.
+- `compute-deadlines/index.ts` extended (not rewritten) — the existing
+  deadline-computation logic is untouched; after computing/writing each
+  gameweek's `deadline_utc`, if that deadline has already passed, the
+  function now queries which game types have pending entries for that
+  gameweek (via `game_entries` embedding `pots(game_type)` — data-driven, no
+  hardcoded `'pick5'`, per GE-7) and calls `resolveEngine(gameType).lockEntries()`
+  for each, skipping any `UnknownGameTypeError` (a mode not registered yet
+  can never break this loop for the modes that are). Also now writes a
+  `sync_runs` row per invocation (`success`/`failed`), matching the pattern
+  `compute-scores` already used and GE-19's sequence diagram already called
+  for — `compute-deadlines` didn't do this before.
+- `009_game_entries_gameweek_status_index.sql` — applies
+  `idx_game_entries_gameweek_status`, a `schema-review.md` recommendation
+  (#8) deliberately left unapplied at Milestone 2 time since nothing yet
+  exercised that query shape. `lockEntries()`'s `where gameweek_id = $1 and
+  status = 'pending'`, run every hour by cron across every upcoming/live
+  gameweek, is exactly that query — added now that there's a real reason to.
+  Annotated `schema-review.md` itself to note this one item is now applied
+  (left the rest of that list's stale "not yet applied" framing alone —
+  most of it was actually applied back in Milestone 2; fixing that fully is
+  unrelated to this slice).
+- 16 new Deno unit tests for `lockEntries()` (fake Supabase client, in-memory
+  row mutation so the test proves the method's own gameweek/status/pot
+  filtering logic, not just that it issued a query): locks pending entries
+  for the target gameweek, leaves other gameweeks untouched, only
+  transitions `pending` rows (not `locked`/`void`/`settled`), never touches
+  a non-pick5 pot's entries even with a matching `gameweek_id`, and returns
+  `0` without querying `game_entries` at all when there are no pick5 pots.
+  44/44 total pass (28 existing + 16 new).
+
+**Bugs found:** none this slice — Slice 2's process (proving trigger
+behavior with direct SQL before writing application code, then re-proving
+end to end) carried over and nothing broke on the first live run.
+
+**Verification:**
+- `deno check` on `compute-deadlines/index.ts` (had to fix one real type
+  issue: `supabase-js`, with no generated `Database` type, infers an
+  embedded many-to-one relation — `game_entries` embedding `pots(game_type)`
+  — as an array rather than a single object; handled defensively rather
+  than asserting either shape).
+- Migration `009` applied via `supabase db push --local`; confirmed the
+  index exists via `pg_indexes`.
+- Full clean restart (`supabase stop`/`start`) even though no new function
+  directory was added this slice (existing-function hot-reload should have
+  been sufficient) — kept for parity with prior slices' verification rigor.
+  Noted the Postgres MCP server disconnected after the restart and didn't
+  reconnect automatically; fell back to `psql` via `docker exec` for the
+  rest of this session's direct DB queries.
+- Live end-to-end proof using two real gameweeks already in the seed data
+  rather than fabricated ones — gameweek 9 (deadline 2026-07-19, already
+  past relative to the live clock) and gameweek 28 (deadline 2026-08-21,
+  still future) — with two real `pending` `game_entries` rows seeded against
+  a real pick5 pot and a brand-new test user. Invoked `compute-deadlines`
+  for real via `supabase.functions.invoke()`: the past-deadline entry
+  locked, the future-deadline entry stayed `pending`, `sync_runs` recorded
+  `status: success, records_processed: 1`. Invoked it a second time to
+  confirm idempotency: `locked: 0`, both entries' statuses unchanged.
+  Confirmed RLS/column-grant still blocks a client from setting `status`
+  directly (`permission denied for table game_entries`, confirmed via the
+  DB that the row was genuinely untouched) — no regression from Slice 2's
+  RLS model. All test data (`game_entries`, `pot_members`, `auth.users`,
+  and the two `sync_runs` rows this test itself created) removed afterward;
+  row counts confirmed back to baseline.
+
+**Status:** Slice 3 implemented and fully verified live. **Not committed**
+— awaiting the repo owner's review and explicit approval before Slice 4.
+
+---
+
 ## 2026-08-04 (11) — Milestone 4, Slice 2: Pick 5 pick submission
 
 **Goal:** implement pick submission for Pick 5 as the next vertical slice, per

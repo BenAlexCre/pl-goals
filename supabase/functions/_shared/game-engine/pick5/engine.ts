@@ -1,8 +1,8 @@
-// Pick5Engine — the first real GameEngine implementation (GE-6), Milestone 4
-// Slice 2. Only validateEntry() is implemented this slice; every other
-// lifecycle method throws GameEngineNotImplementedError, per the pattern
-// errors.ts documents for a mode landing incrementally (lockEntries in
-// Slice 3+, calculateScore/settle in later slices, following
+// Pick5Engine — the first real GameEngine implementation (GE-6). Milestone 4
+// Slice 2 landed validateEntry(); Slice 3 adds lockEntries(). Every other
+// lifecycle method still throws GameEngineNotImplementedError, per the
+// pattern errors.ts documents for a mode landing incrementally
+// (calculateScore/settle/etc. in later slices, following
 // docs/game-engine.md § GE-12's Milestone 4 sequencing).
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
@@ -91,12 +91,181 @@ export class Pick5Engine implements GameEngine {
     }
   }
 
-  lockEntries(_ctx: GameEngineContext, _gameweekId: number): Promise<number> {
-    throw new GameEngineNotImplementedError('pick5', 'lockEntries')
+  // GE-6: "Transition eligible game_entries from pending to locked." Whether
+  // the deadline has actually passed is the caller's decision (compute-deadlines
+  // already computes gameweeks.deadline_utc and only calls this once it has) —
+  // this method's own job is just the pick5-scoped transition for a gameweek
+  // the caller has already selected, mirroring how calculateScore()/settle()
+  // also take a caller-selected gameweekId rather than re-deriving eligibility.
+  //
+  // Scoped to pick5 pots explicitly (a two-step lookup, not a single query
+  // with an implicit join) rather than relying on "only pick5 entries have a
+  // non-null gameweek_id" (true today per GE-4.5, but not something this
+  // method should silently depend on holding forever) — see GE-18's
+  // mode-isolation invariant.
+  async lockEntries(ctx: GameEngineContext, gameweekId: number): Promise<number> {
+    const { data: pick5Pots, error: potsError } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('game_type', 'pick5')
+
+    if (potsError) {
+      throw new Error(`Failed to look up pick5 pots: ${potsError.message}`)
+    }
+
+    const potIds = (pick5Pots ?? []).map((p: { id: string }) => p.id)
+    if (potIds.length === 0) {
+      return 0
+    }
+
+    const { data: locked, error: updateError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'locked' })
+      .eq('gameweek_id', gameweekId)
+      .eq('status', 'pending')
+      .in('pot_id', potIds)
+      .select('id')
+
+    if (updateError) {
+      throw new Error(`Failed to lock entries: ${updateError.message}`)
+    }
+
+    return locked?.length ?? 0
   }
 
-  calculateScore(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {
-    throw new GameEngineNotImplementedError('pick5', 'calculateScore')
+  // GE-6: "Resolve picks against real fixture data." Only touches game_entries
+  // that are already 'locked' — a 'pending' entry can still have its picks
+  // edited (Slice 2), so scoring one would be meaningless and unstable; a
+  // 'settled' entry is already finalized by settle() (a later slice) and
+  // must not be silently overwritten. Deliberately does NOT touch payment
+  // status or void anything for non-payment — docs/business-rules.md's
+  // "unpaid entries are voided at scoring time" rule is real, but voiding is
+  // a finalization concern (settle()'s job per GE-6's "Finalize this
+  // gameweek's outcome"), not a scoring concern; conflating the two here
+  // would make this method do two unrelated things. See session-log.md for
+  // this call.
+  //
+  // Reads public.player_fixture_goals, same as the retired prototype did —
+  // inherits ISSUE-3 (the view is never automatically refreshed) unchanged;
+  // fixing that is out of scope for this slice.
+  async calculateScore(ctx: GameEngineContext, gameweekId: number): Promise<void> {
+    const { data: pick5Pots, error: potsError } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('game_type', 'pick5')
+
+    if (potsError) {
+      throw new Error(`Failed to look up pick5 pots: ${potsError.message}`)
+    }
+
+    const potIds = (pick5Pots ?? []).map((p: { id: string }) => p.id)
+    if (potIds.length === 0) {
+      return
+    }
+
+    const { data: liveFixtures, error: liveError } = await ctx.supabase
+      .from('fixtures')
+      .select('id')
+      .eq('gameweek_id', gameweekId)
+      .eq('status', 'live')
+      .limit(1)
+
+    if (liveError) {
+      throw new Error(`Failed to check live fixture status: ${liveError.message}`)
+    }
+    const isLive = (liveFixtures?.length ?? 0) > 0
+
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id')
+      .eq('gameweek_id', gameweekId)
+      .eq('status', 'locked')
+      .in('pot_id', potIds)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up locked entries: ${entriesError.message}`)
+    }
+
+    const entryIds = (entries ?? []).map((e: { id: string }) => e.id)
+    if (entryIds.length === 0) {
+      return
+    }
+
+    const { data: picks, error: picksError } = await ctx.supabase
+      .from('pick5_picks')
+      .select('id, game_entry_id, player_id, pick_position, goal_threshold')
+      .in('game_entry_id', entryIds)
+
+    if (picksError) {
+      throw new Error(`Failed to look up picks: ${picksError.message}`)
+    }
+    if (!picks?.length) {
+      return
+    }
+
+    const playerIds = [...new Set(picks.map((p: { player_id: number }) => p.player_id))]
+
+    const { data: goalRows, error: goalsError } = await ctx.supabase
+      .from('player_fixture_goals')
+      .select('player_id, goals')
+      .eq('gameweek_id', gameweekId)
+      .in('player_id', playerIds)
+
+    if (goalsError) {
+      throw new Error(`Failed to look up player goals: ${goalsError.message}`)
+    }
+
+    const goalsByPlayer = new Map<number, number>()
+    for (const row of (goalRows ?? []) as { player_id: number; goals: number }[]) {
+      goalsByPlayer.set(row.player_id, (goalsByPlayer.get(row.player_id) ?? 0) + (row.goals ?? 0))
+    }
+
+    const picksWonByEntry = new Map<string, number>()
+    type PickRow = { id: number; game_entry_id: string; player_id: number; pick_position: number; goal_threshold: number }
+    // Upsert requires every NOT NULL column without a default (game_entry_id,
+    // player_id, pick_position), not just the ones actually changing — Postgres
+    // validates the candidate row before it knows the ON CONFLICT branch will
+    // fire. Re-sending the unchanged player_id also re-fires
+    // trg_pick5_goal_thresholds (it triggers on "update of player_id" being
+    // targeted, not on the value actually differing) — harmless, just a
+    // redundant recompute of the same numbers.
+    const pickUpdates = picks.map((pick: PickRow) => {
+      const goals = goalsByPlayer.get(pick.player_id) ?? 0
+      const met = goals >= pick.goal_threshold
+      const result = met ? (isLive ? 'winning' : 'won') : (isLive ? 'losing' : 'lost')
+      if (met) {
+        picksWonByEntry.set(pick.game_entry_id, (picksWonByEntry.get(pick.game_entry_id) ?? 0) + 1)
+      }
+      return {
+        id: pick.id,
+        game_entry_id: pick.game_entry_id,
+        player_id: pick.player_id,
+        pick_position: pick.pick_position,
+        goals_scored: goals,
+        result,
+      }
+    })
+
+    const { error: pickUpdateError } = await ctx.supabase
+      .from('pick5_picks')
+      .upsert(pickUpdates, { onConflict: 'id' })
+
+    if (pickUpdateError) {
+      throw new Error(`Failed to write pick results: ${pickUpdateError.message}`)
+    }
+
+    const entryUpdates = entryIds.map((id) => ({
+      game_entry_id: id,
+      picks_won: picksWonByEntry.get(id) ?? 0,
+    }))
+
+    const { error: entryUpdateError } = await ctx.supabase
+      .from('game_entry_pick5')
+      .upsert(entryUpdates, { onConflict: 'game_entry_id' })
+
+    if (entryUpdateError) {
+      throw new Error(`Failed to write entry scores: ${entryUpdateError.message}`)
+    }
   }
 
   settle(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {

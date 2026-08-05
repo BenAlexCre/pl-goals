@@ -1,15 +1,16 @@
 # Game Engine — Architectural Specification
 
-Last reviewed: 2026-08-04. Status: **authoritative.** This document is now the blueprint
+Last reviewed: 2026-08-05. Status: **authoritative.** This document is now the blueprint
 every migration, Edge Function, frontend page, RLS policy, and test is measured against.
 Milestone 1 (this specification) and Milestone 2 (shared schema) are complete and have
 passed a full architectural review — see [schema-review.md](./schema-review.md) for the
 review itself and `session-log.md` for what was applied versus deliberately deferred.
 Milestone 3 (the Game Engine framework — folder structure, interfaces, dispatcher, shared
 types, dependency injection) is complete. Milestone 4 (Pick 5) is in progress: Slice 1
-(entry creation) and Slice 2 (pick submission — the first real `validateEntry()`
-implementation, `Pick5Engine`) are done; scoring, locking, and settlement don't exist yet.
-See [GE-12](#ge-12-milestone-plan) for exact status per milestone.
+(entry creation), Slice 2 (pick submission), Slice 3 (locking, wired into
+`compute-deadlines`), and Slice 4 (scoring, wired into `compute-scores`) are done;
+settlement and standings don't exist yet. See [GE-12](#ge-12-milestone-plan) for exact
+status per milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
 described in [current-state.md](./current-state.md) — those objects communicated *business
@@ -289,8 +290,8 @@ Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, whic
 | Function | Change |
 |---|---|
 | `sync-fixtures`, `sync-live-events` (per `ISSUE-4`) | Unchanged — feeds all three modes identically |
-| `compute-deadlines` | Extended to drive locking via the dispatcher (not yet wired — Milestone 4+) |
-| `compute-scores` | Extended to drive scoring via the dispatcher (not yet wired) |
+| `compute-deadlines` | **Milestone 4 Slice 3**: now drives locking via the dispatcher. Deadline computation itself is unchanged; once a gameweek's just-computed `deadline_utc` has already passed, discovers which game types have pending entries for that gameweek (data-driven — no hardcoded `game_type`, GE-7) and calls each one's `lockEntries()`. Now also writes a `sync_runs` row per invocation (previously didn't) |
+| `compute-scores` | **Milestone 4 Slice 4**: now drives scoring via the dispatcher. Old logic (reading/writing `user_entries`/`user_entry_picks`) is unchanged; the new block discovers game types with `locked` entries for each gameweek and calls each one's `calculateScore()`. Response body now also reports `gameEngineDispatches` alongside the pre-existing `processed` count |
 | `settle-gameweek` | Extended to drive settlement via the dispatcher (not yet wired) |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
@@ -333,7 +334,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 1 | Architecture finalized, specification produced and approved | **Done** |
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
-| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation) and Slice 2 (pick submission, first real `validateEntry()` implementation) done; Slice 3+ (locking, scoring, settlement, standings) not started |
+| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), and Slice 4 (scoring, wired into `compute-scores`) done; settlement and standings not started |
 | 5 | Last Man Standing implementation | Not started |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
@@ -424,8 +425,8 @@ supabase/functions/
                                     GameEngineNotImplementedError, pending later slices
       lms/                         Milestone 5 — empty until then
       predictor/                   Milestone 6 — empty until then
-  compute-scores/                  existing — will import _shared/game-engine (Milestone 4+)
-  compute-deadlines/                existing — will import _shared/game-engine (Milestone 4+)
+  compute-scores/                  Milestone 4 Slice 4 — imports _shared/game-engine, drives calculateScore()
+  compute-deadlines/                Milestone 4 Slice 3 — imports _shared/game-engine, drives lockEntries()
   settle-gameweek/                 existing — will import _shared/game-engine (Milestone 4+)
   admin-actions/                   existing — unchanged
   sync-fixtures/                   existing — unchanged

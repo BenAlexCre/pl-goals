@@ -313,7 +313,11 @@ In priority order, matching the executive summary:
 5. Add the `max_members`/`status` checks to `redeem_invite()`.
 6. Add the missing `check` constraints listed under each table above.
 7. Add `pot_prizes.updated_at` + trigger.
-8. Add `idx_game_entries_gameweek_status` and `idx_notifications_unread`.
+8. Add `idx_game_entries_gameweek_status` and `idx_notifications_unread`. **`idx_game_entries_gameweek_status`
+   applied 2026-08-04** (`009_game_entries_gameweek_status_index.sql`, Milestone 4 Slice 3) once
+   `Pick5Engine.lockEntries()` became the first real consumer of exactly this query shape.
+   `idx_notifications_unread` remains unapplied — still nothing reads `notifications` by read
+   status yet.
 9. Column-level `revoke`/`grant` narrowing on `game_entries_update_own_pending` and
    `notifications_update_own`.
 10. Remove the default from `pots.game_type`.
