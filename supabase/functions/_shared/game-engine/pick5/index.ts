@@ -8,4 +8,4 @@ registerEngine('pick5', new Pick5Engine())
 
 export { Pick5Engine } from './engine.ts'
 export { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
-export type { Pick5PickInput } from './engine.ts'
+export type { Pick5NotificationType, Pick5PickInput } from './engine.ts'

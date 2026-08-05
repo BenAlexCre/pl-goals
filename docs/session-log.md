@@ -13,6 +13,102 @@ from here.
 
 ---
 
+## 2026-08-05 (21) — Milestone 4 Slice 9: notifyUsers() implemented as a domain-event emitter
+
+**Goal:** Slice 8 was reviewed, approved, committed, and pushed. The repo owner asked
+for a short design review before implementing `notifyUsers()` — the eighth and final
+`GameEngine` contract method — covering: which events should notify, which side
+(Game Engine vs. a future delivery service) owns which part, which channels the
+architecture should support, how to keep the Game Engine decoupled from delivery,
+how notification failures should affect settlement, retry handling, and how this
+extends to LMS/Predictor. Explicitly asked whether the Game Engine should only emit
+domain events rather than sending notifications directly, and to implement that
+approach if it's the right one.
+
+**Investigation:** the answer was already largely committed to by the framework
+design from Milestone 3 — `notifications` (schema, RLS) and GE-4.8/GE-8.7 already
+described `notifyUsers()` as writing to `notifications`, with delivery beyond in-app
+explicitly out of scope. This slice confirmed that design still holds and built it
+literally: `notifyUsers()` is a pure domain-event emitter (insert one row, return),
+never touching a delivery channel. Full write-up recorded in
+[decisions.md § Notifications: domain events, not delivery](./decisions.md#notifications-domain-events-not-delivery),
+covering all eight review questions.
+
+**Event catalog:** one event implemented — `pick5.prize_awarded`, fired once per
+winner from inside `awardPrize()` (not from `settle()` — `awardPrize()` is already
+the method that resolves the idempotent-no-op-vs-real-award question, per Slice 8's
+`determineWinner()` nesting, so it's the natural single call site). Other candidate
+events (entry voided for unverified payment, non-winner "results are in") were
+considered and deliberately deferred — nothing in the codebase reads `notifications`
+yet, so speculative untested event types would be complexity without a way to
+verify their shape against a real consumer.
+
+**Failure isolation — the key design decision:** every other write in `awardPrize()`
+throws and aborts on error (money must fail loudly). `notifyUsers()`'s call site
+inside `awardPrize()`'s payout loop is the one deliberate exception: wrapped in a
+local try/catch, logged via `console.error`, never re-thrown. By the time it runs,
+that winner's `pot_prizes` row and `payout_amount` are already durably committed —
+a notification failure must never unwind or block money already correct, or stop
+the loop from paying remaining winners. `notifyUsers()` itself still throws on
+error like every other `GameEngine` method, for any future direct caller; the
+try/catch boundary belongs at the one call site that knows this specific write is
+allowed to fail silently. No retry logic was added — a single insert into the same
+database every other write in the request already depends on isn't a fragile
+network call worth retrying inline; real retry/backoff belongs to the future
+delivery service, not this write.
+
+**Channels:** in-app only, via the existing `notifications` table + RLS. Multi-channel
+delivery (email/push/SMS), routing, and contact-channel preferences remain deferred
+to Milestone 7 — no schema or delivery service exists for them, and building that
+now with no consumer would be exactly the kind of unbuilt infrastructure this
+project has consistently avoided (same discipline as Payment Verification's
+no-gateway rule).
+
+**Implementation:** `Pick5Engine.notifyUsers(ctx, event)` — inserts into
+`notifications` (`user_id`, `pot_id`, `type`, `payload`), throws on write failure.
+`awardPrize()`'s per-winner payout loop extended to call it (try/caught, as above)
+immediately after each winner's `payout_amount` write. Removed the now-dead
+`GameEngineNotImplementedError` import/throw from `pick5/engine.ts` — all eight
+contract methods are implemented for Pick 5 as of this slice.
+
+**Tests:** 7 new Deno unit tests — `notifyUsers()` writes correctly and throws on
+failure (direct tests); `awardPrize()` writes one notification per winner (sole and
+tied-multi-winner cases) with the correct `type`/`payload`; does not write a
+duplicate notification on an idempotent second `awardPrize()` call; still awards
+the prize and payout correctly even when the notification write fails (the
+failure-isolation guarantee, proven via a fake table configured to fail on
+`.insert()`). 59/59 pass in `engine.test.ts`; 87/87 pass across the full Game
+Engine + Pick 5 suite.
+
+**Live verification:** a temporary script (deleted after use) created 2 real users
+and a fee-bearing pot (`entry_fee=10`, fixed admin fee `2`), invoked the real
+`settle-gameweek` Edge Function twice against gameweek 9 / fixture 104. First call:
+`pot_prizes` correct (`gross=20, admin_fee=2, net=18`), winner `payout_amount=18`,
+exactly one `notifications` row (`type: 'pick5.prize_awarded'`,
+`payload: { gameweekId: 9, amount: 18 }`). Second call: idempotent — still exactly
+one notification, no duplicate. All 11 expectations passed. All test data removed
+by exact ID afterward; fixture 104 reverted to `scheduled`; gameweek 9's `status`
+(which the settlement run itself had advanced to `completed`) reverted to
+`upcoming`. `deadline_utc` had drifted to `18:45` again during the run — the same
+already-diagnosed `ISSUE-24` recurrence as every prior slice — restored via a real
+`compute-deadlines` invocation, not a manual patch.
+
+**Documentation updated:** `decisions.md` (new ADR), `game-engine.md` (GE-4.8,
+GE-8.4, GE-8.7, the Settlement sequence diagram, GE-9's `settle-gameweek` row,
+GE-12, the top status paragraph, the file-tree note), `project-board.md` (Slice 8
+moved to Done as committed/pushed; Slice 9 added to Testing; the Backlog's
+Notifications card updated to reflect the in-app write now existing), `roadmap.md`
+(item 19 updated for the same reason — a factual correction, not a priority
+change, so no `/plan` re-scoping implied).
+
+**Status:** Slice 9 implemented and fully verified. All eight `GameEngine` contract
+methods are now implemented for Pick 5 — Milestone 4 (Pick 5) is functionally
+complete pending review. **Not committed** — per explicit instruction. LMS
+(Milestone 5) not started — per explicit instruction. Awaiting the repo owner's
+review.
+
+---
+
 ## 2026-08-05 (20) — Milestone 4 Slice 8: awardPrize() implemented, prize pool deductions applied
 
 **Goal:** continuation of entry 19's investigation, in the same session. The

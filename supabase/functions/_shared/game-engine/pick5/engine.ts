@@ -2,14 +2,22 @@
 // incrementally, one method per Milestone 4 slice (docs/game-engine.md §
 // GE-12): validateEntry (Slice 2), lockEntries (Slice 3), calculateScore
 // (Slice 4), settle (Slice 5), generateStandings (Slice 6), determineWinner
-// and awardPrize (Slice 8, wired together — see settle()). notifyUsers
-// still throws GameEngineNotImplementedError, per the pattern errors.ts
-// documents for a mode landing incrementally.
+// and awardPrize (Slice 8, wired together — see settle()), notifyUsers
+// (Slice 9, called from within awardPrize() — see that method's comment).
+// All eight GameEngine contract methods are now implemented.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
-import { GameEngineNotImplementedError } from '../errors.ts'
 import { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
+
+// GE-4.8: notifications.type is free text at the schema level — each mode
+// chooses and documents its own catalog rather than the DB enforcing one.
+// Only one event exists for Pick 5 so far: a winner being awarded a prize
+// (see docs/decisions.md § Notifications: domain events, not delivery).
+// Other candidate events (entry voided for non-payment, non-winner results)
+// were considered and deliberately deferred — see that same ADR — rather
+// than added speculatively with no consumer to verify them against.
+export type Pick5NotificationType = 'pick5.prize_awarded'
 
 export const PICK5_PICK_COUNT = 5
 
@@ -772,10 +780,48 @@ export class Pick5Engine implements GameEngine {
       if (payoutError) {
         throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
       }
+
+      // GE-8.7/decisions.md § Notifications: the money (pot_prizes,
+      // payout_amount) is already durably written by this point in the
+      // loop — a notification is a lower-severity, best-effort side effect
+      // of that fact, never a precondition for it. A failure here must
+      // never unwind or block settlement, and must never stop the loop
+      // from paying out this gameweek's remaining winners, so it's caught
+      // and logged rather than left to propagate like every other write in
+      // this method. notifyUsers() itself still throws on error (like
+      // every other GameEngine method) — the try/catch boundary belongs
+      // here, at the one call site that knows this specific write is
+      // allowed to fail silently, not inside notifyUsers() itself.
+      try {
+        await this.notifyUsers(ctx, {
+          userId,
+          potId,
+          type: 'pick5.prize_awarded' satisfies Pick5NotificationType,
+          payload: { gameweekId, amount: perWinnerAmount },
+        })
+      } catch (notifyError) {
+        console.error(
+          `notifyUsers failed for pot ${potId}, gameweek ${gameweekId}, user ${userId} (prize already awarded, not affected): ` +
+            (notifyError instanceof Error ? notifyError.message : String(notifyError))
+        )
+      }
     }
   }
 
-  notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {
-    throw new GameEngineNotImplementedError('pick5', 'notifyUsers')
+  // GE-6: "Write to notifications." A pure domain-event emitter — inserts
+  // one row and returns. Deliberately does not know about, or call, any
+  // delivery channel (email/push/SMS); see docs/decisions.md § Notifications
+  // for why that split is the recommended design, not just the current gap.
+  async notifyUsers(ctx: GameEngineContext, event: NotificationEvent): Promise<void> {
+    const { error } = await ctx.supabase.from('notifications').insert({
+      user_id: event.userId,
+      pot_id: event.potId,
+      type: event.type,
+      payload: event.payload ?? null,
+    })
+
+    if (error) {
+      throw new Error(`Failed to write notification: ${error.message}`)
+    }
   }
 }

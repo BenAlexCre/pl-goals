@@ -133,9 +133,11 @@ where noted — none require a code change to start.
     locking, payment voiding, leaderboard ranking), even a thin layer of tests around
     `utils/scoring.js` and the edge functions would catch regressions the type system
     can't.
-19. Notifications (deadline reminders, results) — nothing in the repo today, not yet
-    tracked as a numbered issue since it's a net-new feature rather than a gap in
-    existing behavior.
+19. Notification delivery (email/push/SMS beyond the in-app inbox; deadline reminders)
+    — the in-app domain-event write exists as of Milestone 4 Slice 9
+    (`Pick5Engine.notifyUsers()`, [game-engine.md § GE-4.8](./game-engine.md#ge-48-notifications));
+    an actual delivery mechanism beyond that remains unbuilt, not yet tracked as a
+    numbered issue since it's a net-new feature rather than a gap in existing behavior.
 20. Avatar upload — `profiles.avatar_url` exists but there's no Supabase Storage
     bucket or upload UI; same status as item 19.
 

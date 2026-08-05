@@ -597,6 +597,11 @@ interface FakeDb {
     is_settled: boolean
     settled_at: string | null
   }[]
+  notifications: { id: number; user_id: string; pot_id: string | null; type: string; payload: Record<string, unknown> | null }[]
+  // Slice 9: lets a test simulate the notifications insert failing, to prove
+  // awardPrize() isolates that failure from the money it already wrote —
+  // every other fake table always succeeds, so this is opt-in per test.
+  notificationsShouldFail: boolean
 }
 
 function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
@@ -609,6 +614,8 @@ function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     gameEntryPick5: [],
     potStandingsSnapshots: [],
     potPrizes: [],
+    notifications: [],
+    notificationsShouldFail: false,
     ...overrides,
   }
 }
@@ -616,7 +623,7 @@ function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
 // deno-lint-ignore no-explicit-any
 let fakeIdCounter = 1
 
-function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) {
+function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb, insertShouldFail?: () => boolean) {
   // deno-lint-ignore no-explicit-any
   const filters: ((row: any) => boolean)[] = []
   let orderSpec: { col: string; ascending: boolean } | null = null
@@ -692,6 +699,9 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) 
     // deno-lint-ignore no-explicit-any
     // deno-lint-ignore no-explicit-any
     insert: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+      if (insertShouldFail?.()) {
+        return Promise.resolve({ data: null, error: { message: 'Fake queryBuilder.insert() simulated failure' } })
+      }
       // Real supabase-js accepts either a single object or an array — this
       // codebase uses both shapes (e.g. get-or-create-pick5-entry inserts a
       // single object; generateStandings() inserts an array).
@@ -785,6 +795,8 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
           return queryBuilder(() => db.potStandingsSnapshots)
         case 'pot_prizes':
           return queryBuilder(() => db.potPrizes)
+        case 'notifications':
+          return queryBuilder(() => db.notifications, undefined, () => db.notificationsShouldFail)
         default:
           throw new Error(`Unexpected table in test fake: ${table}`)
       }
@@ -1385,6 +1397,111 @@ Deno.test('awardPrize is a no-op when the pot has no settled gameweek at all', a
   await engine.awardPrize(ctx, 'pot-1')
 
   assertEquals(db.potPrizes.length, 0)
+})
+
+// --- notifyUsers() -----------------------------------------------------
+
+Deno.test('notifyUsers writes a notification row with the given type and payload', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb()
+  const ctx = fakeDbContext(db)
+
+  await engine.notifyUsers(ctx, { userId: 'user-a', potId: 'pot-1', type: 'pick5.prize_awarded', payload: { gameweekId: 4, amount: 20 } })
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0].user_id, 'user-a')
+  assertEquals(db.notifications[0].pot_id, 'pot-1')
+  assertEquals(db.notifications[0].type, 'pick5.prize_awarded')
+  assertEquals(db.notifications[0].payload, { gameweekId: 4, amount: 20 })
+})
+
+Deno.test('notifyUsers throws when the write fails', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({ notificationsShouldFail: true })
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.notifyUsers(ctx, { userId: 'user-a', potId: 'pot-1', type: 'pick5.prize_awarded' }))
+})
+
+// --- awardPrize() -> notifyUsers() wiring (Slice 9) ---------------------
+
+Deno.test('awardPrize writes a pick5.prize_awarded notification for the sole winner', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0].user_id, 'user-a')
+  assertEquals(db.notifications[0].pot_id, 'pot-1')
+  assertEquals(db.notifications[0].type, 'pick5.prize_awarded')
+  assertEquals(db.notifications[0].payload, { gameweekId: 4, amount: 10 })
+})
+
+Deno.test('awardPrize writes one notification per winner when there are multiple tied winners', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 2)
+  const notifiedUsers = db.notifications.map((n) => n.user_id).sort()
+  assertEquals(notifiedUsers, ['user-a', 'user-b'])
+})
+
+Deno.test('awardPrize does not write a duplicate notification on an idempotent second call', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1, 'the idempotent no-op path returns before ever calling notifyUsers()')
+})
+
+Deno.test('awardPrize still awards the prize and payout when the notification write fails', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    notificationsShouldFail: true,
+  })
+  const ctx = fakeDbContext(db)
+
+  // Must not throw — a notification failure is never allowed to surface as
+  // an awardPrize() failure, let alone undo money already written.
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1)
+  assertEquals(db.potPrizes[0].is_settled, true)
+  assertEquals(db.gameEntries[0].payout_amount, 10)
+  assertEquals(db.notifications.length, 0, 'the failed write never lands in the table, but that does not block the payout above')
 })
 
 Deno.test('does not double-count a duplicate pick as two eligibility lookups failing', async () => {

@@ -421,3 +421,106 @@ Both decided by the repo owner 2026-08-05, directly, not inferred:**
    nearest cent; any leftover remainder (at most `winner_count - 1` cents) is never
    paid out to anyone. Simple, deterministic, never favors one tied winner over
    another.
+
+## Notifications: domain events, not delivery
+
+**Decided 2026-08-05**, directly by the repo owner, as part of Milestone 4 Slice 9.
+`Pick5Engine.notifyUsers()` implements this design; it was already the shape GE-4.8/
+GE-8.7 committed to when the framework itself was designed (Milestone 3) — Slice 9
+is the first slice to actually build it, not a change of direction.
+
+**What:** `notifyUsers()` is a pure **domain-event emitter**. It inserts exactly one
+row into `notifications` (`user_id`, `pot_id`, `type`, `payload` jsonb) and returns —
+it never formats a message for a specific channel, never calls an external
+provider, and never awaits anything beyond that one insert. Delivering the event
+to a user beyond the in-app `notifications` inbox (email, push, SMS) is explicitly
+a **future, separate Notification Service**, not part of the Game Engine, that
+would read new rows from this table and dispatch them — undesigned and unbuilt
+(`roadmap.md` item 19), consistent with GE-4.8's original "delivery beyond in-app
+is out of scope" note.
+
+**Why domain events, not direct sending:** the alternative — `notifyUsers()`
+calling an email/push/SMS provider directly — would make the Game Engine's
+money-critical settlement path (`settle()` → `awardPrize()` → `notifyUsers()`)
+depend on the reliability, latency, and credentials of an external delivery
+provider that doesn't exist yet for any channel. Emitting a durable database row
+instead keeps the Game Engine's own correctness fully independent of delivery —
+exactly the "keep notification delivery outside the Game Engine where practical"
+requirement — and costs nothing extra today, since `notifications` (schema +
+RLS) has existed since Milestone 3 specifically for this purpose.
+
+**Event catalog implemented this slice:** one event, `pick5.prize_awarded` —
+fired once per winner from inside `awardPrize()`, immediately after that
+winner's `payout_amount` is durably written, carrying `{ gameweekId, amount }`.
+`notifications.type` is free text at the schema level (GE-4.8); each mode
+documents and owns its own catalog rather than the database enforcing one.
+
+**Other candidate events considered, deliberately deferred, not implemented:**
+an entry voided for unverified payment (`settle()`'s existing void path), and a
+"results are in" notification for settled non-winners. Both are plausible
+future events, but nothing in the codebase yet reads `notifications` (no UI
+consumer exists at all), so adding untested event types with no way to verify
+their payload shape against a real consumer would be speculative complexity,
+not a real requirement — consistent with this project's standing "do not
+invent behavior" discipline. Add them when a concrete consumer needs them.
+
+**Where the call site lives, and why:** `awardPrize()` calls `this.notifyUsers()`
+itself, inside its own per-winner payout loop — not `settle()`, despite the
+Settlement sequence diagram (GE-19) drawing `notifyUsers()` as a sibling
+self-call alongside `determineWinner()`/`awardPrize()`. That diagram illustrates
+the general multi-mode framework (where "competition concluded" is a real
+conditional, e.g. LMS/Predictor's season-long pots); for Pick 5 specifically,
+`awardPrize()` already independently calls `determineWinner()` internally
+(Slice 8, for the identical reason — it's the one method that already knows
+whether this call is the real first-time settlement or an idempotent no-op).
+Requiring `settle()` to duplicate that idempotency check just to decide whether
+to notify would be redundant bookkeeping the callee has already resolved.
+
+**How notification failures affect settlement — the one deliberate asymmetry
+in this method:** every other write in `awardPrize()` throws on error and
+aborts (fail loud, per the pot_prizes lifecycle/prize-pool-deductions
+decisions above — money must never fail silently). The `notifyUsers()` call is
+the single exception: it is wrapped in a local `try/catch` at its call site
+inside `awardPrize()`'s payout loop, and a failure is logged (`console.error`)
+and swallowed, never re-thrown. Rationale: by the time `notifyUsers()` runs for
+a given winner, that winner's `pot_prizes` row and `payout_amount` are already
+durably committed — the money is correct regardless of what happens next. A
+notification is a lower-severity, best-effort side effect of an already-true
+fact, not a precondition for it; letting a `notifications` write failure
+unwind or block an already-correct payout, or stop the loop from paying
+remaining winners, would make money correctness depend on a table that exists
+purely for user convenience. `notifyUsers()` itself still throws on error like
+every other GameEngine method (so it behaves predictably for any future direct
+caller); the try/catch boundary belongs at this one call site, which is the
+only place that knows this specific write is allowed to fail silently.
+
+**Retries:** none implemented, and none needed at this layer. The only
+operation `notifyUsers()` performs is a single insert into a table in the same
+database every other write in this request already depends on — if that write
+is failing, retrying it inline is unlikely to help and would only delay an
+already-committed settlement. Real retry/backoff semantics belong to the
+future delivery service (retrying actual network calls to an email/push/SMS
+provider, the genuinely flaky part of this system), not to this domain-event
+write — deferred along with that service itself, not silently dropped.
+
+**Channels:** in-app only, implemented via the existing `notifications` table
++ RLS (`notifications_select_own`/`notifications_update_own`, Milestone 3).
+Email, push, and SMS are explicitly future work for the not-yet-built
+Notification Service, kept feasible by construction: `type` + `payload` jsonb
+carry channel-agnostic domain data, with no channel-specific field baked into
+the Game Engine's contract or this event's shape. Building multi-channel
+routing, user contact-channel preferences, or provider integrations now — with
+no delivery service to consume them and no schema for phone numbers/push
+tokens/email opt-in — would be exactly the kind of unbuilt infrastructure this
+project has consistently avoided (see "Payment Verification, not payment
+processing" above for the same discipline applied to a different subsystem).
+
+**How this extends to LMS and Score Predictor:** no new schema or pattern
+needed. Each mode implements its own `notifyUsers()` (already required by the
+fixed `GameEngine` contract) writing to the same `notifications` table with its
+own `type` catalog — e.g. LMS's `alive`/`eliminated` transitions, Predictor's
+per-fixture or per-cycle scoring outcomes. The domain-event/no-delivery split,
+the "call from the method that already resolved idempotency," and the
+"failure is caught and logged, never allowed to block money" pattern all
+generalize identically — none of this slice's implementation is Pick-5-specific
+except the one `pick5.prize_awarded` event type itself.

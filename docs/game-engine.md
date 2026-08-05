@@ -12,9 +12,11 @@ types, dependency injection) is complete. Milestone 4 (Pick 5) is in progress: S
 (settlement — including the payment-verification-void rule, wired into
 `settle-gameweek`), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`, called
 internally from `settle()` per GE-8.4), Slice 7 (`determineWinner()`, implemented
-standalone), and Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into
-`settle()` alongside `determineWinner()` — see GE-9) are done; notifications don't
-exist yet. See [GE-12](#ge-12-milestone-plan) for exact status per milestone.
+standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into
+`settle()` alongside `determineWinner()` — see GE-9), and Slice 9 (`notifyUsers()`,
+domain-event notifications, wired into `awardPrize()`) are done — all eight
+`GameEngine` contract methods are now implemented for Pick 5. See
+[GE-12](#ge-12-milestone-plan) for exact status per milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
 described in [current-state.md](./current-state.md) — those objects communicated *business
@@ -239,6 +241,11 @@ creates the `pot_members` row. Deliberately **does not yet** enforce `pots.max_m
 `notifications` table (`user_id`, `pot_id` nullable, `type`, `payload` jsonb — display
 metadata only, `read_at`, `created_at`), written to by every Game Engine implementation's
 `notifyUsers()`. Delivery beyond in-app (email/push) is out of scope for this specification.
+**`Pick5Engine.notifyUsers()` implemented as of Milestone 4 Slice 9** — see
+[decisions.md § Notifications: domain events, not delivery](./decisions.md#notifications-domain-events-not-delivery)
+for the full design (why it's a pure event emitter, why a notification failure never
+affects settlement, why delivery is deliberately deferred). One event type exists today:
+`pick5.prize_awarded`, fired from within `awardPrize()`.
 
 ### GE-4.9 RLS helper functions
 
@@ -335,7 +342,12 @@ every live/in-progress gameweek with entries in that mode.
 ### GE-8.4 Settlement flow
 `pg_cron` (`settle-gameweek` cadence) → Edge Function → dispatcher → `settle()` →
 `generateStandings()` → (only at competition end) `determineWinner()` → `awardPrize()` →
-`notifyUsers()`.
+`notifyUsers()`. **As implemented (Slice 8/9):** `determineWinner()` and `notifyUsers()`
+are both called from *within* `awardPrize()` itself, not as separate self-calls from
+`settle()` — `awardPrize()` is the one method that already resolves the
+idempotent-no-op-vs-real-award question, so it's the natural single call site for both.
+See [decisions.md § Notifications](./decisions.md#notifications-domain-events-not-delivery)
+for why this doesn't contradict the diagram below.
 
 ### GE-8.5 Payment Verification flow
 Shared `admin-actions` (`mark_paid`/`mark_unpaid`), unchanged in shape, now writing to the
@@ -351,7 +363,11 @@ regardless of `game_type`.
 
 ### GE-8.7 Notification flow
 Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, which writes to
-`notifications`. Delivery beyond in-app display is out of scope here.
+`notifications`. Delivery beyond in-app display is out of scope here. **Implemented as of
+Slice 9:** `notifyUsers()` is a pure domain-event emitter (insert one row, return) — see
+[decisions.md § Notifications](./decisions.md#notifications-domain-events-not-delivery). A
+notification write failure is caught at its call site and never propagates to abort or
+reverse the user-facing outcome (e.g. a prize award) that triggered it.
 
 ## GE-9. Edge Function inventory
 
@@ -360,7 +376,7 @@ Any Game Engine step producing a user-facing outcome calls `notifyUsers()`, whic
 | `sync-fixtures`, `sync-live-events` (per `ISSUE-4`) | Unchanged — feeds all three modes identically |
 | `compute-deadlines` | **Milestone 4 Slice 3**: now drives locking via the dispatcher. Deadline computation itself is unchanged; once a gameweek's just-computed `deadline_utc` has already passed, discovers which game types have pending entries for that gameweek (data-driven — no hardcoded `game_type`, GE-7) and calls each one's `lockEntries()`. Now also writes a `sync_runs` row per invocation (previously didn't) |
 | `compute-scores` | **Milestone 4 Slice 4**: now drives scoring via the dispatcher. Old logic (reading/writing `user_entries`/`user_entry_picks`) is unchanged; the new block discovers game types with `locked` entries for each gameweek and calls each one's `calculateScore()`. Response body now also reports `gameEngineDispatches` alongside the pre-existing `processed` count |
-| `settle-gameweek` | **Milestone 4 Slice 5**: now drives `settle()` via the dispatcher, once its existing "all fixtures finished" check passes. Old logic (`user_entries`/`leaderboard_snapshots`) is unchanged. No `sync_runs` write added — GE-19's Settlement diagram doesn't call for one, unlike Locking. **Milestone 4 Slice 8**: `settle()` now also calls `awardPrize()` (which internally calls `determineWinner()`) for every distinct pot settled, so a single `settle-gameweek` invocation now settles, ranks, and pays out in one pass |
+| `settle-gameweek` | **Milestone 4 Slice 5**: now drives `settle()` via the dispatcher, once its existing "all fixtures finished" check passes. Old logic (`user_entries`/`leaderboard_snapshots`) is unchanged. No `sync_runs` write added — GE-19's Settlement diagram doesn't call for one, unlike Locking. **Milestone 4 Slice 8**: `settle()` now also calls `awardPrize()` (which internally calls `determineWinner()`) for every distinct pot settled, so a single `settle-gameweek` invocation now settles, ranks, and pays out in one pass. **Milestone 4 Slice 9**: `awardPrize()` now also calls `notifyUsers()` per winner, so the same invocation now also writes the user-facing `notifications` row — no `settle-gameweek` code change was needed for either Slice 8 or Slice 9, since both are internal to the Game Engine |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
 | `submit-pick5-picks` (new, Milestone 4 Slice 2) | First Edge Function to call a real dispatcher-resolved Game Engine method — `resolveEngine('pick5').validateEntry(ctx, entry, picks)`. Writes `pick5_picks` via upsert on `(game_entry_id, pick_position)` only after validation passes |
@@ -402,7 +418,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 1 | Architecture finalized, specification produced and approved | **Done** |
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
-| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), and Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`) done; notifications not started |
+| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`), and Slice 9 (`notifyUsers()`, domain-event notifications, wired into `awardPrize()`) done — all eight `GameEngine` contract methods now implemented for Pick 5 |
 | 5 | Last Man Standing implementation | Not started |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
@@ -492,10 +508,9 @@ supabase/functions/
       pick5/                       Milestone 4 — validateEntry (Slice 2), lockEntries
                                     (Slice 3), calculateScore (Slice 4), settle
                                     (Slice 5), generateStandings (Slice 6),
-                                    determineWinner (Slice 7), and awardPrize
-                                    (Slice 8) implemented.
-                                    notifyUsers still throws
-                                    GameEngineNotImplementedError, pending a later slice
+                                    determineWinner (Slice 7), awardPrize
+                                    (Slice 8), and notifyUsers (Slice 9) implemented.
+                                    All eight GameEngine contract methods done.
       lms/                         Milestone 5 — empty until then
       predictor/                   Milestone 6 — empty until then
   compute-scores/                  Milestone 4 Slice 4 — imports _shared/game-engine, drives calculateScore()
@@ -621,11 +636,9 @@ sequenceDiagram
   D-->>EF: GameEngine instance
   EF->>GE: settle(ctx, gameweekId)
   GE->>GE: generateStandings(ctx, potId) -> pot_standings_snapshots
-  alt competition has concluded for this pot
-    GE->>GE: determineWinner(ctx, potId)
-    GE->>Pz: awardPrize(ctx, potId) -> payout_amount, pot_prizes.is_settled
-    GE->>GE: notifyUsers(ctx, event)
-  end
+  GE->>GE: awardPrize(ctx, potId)
+  Note over GE,Pz: awardPrize() internally calls determineWinner(), then (unless already<br/>is_settled — idempotent no-op) writes Pz and calls notifyUsers() per winner
+  GE->>Pz: pot_prizes.is_settled, payout_amount
   GE-->>EF: done
 ```
 
