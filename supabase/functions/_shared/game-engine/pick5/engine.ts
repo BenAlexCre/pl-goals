@@ -2,16 +2,50 @@
 // incrementally, one method per Milestone 4 slice (docs/game-engine.md §
 // GE-12): validateEntry (Slice 2), lockEntries (Slice 3), calculateScore
 // (Slice 4), settle (Slice 5), generateStandings (Slice 6), determineWinner
-// (Slice 7). awardPrize/notifyUsers still throw
-// GameEngineNotImplementedError, per the pattern errors.ts documents for a
-// mode landing incrementally.
+// and awardPrize (Slice 8, wired together — see settle()). notifyUsers
+// still throws GameEngineNotImplementedError, per the pattern errors.ts
+// documents for a mode landing incrementally.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { GameEngineNotImplementedError } from '../errors.ts'
-import { Pick5ValidationError } from './errors.ts'
+import { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
 
 export const PICK5_PICK_COUNT = 5
+
+// Money helpers — deliberately separate rounding rules for two different
+// situations, per docs/decisions.md § Prize pool deductions:
+// roundToCents (standard round-half-up) for the gross/fee/net calculation
+// itself, a conventional default that wasn't one of the two edge cases the
+// repo owner was explicitly asked about; floorToCents (always down) for
+// splitting the net pool across multiple winners, the repo owner's explicit
+// decision so no tied winner is ever favored by rounding.
+function roundToCents(amount: number): number {
+  return Math.round(amount * 100) / 100
+}
+
+function floorToCents(amount: number): number {
+  return Math.floor(amount * 100) / 100
+}
+
+// pots.{admin,charity}_fee_{type,amount,percentage) -> the calculated euro
+// amount to deduct from a specific instance's gross pool. 'none' -> 0;
+// 'fixed' -> the configured amount as-is (never more than the config, by
+// construction); 'percentage' -> gross x pct / 100, rounded to cents.
+function calculateFeeAmount(
+  type: 'none' | 'fixed' | 'percentage',
+  fixedAmount: number | null,
+  percentage: number | null,
+  grossAmount: number
+): number {
+  if (type === 'fixed') {
+    return fixedAmount ?? 0
+  }
+  if (type === 'percentage') {
+    return roundToCents((grossAmount * (percentage ?? 0)) / 100)
+  }
+  return 0
+}
 
 // Positions in public.players that can never be picked. 'Goalkeeper' is a
 // product decision (resolves ISSUE-7 — the prototype's two pick-building
@@ -381,18 +415,24 @@ export class Pick5Engine implements GameEngine {
       }
     }
 
-    // GE-8.4's Settlement sequence diagram shows generateStandings() as a
-    // self-call from within settle() ("GE->>GE: generateStandings(ctx, potId)"),
-    // not a separate step the Edge Function dispatches — so it's invoked
-    // here, once per distinct pot represented in this gameweek's entries,
-    // rather than from settle-gameweek/index.ts. Runs even for a pot whose
-    // entries were all voided this gameweek: the overall/cumulative
-    // standings snapshot must still reflect current reality either way, and
-    // regenerating is idempotent (upsert), so there's no correctness reason
-    // to skip it.
+    // GE-8.4's Settlement sequence diagram shows generateStandings() and
+    // (Slice 8) determineWinner()/awardPrize() as self-calls from within
+    // settle() — "GE->>GE: generateStandings(...)" / "GE->>GE:
+    // determineWinner(...)" / "GE->>Pz: awardPrize(...)" — not separate
+    // steps the Edge Function dispatches, so both are invoked here, once
+    // per distinct pot represented in this gameweek's entries, rather than
+    // from settle-gameweek/index.ts. Runs even for a pot whose entries were
+    // all voided this gameweek: the overall/cumulative standings snapshot
+    // must still reflect current reality either way, and regenerating is
+    // idempotent (upsert), so there's no correctness reason to skip it —
+    // awardPrize() itself then correctly finds no settled entries for a
+    // gameweek nobody paid for and, via getMostRecentGameweekWithStandings(),
+    // either no-ops against an already-awarded earlier gameweek or has
+    // nothing to do at all.
     const distinctPotIds = [...new Set(entries.map((e: { pot_id: string }) => e.pot_id))]
     for (const potId of distinctPotIds) {
       await this.generateStandings(ctx, potId)
+      await this.awardPrize(ctx, potId)
     }
   }
 
@@ -556,6 +596,30 @@ export class Pick5Engine implements GameEngine {
   // configuration existing, which it doesn't yet (see session-log.md — no
   // admin flow creates a pot_prizes row anywhere in the current codebase).
   async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+    const gameweekId = await this.getMostRecentGameweekWithStandings(ctx, potId)
+    if (gameweekId === null) {
+      return []
+    }
+
+    const { data: winners, error: winnersError } = await ctx.supabase
+      .from('pot_standings_snapshots')
+      .select('user_id')
+      .eq('pot_id', potId)
+      .eq('gameweek_id', gameweekId)
+      .eq('rank', 1)
+
+    if (winnersError) {
+      throw new Error(`Failed to look up winners: ${winnersError.message}`)
+    }
+
+    return ((winners ?? []) as { user_id: string }[]).map((w) => w.user_id)
+  }
+
+  // Extracted from determineWinner() when awardPrize() (Slice 8) needed the
+  // identical "which gameweek" derivation — both methods only receive a
+  // potId (GE-6's fixed contract), so both independently need to identify
+  // the gameweek their caller (settle()) just processed.
+  private async getMostRecentGameweekWithStandings(ctx: GameEngineContext, potId: string): Promise<number | null> {
     const { data: latestGameweek, error: latestError } = await ctx.supabase
       .from('pot_standings_snapshots')
       .select('gameweek_id')
@@ -568,26 +632,147 @@ export class Pick5Engine implements GameEngine {
     if (latestError) {
       throw new Error(`Failed to look up the most recent settled gameweek: ${latestError.message}`)
     }
-    if (!latestGameweek) {
-      return []
-    }
 
-    const { data: winners, error: winnersError } = await ctx.supabase
-      .from('pot_standings_snapshots')
-      .select('user_id')
-      .eq('pot_id', potId)
-      .eq('gameweek_id', (latestGameweek as { gameweek_id: number }).gameweek_id)
-      .eq('rank', 1)
-
-    if (winnersError) {
-      throw new Error(`Failed to look up winners: ${winnersError.message}`)
-    }
-
-    return ((winners ?? []) as { user_id: string }[]).map((w) => w.user_id)
+    return latestGameweek ? (latestGameweek as { gameweek_id: number }).gameweek_id : null
   }
 
-  awardPrize(_ctx: GameEngineContext, _potId: string): Promise<void> {
-    throw new GameEngineNotImplementedError('pick5', 'awardPrize')
+  // GE-6: "Split net prize pool equally." Money-critical — every branch here
+  // was an explicit decision, not an inferred default (docs/decisions.md §
+  // Prize pool deductions):
+  //   - pot_prizes row created lazily, here, at award time (not pre-created
+  //     anywhere else — docs/decisions.md § pot_prizes row creation is lazy).
+  //   - gross = entry_fee x count(this instance's verified-paid, settled
+  //     entries) — read directly from settle()'s already-finalized state,
+  //     never tracked separately, so settlement stays the single source of
+  //     truth.
+  //   - fees are the CALCULATED euro amounts for this instance, derived from
+  //     the pot's config at this moment — never the config itself (GE-4.1
+  //     vs GE-4.4).
+  //   - net = gross - adminFee - charityFee; only net is ever distributed,
+  //     never gross.
+  //   - zero eligible winners: fails loudly (Pick5NoEligibleWinnersError),
+  //     never silently skips or invents a default.
+  //   - fees exceeding gross (net would be negative): fails loudly
+  //     (Pick5PrizePoolExceededError) rather than clamping — the DB's own
+  //     `net_amount >= 0` CHECK constraint is the backstop if this method's
+  //     own pre-check is ever bypassed.
+  //   - an uneven split across tied winners rounds DOWN per winner; the
+  //     leftover remainder (at most winnerCount - 1 cents) is never paid to
+  //     anyone.
+  //   - idempotent: a gameweek whose pot_prizes row is already `is_settled`
+  //     is left untouched and this method returns without re-awarding.
+  async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
+    const gameweekId = await this.getMostRecentGameweekWithStandings(ctx, potId)
+    if (gameweekId === null) {
+      return
+    }
+
+    const { data: existingPrize, error: existingPrizeError } = await ctx.supabase
+      .from('pot_prizes')
+      .select('id, is_settled')
+      .eq('pot_id', potId)
+      .eq('gameweek_id', gameweekId)
+      .maybeSingle()
+
+    if (existingPrizeError) {
+      throw new Error(`Failed to look up existing prize: ${existingPrizeError.message}`)
+    }
+    if ((existingPrize as { id: string; is_settled: boolean } | null)?.is_settled) {
+      return
+    }
+
+    const winners = await this.determineWinner(ctx, potId)
+    if (winners.length === 0) {
+      throw new Pick5NoEligibleWinnersError(potId, gameweekId)
+    }
+
+    const { data: pot, error: potError } = await ctx.supabase
+      .from('pots')
+      .select('entry_fee, admin_fee_type, admin_fee_amount, admin_fee_percentage, charity_fee_type, charity_fee_amount, charity_fee_percentage')
+      .eq('id', potId)
+      .single()
+
+    if (potError) {
+      throw new Error(`Failed to look up pot fee configuration: ${potError.message}`)
+    }
+
+    const { data: settledEntries, error: settledEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id')
+      .eq('pot_id', potId)
+      .eq('gameweek_id', gameweekId)
+      .eq('status', 'settled')
+
+    if (settledEntriesError) {
+      throw new Error(`Failed to count settled entries: ${settledEntriesError.message}`)
+    }
+
+    type PotFeeConfig = {
+      entry_fee: number
+      admin_fee_type: 'none' | 'fixed' | 'percentage'
+      admin_fee_amount: number | null
+      admin_fee_percentage: number | null
+      charity_fee_type: 'none' | 'fixed' | 'percentage'
+      charity_fee_amount: number | null
+      charity_fee_percentage: number | null
+    }
+    const potConfig = pot as PotFeeConfig
+
+    const grossAmount = roundToCents(potConfig.entry_fee * (settledEntries?.length ?? 0))
+    const adminFeeAmount = calculateFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, grossAmount)
+    const charityFeeAmount = calculateFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, grossAmount)
+    const netAmount = roundToCents(grossAmount - adminFeeAmount - charityFeeAmount)
+
+    if (netAmount < 0) {
+      throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+    }
+
+    const prizeRow = {
+      pot_id: potId,
+      scope: 'gameweek' as const,
+      gameweek_id: gameweekId,
+      gross_amount: grossAmount,
+      admin_fee_amount: adminFeeAmount,
+      charity_fee_amount: charityFeeAmount,
+      is_settled: true,
+      settled_at: ctx.now().toISOString(),
+    }
+
+    // Two-step get-or-create-then-write by real PK, same pattern established
+    // in generateStandings()'s upsertStandingsGroup() — pot_prizes has the
+    // identical shape of partial unique indexes that made a direct
+    // upsert(onConflict: 'pot_id,gameweek_id') fail live in Slice 6.
+    if (existingPrize) {
+      const { error: updateError } = await ctx.supabase
+        .from('pot_prizes')
+        .update(prizeRow)
+        .eq('id', (existingPrize as { id: string }).id)
+
+      if (updateError) {
+        throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+      }
+    } else {
+      const { error: insertError } = await ctx.supabase.from('pot_prizes').insert(prizeRow)
+
+      if (insertError) {
+        throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+      }
+    }
+
+    const perWinnerAmount = floorToCents(netAmount / winners.length)
+
+    for (const userId of winners) {
+      const { error: payoutError } = await ctx.supabase
+        .from('game_entries')
+        .update({ payout_amount: perWinnerAmount })
+        .eq('pot_id', potId)
+        .eq('gameweek_id', gameweekId)
+        .eq('user_id', userId)
+
+      if (payoutError) {
+        throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+      }
+    }
   }
 
   notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {

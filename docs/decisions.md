@@ -321,3 +321,103 @@ override or supplement it — e.g. a sponsor top-up, or rolling over an unclaime
 prior week's prize — is a genuine product question, not something to invent). Needs
 a decision before `awardPrize()` is implemented, the same way Slice 2's goalkeeper
 rule and Slice 6's tie-break rule each needed one.
+
+**Resolved 2026-08-05** — the "`total_amount` formula" question above is now
+answered by the entry below: `gross_amount = entry_fee × verified-paid-settled-count`,
+with two independent, optional deductions on top.
+
+---
+
+## Prize pool deductions: Admin Fee and Charity Fee
+
+**Decided 2026-08-05**, directly by the repo owner, ahead of Milestone 4 Slice 8.
+Migration `010_prize_pool_deductions.sql` designed, reviewed, and **applied**;
+`Pick5Engine.awardPrize()` implements this design as of Slice 8.
+
+**What:** Two independent, optional deductions — an Admin Fee and a Charity Fee — may
+be configured per pot, each as **None**, a **Fixed Amount**, or a **Percentage of the
+gross prize pool**, never both a fixed amount and a percentage at once. Configuration
+lives on `pots` (`admin_fee_type`/`admin_fee_amount`/`admin_fee_percentage`,
+`charity_fee_type`/`charity_fee_amount`/`charity_fee_percentage`, a shared `fee_type`
+enum) — shared platform data, reusable by any mode's `awardPrize()`, per GE-3. The
+**calculated outcome** for a specific competition instance —
+`pot_prizes.gross_amount` (renamed from `total_amount`), `admin_fee_amount`,
+`charity_fee_amount`, and a `net_amount` **generated column**
+(`gross_amount − admin_fee_amount − charity_fee_amount`) — lives on `pot_prizes`,
+per the pot_prizes lifecycle decision above (lazy creation inside `awardPrize()`).
+The calculation order is fixed: gross → admin fee → charity fee → net → determine
+winner(s) → split net equally. **The Game Engine distributes only `net_amount`,
+never `gross_amount`.**
+
+**Why config lives on `pots`, not `pot_prizes` or a Pick-5-specific table:** the
+requirement itself says "these are configuration values on the pot" — but more
+importantly, this is the *same* boundary GE-3 already draws for Payments/Payment
+Verification (shared, one implementation for every mode). LMS's season-long single
+payout and Score Predictor's variable-cycle payouts need the identical gross → fees →
+net calculation; putting the config anywhere Pick-5-specific would mean rebuilding it
+per mode, which is exactly what GE-3 exists to prevent.
+
+**Why the outcome (not just the config) is recorded on `pot_prizes`, structurally
+enforced:** the requirement is explicit — "`pot_prizes` must record the calculated
+outcome... not the configuration." A pot's fee configuration can (in principle) be
+edited between competition instances (subject to the same immutability-once-entries-exist
+rule as `entry_fee`, see below) — recording only the config on `pots` and deriving
+fees fresh each time would make historical prize breakdowns silently reinterpret
+themselves if the config ever changed later. Recording the actual euro amounts
+deducted, per instance, on `pot_prizes` makes every past award permanently
+self-explaining regardless of later config changes.
+
+**Why `net_amount` is a generated column, not a fourth independently-written fact:**
+identical reasoning to Milestone 2's review removing `game_entries.settled` (GE-13:
+"two independently writable columns for one fact is a drift risk") — `net_amount`
+is a pure function of the other three columns, so making it independently writable
+would only create a way for it to silently disagree with its own inputs.
+
+**Why "never both fixed and percentage" is a CHECK constraint, not just application
+logic:** matches this project's own established pattern (GE-13: pot_scope/entry_scope
+are explicit columns, "not an inference from nullability alone") — the same
+discipline applied here means the invalid state (both fixed and percentage set, or
+a type without its matching value) is simply impossible to write, not merely
+discouraged by convention.
+
+**Why the new pot columns join `entry_fee` in `prevent_pot_contract_change()`'s
+guarded set:** changing a deduction rate mid-competition, after money/picks are
+committed, is exactly the fairness problem GE-2 already identified for `entry_fee`
+— extended here to cover the two new columns, not a new principle.
+
+**Effects, as requested:**
+- **Payment Verification:** none. Payment Verification determines *whether an entry
+  counts toward the gross pool at all* (verified-paid + settled); fee deduction
+  determines *how much of that gross gets distributed*. The two are orthogonal —
+  `entry_payments` is never read by the deduction calculation, only by the
+  gross-amount calculation that precedes it.
+- **Pick 5:** `Pick5Engine.awardPrize()` (Slice 8, not yet built) computes gross,
+  applies both deductions per the pot's config, writes the `pot_prizes` row, and
+  splits only `net_amount` across `determineWinner()`'s result.
+- **LMS / Score Predictor (future):** no new work needed when either mode is built —
+  they read the same shared `pots` columns and reuse the identical gross → net
+  formula inside their own `awardPrize()`, exactly like the gross-amount calculation
+  itself already generalizes (per the pot_prizes lifecycle entry above).
+- **Idempotency:** no new concern beyond what the pot_prizes lifecycle entry above
+  already established — fee amounts are derived fresh from `gross_amount` and the
+  pot's config each time, not accumulated, so re-running `awardPrize()` against an
+  already-`is_settled` row remains a safe no-op.
+- **Multiple winners:** split `net_amount` (never `gross_amount`) equally across
+  however many `determineWinner()` returns — unchanged in kind from before this
+  decision, just operating on `net_amount` instead of a pool with no deductions
+  modeled.
+
+**Two edge cases flagged, not silently resolved — matching the "zero eligible
+winners: stop and ask" instruction rather than inventing behavior for money.
+Both decided by the repo owner 2026-08-05, directly, not inferred:**
+1. **A fixed fee (or the sum of both) could exceed a small gross pool.** Decision:
+   `awardPrize()` must **fail loudly and not award** — catch the `net_amount >= 0`
+   CHECK violation (or pre-check for it) and stop without creating a `pot_prizes`
+   row, rather than clamping fees down to fit. An admin must fix the pot's fee
+   configuration (or accept there's no prize that instance) before it can be
+   re-run.
+2. **`net_amount` may not divide evenly** across multiple tied winners. Decision:
+   **round down** — each winner receives `floor(net_amount / winner_count)` to the
+   nearest cent; any leftover remainder (at most `winner_count - 1` cents) is never
+   paid out to anyone. Simple, deterministic, never favors one tied winner over
+   another.

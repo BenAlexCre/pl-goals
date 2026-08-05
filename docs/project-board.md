@@ -1,6 +1,6 @@
 # Project Board
 
-Last reviewed: 2026-08-03.
+Last reviewed: 2026-08-05.
 
 This is the **active work tracker** — a Kanban view of what's queued, in progress,
 blocked, or done. It's derived from, and must stay consistent with,
@@ -49,11 +49,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4, Slice 8** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started. Candidate: `awardPrize()`, wiring it and `determineWinner()` (Slice 7) into `settle()` together. **`pot_prizes` lifecycle design question resolved 2026-08-05** (dedicated investigation, no code changed) — see [decisions.md § pot_prizes row creation is lazy, inside awardPrize()](./decisions.md#pot_prizes-row-creation-is-lazy-inside-awardprize--never-pre-created): the row is created lazily, inside `awardPrize()` itself, computed from `settle()`'s already-finalized state. No migration needed, no separate creation flow needed — folding creation into `awardPrize()` is now part of Slice 8's scope, not a precondition blocking it. **One open product decision remains before implementation**: the exact `total_amount` formula (default assumption is `entry_fee × verified-paid-settled-count`; whether an admin can override/top-up is undecided) — needs a decision the same way Slice 2's goalkeeper rule and Slice 6's tie-break rule each did.
+*(nothing ready — Slice 8 implemented and verified, awaiting review/approval before Slice 9 begins)*
 
 ## In Progress
 
-*(nothing in progress — Slice 7 implemented and verified, awaiting review/approval before Slice 8 begins)*
+*(nothing in progress — Slice 8 implemented and verified, awaiting review/approval before Slice 9 begins)*
 
 ## Blocked
 
@@ -67,10 +67,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Testing
 
-- **Milestone 4, Slice 7 — Winner determination** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.determineWinner()` (the sixth real Game Engine contract implementation) — identifies the rank-1 user(s) of a pot's most recently settled gameweek, correctly returning multiple winners on a tie (Slice 6's shared-rank rule). Implemented standalone, deliberately **not wired into `settle()` yet** — no consumer exists until Slice 8's `awardPrize()`. Resolves no `ISSUE-N` (net-new Game Engine build-out). 6 new Deno unit tests (71/71 total pass). Verified live against the real database (not through an Edge Function — none calls this yet — via a temporary script run directly against `Pick5Engine`): correct most-recent-gameweek selection, correct cross-pot scoping, correct empty-case handling. All test data removed by exact ID. **Discovered, documented, does not block this slice:** `pot_prizes` has no creation flow at all (see Ready). **Not yet committed** — awaiting review/approval (see `session-log.md`).
+- **Milestone 4, Slice 8 — Prize awarding + prize pool deductions** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.awardPrize()` (the seventh real Game Engine contract implementation) — implemented and wired into `settle()` alongside `determineWinner()` (Slice 7), so a single `settle-gameweek` invocation now settles, ranks, and pays out in one pass. `pot_prizes` rows created lazily inside `awardPrize()`, keyed by real `id` (never a partial-index `upsert`, per the Slice 6 `pot_standings_snapshots` precedent). New **prize pool deductions** feature (Admin Fee, Charity Fee — see [decisions.md § Prize pool deductions](./decisions.md#prize-pool-deductions-admin-fee-and-charity-fee)) applied via migration `010_prize_pool_deductions.sql`: config on `pots` (`admin_fee_type`/`amount`/`percentage`, `charity_fee_type`/`amount`/`percentage`), calculated gross/fee/net breakdown on `pot_prizes` (`gross_amount`, `admin_fee_amount`, `charity_fee_amount`, generated `net_amount`). The Game Engine only ever distributes `net_amount`, never `gross_amount`. Both flagged edge cases resolved by the repo owner: fees exceeding gross fail loudly (`Pick5PrizePoolExceededError`, no award); zero eligible winners fail loudly (`Pick5NoEligibleWinnersError`, no award); uneven splits across tied winners round down per winner, remainder unallocated. Resolves no `ISSUE-N` (net-new Game Engine build-out plus a net-new product feature). 11 new Deno unit tests (53/53 in file, 81/81 total pass). Verified live end-to-end through the real `settle-gameweek` Edge Function with a 3-user, fee-bearing, mixed-paid/unpaid scenario — every number matched hand-calculation exactly, including unpaid-entry voiding, fee deduction, and idempotent re-invocation. All test data removed by exact ID. **Not yet committed** — awaiting review/approval (see `session-log.md`).
 
 ## Done
 
+- **Milestone 4, Slice 7 — Winner determination** — 2026-08-05, committed and pushed. `Pick5Engine.determineWinner()` (the sixth real Game Engine contract implementation) — identifies the rank-1 user(s) of a pot's most recently settled gameweek, correctly returning multiple winners on a tie (Slice 6's shared-rank rule). Implemented standalone at the time; wired into `settle()` in Slice 8 alongside `awardPrize()`. Resolves no `ISSUE-N` (net-new Game Engine build-out). 6 new Deno unit tests (71/71 total pass at the time). Verified live against the real database. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 6 — Standings** — 2026-08-05, committed. `Pick5Engine.generateStandings()`, called internally from `settle()`. Resolved `ISSUE-15`/`ISSUE-17`. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 5 — Settlement** — 2026-08-05, committed. `Pick5Engine.settle()` wired into `settle-gameweek` via the dispatcher — implements the payment-void rule deferred from Slice 4. See [session-log.md](./session-log.md).
 - **Milestone 4, Slices 3-4 — Locking and scoring** — 2026-08-05, committed (`be06bbd`). `Pick5Engine.lockEntries()`/`calculateScore()` wired into `compute-deadlines`/`compute-scores`. See [session-log.md](./session-log.md).

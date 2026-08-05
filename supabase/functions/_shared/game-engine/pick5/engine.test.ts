@@ -14,7 +14,7 @@ import { assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/asser
 import type { GameEngineContext } from '../contracts.ts'
 import type { GameEntry } from '../types.ts'
 import { Pick5Engine } from './engine.ts'
-import { Pick5ValidationError } from './errors.ts'
+import { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
 
 interface FakeEligiblePlayer {
   player_id: number
@@ -564,23 +564,51 @@ Deno.test('calculateScore is a no-op when there are no picks for any locked entr
 // point, matching how the real supabase-js builder behaves) so both
 // methods' real query shapes are genuinely exercised.
 
+interface FakePotFeeConfig {
+  entry_fee?: number
+  admin_fee_type?: string
+  admin_fee_amount?: number | null
+  admin_fee_percentage?: number | null
+  charity_fee_type?: string
+  charity_fee_amount?: number | null
+  charity_fee_percentage?: number | null
+}
+
 interface FakeDb {
   pick5PotIds: string[]
-  gameEntries: { id: string; pot_id: string; user_id: string; gameweek_id: number; status: string; settled_at: string | null }[]
+  // Optional per-pot overrides for awardPrize()'s pots.select(...) lookup —
+  // any pick5PotIds entry not listed here gets entry_fee: 0, every fee
+  // type: 'none' (matches this table's real column defaults), so every
+  // existing test written before Slice 8 keeps working unchanged.
+  potFeeConfig: Record<string, FakePotFeeConfig>
+  gameEntries: { id: string; pot_id: string; user_id: string; gameweek_id: number; status: string; settled_at: string | null; payout_amount?: number }[]
   entryPayments: { pot_id: string; user_id: string; gameweek_id: number; scope: string; is_paid: boolean }[]
   pick5Picks: { id: number; game_entry_id: string; result: string }[]
   gameEntryPick5: { game_entry_id: string; picks_won: number }[]
   potStandingsSnapshots: { pot_id: string; gameweek_id: number | null; user_id: string; rank: number; score: number }[]
+  potPrizes: {
+    id: string
+    pot_id: string
+    scope: string
+    gameweek_id: number | null
+    gross_amount: number
+    admin_fee_amount: number
+    charity_fee_amount: number
+    is_settled: boolean
+    settled_at: string | null
+  }[]
 }
 
 function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
     pick5PotIds: [],
+    potFeeConfig: {},
     gameEntries: [],
     entryPayments: [],
     pick5Picks: [],
     gameEntryPick5: [],
     potStandingsSnapshots: [],
+    potPrizes: [],
     ...overrides,
   }
 }
@@ -651,8 +679,23 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) 
       }
       return Promise.resolve({ data: rows[0] ?? null, error: null })
     },
+    single: () => {
+      const rows = resolveRows()
+      if (rows.length !== 1) {
+        return Promise.resolve({
+          data: null,
+          error: { message: `Fake queryBuilder.single() expected exactly 1 row, got ${rows.length}` },
+        })
+      }
+      return Promise.resolve({ data: rows[0], error: null })
+    },
     // deno-lint-ignore no-explicit-any
-    insert: (rows: Record<string, unknown>[]) => {
+    // deno-lint-ignore no-explicit-any
+    insert: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+      // Real supabase-js accepts either a single object or an array — this
+      // codebase uses both shapes (e.g. get-or-create-pick5-entry inserts a
+      // single object; generateStandings() inserts an array).
+      const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows]
       const table = getRows()
       for (const row of rows) {
         table.push({ id: fakeIdCounter++, ...row })
@@ -664,15 +707,33 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb) 
       resolve({ data: resolveRows(), error: null })
     },
     // deno-lint-ignore no-explicit-any
-    update: (patch: Record<string, unknown>) => ({
-      in: (col: string, vals: unknown[]) => {
-        const set = new Set(vals)
-        for (const row of getRows()) {
-          if (set.has(row[col])) Object.assign(row, patch)
-        }
-        return Promise.resolve({ data: null, error: null })
-      },
-    }),
+    update: (patch: Record<string, unknown>) => {
+      // Supports both .update(patch).in(col, vals) and
+      // .update(patch).eq(a, x).eq(b, y).eq(c, z) — awardPrize()'s payout
+      // write filters by three separate .eq() calls, not a single .in(),
+      // unlike every earlier update call in this codebase.
+      // deno-lint-ignore no-explicit-any
+      const updateFilters: ((row: any) => boolean)[] = []
+      // deno-lint-ignore no-explicit-any
+      const updateBuilder: any = {
+        eq: (col: string, val: unknown) => {
+          updateFilters.push((row) => row[col] === val)
+          return updateBuilder
+        },
+        in: (col: string, vals: unknown[]) => {
+          const set = new Set(vals)
+          updateFilters.push((row) => set.has(row[col]))
+          return updateBuilder
+        },
+        then: (resolve: (v: { data: null; error: null }) => void) => {
+          for (const row of getRows()) {
+            if (updateFilters.every((f) => f(row))) Object.assign(row, patch)
+          }
+          resolve({ data: null, error: null })
+        },
+      }
+      return updateBuilder
+    },
     // deno-lint-ignore no-explicit-any
     upsert: (rows: Record<string, unknown>[], opts: { onConflict: string }) => {
       // Only ever called with onConflict: 'id' or another real, non-partial
@@ -698,7 +759,20 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
     from(table: string) {
       switch (table) {
         case 'pots':
-          return queryBuilder(() => db.pick5PotIds.map((id) => ({ id, game_type: 'pick5' })))
+          return queryBuilder(() =>
+            db.pick5PotIds.map((id) => ({
+              id,
+              game_type: 'pick5',
+              entry_fee: 0,
+              admin_fee_type: 'none',
+              admin_fee_amount: null,
+              admin_fee_percentage: null,
+              charity_fee_type: 'none',
+              charity_fee_amount: null,
+              charity_fee_percentage: null,
+              ...db.potFeeConfig[id],
+            }))
+          )
         case 'game_entries':
           return queryBuilder(() => db.gameEntries, db)
         case 'entry_payments':
@@ -709,6 +783,8 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
           return queryBuilder(() => db.gameEntryPick5)
         case 'pot_standings_snapshots':
           return queryBuilder(() => db.potStandingsSnapshots)
+        case 'pot_prizes':
+          return queryBuilder(() => db.potPrizes)
         default:
           throw new Error(`Unexpected table in test fake: ${table}`)
       }
@@ -1080,6 +1156,235 @@ Deno.test('determineWinner returns an empty array when the pot has no standings 
   const winners = await engine.determineWinner(ctx, 'pot-1')
 
   assertEquals(winners, [])
+})
+
+// --- awardPrize() -----------------------------------------------------
+
+Deno.test('awardPrize computes gross = entry_fee x settled count and awards the sole winner the full net', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } }, // no deductions configured
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1)
+  assertEquals(db.potPrizes[0].gross_amount, 20) // 10 x 2 settled entries
+  assertEquals(db.potPrizes[0].admin_fee_amount, 0)
+  assertEquals(db.potPrizes[0].charity_fee_amount, 0)
+  assertEquals(db.potPrizes[0].is_settled, true)
+  assertEquals(db.gameEntries.find((e) => e.user_id === 'user-a')?.payout_amount, 20)
+  assertEquals(db.gameEntries.find((e) => e.user_id === 'user-b')?.payout_amount, undefined, 'only the winner gets a payout')
+})
+
+Deno.test('awardPrize applies a fixed admin fee correctly', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 5 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes[0].gross_amount, 10)
+  assertEquals(db.potPrizes[0].admin_fee_amount, 5)
+  assertEquals(db.gameEntries[0].payout_amount, 5) // net = 10 - 5
+})
+
+Deno.test('awardPrize applies a percentage charity fee correctly', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 20, charity_fee_type: 'percentage', charity_fee_percentage: 15 } },
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes[0].gross_amount, 40) // 20 x 2
+  assertEquals(db.potPrizes[0].charity_fee_amount, 6) // 15% of 40
+  assertEquals(db.gameEntries.find((e) => e.user_id === 'user-a')?.payout_amount, 34) // 40 - 6
+})
+
+Deno.test('awardPrize applies both admin fee (fixed) and charity fee (percentage) together', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: {
+      'pot-1': {
+        entry_fee: 25,
+        admin_fee_type: 'fixed',
+        admin_fee_amount: 25,
+        charity_fee_type: 'percentage',
+        charity_fee_percentage: 5,
+      },
+    },
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-c', pot_id: 'pot-1', user_id: 'user-c', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-d', pot_id: 'pot-1', user_id: 'user-d', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 2 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 3, score: 1 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-d', rank: 3, score: 1 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // gross = 25 x 4 = 100; admin fee = 25 (fixed); charity fee = 5% of 100 = 5; net = 70
+  assertEquals(db.potPrizes[0].gross_amount, 100)
+  assertEquals(db.potPrizes[0].admin_fee_amount, 25)
+  assertEquals(db.potPrizes[0].charity_fee_amount, 5)
+  assertEquals(db.gameEntries.find((e) => e.user_id === 'user-a')?.payout_amount, 70)
+})
+
+Deno.test('awardPrize splits an evenly-dividing net pool equally across multiple tied winners', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10.01 } },
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-c', pot_id: 'pot-1', user_id: 'user-c', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: 3 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // gross = net = 10.01 x 3 = 30.03; divides evenly, 10.01 each, zero remainder.
+  assertEquals(db.potPrizes[0].gross_amount, 30.03)
+  const payouts = ['user-a', 'user-b', 'user-c'].map((u) => db.gameEntries.find((e) => e.user_id === u)?.payout_amount)
+  assertEquals(payouts, [10.01, 10.01, 10.01])
+})
+
+Deno.test('awardPrize floors an unevenly-dividing net split (the actual remainder case)', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    // entry_fee 10, admin fee fixed 1 -> net 29 split 3 ways = 9.666... -> 9.66 each, 0.02 unallocated
+    potFeeConfig: { 'pot-1': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 1 } },
+    gameEntries: [
+      { id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-c', pot_id: 'pot-1', user_id: 'user-c', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: 3 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes[0].gross_amount, 30)
+  assertEquals(db.potPrizes[0].admin_fee_amount, 1)
+  const payouts = ['user-a', 'user-b', 'user-c'].map((u) => db.gameEntries.find((e) => e.user_id === u)?.payout_amount)
+  assertEquals(payouts, [9.66, 9.66, 9.66], 'floor(29/3) = 9.66 each; the leftover 0.02 is paid to no one')
+})
+
+Deno.test('awardPrize throws Pick5NoEligibleWinnersError and writes nothing when there are zero winners', async () => {
+  const engine = new Pick5Engine()
+  // Standings exist (so a gameweek is found) but nobody is rank 1 — should be
+  // structurally impossible via generateStandings(), but awardPrize() must
+  // still fail loudly rather than silently skip if it ever happens.
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 2, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), Pick5NoEligibleWinnersError)
+  assertEquals(db.potPrizes.length, 0)
+  assertEquals(db.gameEntries[0].payout_amount, undefined)
+})
+
+Deno.test('awardPrize throws Pick5PrizePoolExceededError and writes nothing when fees exceed the gross pool', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    // gross = 10 x 1 = 10; admin fee 8 (fixed) + charity fee 5 (fixed) = 13 > gross
+    potFeeConfig: {
+      'pot-1': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 8, charity_fee_type: 'fixed', charity_fee_amount: 5 },
+    },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), Pick5PrizePoolExceededError)
+  assertEquals(db.potPrizes.length, 0, 'no pot_prizes row should be written when the calculation is rejected')
+  assertEquals(db.gameEntries[0].payout_amount, undefined)
+})
+
+Deno.test('awardPrize is idempotent — a second call against an already-settled prize is a safe no-op', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.potPrizes.length, 1)
+  const firstPrizeId = db.potPrizes[0].id
+
+  // Mutate the underlying entries as if something changed — a real re-run
+  // must NOT recompute or overwrite an already-settled prize.
+  db.gameEntries[0].payout_amount = undefined
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1, 'must not create a second pot_prizes row')
+  assertEquals(db.potPrizes[0].id, firstPrizeId)
+  assertEquals(db.gameEntries[0].payout_amount, undefined, 'a no-op does not re-write the payout either')
+})
+
+Deno.test('awardPrize is a no-op when the pot has no settled gameweek at all', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({ pick5PotIds: ['pot-1'], potFeeConfig: { 'pot-1': { entry_fee: 10 } } })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 0)
 })
 
 Deno.test('does not double-count a duplicate pick as two eligibility lookups failing', async () => {

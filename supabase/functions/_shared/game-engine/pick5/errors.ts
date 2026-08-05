@@ -8,3 +8,34 @@ export class Pick5ValidationError extends Error {
     this.name = 'Pick5ValidationError'
   }
 }
+
+// Thrown by Pick5Engine.awardPrize() when a gameweek has settled entries but
+// zero rank-1 winners (should be structurally impossible if any entry
+// settled — generateStandings() always ranks at least one user when it has
+// input — but this is money: fail loudly and specifically rather than
+// silently skip, per the repo owner's explicit "do not invent behaviour"
+// instruction, docs/decisions.md § Prize pool deductions.
+export class Pick5NoEligibleWinnersError extends Error {
+  constructor(potId: string, gameweekId: number) {
+    super(`No eligible winners found for pot ${potId}, gameweek ${gameweekId} — cannot award a prize. This needs a product decision, not an invented default.`)
+    this.name = 'Pick5NoEligibleWinnersError'
+  }
+}
+
+// Thrown by Pick5Engine.awardPrize() when the pot's configured fees would
+// exceed the gross prize pool (net_amount would go negative). The
+// pot_prizes.net_amount CHECK constraint already refuses this write at the
+// database level; this wraps that into a specific, catchable error rather
+// than a generic Postgres constraint-violation message — per the repo
+// owner's explicit decision to fail loudly rather than clamp fees down to
+// fit, docs/decisions.md § Prize pool deductions.
+export class Pick5PrizePoolExceededError extends Error {
+  constructor(potId: string, gameweekId: number, grossAmount: number, adminFeeAmount: number, charityFeeAmount: number) {
+    super(
+      `Pot ${potId}, gameweek ${gameweekId}: configured fees (admin ${adminFeeAmount} + charity ${charityFeeAmount}) ` +
+      `would exceed the gross prize pool (${grossAmount}) — net would be negative. Fix the pot's fee configuration ` +
+      `before this gameweek can be awarded.`
+    )
+    this.name = 'Pick5PrizePoolExceededError'
+  }
+}
