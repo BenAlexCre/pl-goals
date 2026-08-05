@@ -17,8 +17,8 @@ export default function PicksPage() {
   const submitMutation = useSubmitPicks()
 
   const initialPicks = useMemo(() => {
-    if (!entry?.user_entry_picks?.length) return []
-    return [...entry.user_entry_picks]
+    if (!entry?.pick5_picks?.length) return []
+    return [...entry.pick5_picks]
       .sort((a, b) => a.pick_position - b.pick_position)
       .map((p) => ({
         player_id: p.player_id,

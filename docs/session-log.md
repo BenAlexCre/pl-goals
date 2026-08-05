@@ -13,6 +13,155 @@ from here.
 
 ---
 
+## 2026-08-05 (23) — Pick 5 frontend cutover: retired user_entries/user_entry_picks/leaderboard_snapshots
+
+**Goal:** the production readiness audit (entry 22) identified its top Critical
+finding — the entire Milestone 4 Game Engine backend had zero real-world path to
+being used, since the only reachable pick-building page (`PotDetail.jsx`) still
+read/wrote the retired prototype schema directly, and the two Game-Engine-aware
+pages (`PicksPage.jsx`, `GameweekPage.jsx`) were never linked from anywhere. The
+repo owner agreed this was the highest-priority blocker and asked for the cutover
+next, instead of starting Milestone 5 (LMS).
+
+**Audit (before any code changed):** exhaustively grepped the frontend for every
+remaining reference to `user_entries`/`user_entry_picks`/`leaderboard_snapshots`.
+Found: `hooks/useEntry.js`, `hooks/useLiveScores.js`, `hooks/useLeaderboard.js`,
+`pages/PicksPage.jsx`, `pages/GameweekPage.jsx`, `pages/PotDetail.jsx`,
+`components/leaderboard/LeaderboardCard.jsx`/`LeaderboardTable.jsx` — plus the
+already-known dead code (`lib/gameAPI.js`, `components/entryBuilder.jsx`,
+`ISSUE-11`), left untouched. Cross-referenced against `App.jsx`'s routes and
+`TopNav`/`BottomNav`: only `PotDetail.jsx` (`/pot/:potId`) is actually linked
+anywhere (from every pot card on `Dashboard.jsx`); `PicksPage.jsx`/`GameweekPage.jsx`
+had no nav path in; `useLeaderboard.js`/`LeaderboardCard.jsx`/`LeaderboardTable.jsx`
+were fully dead code, imported by nothing.
+
+**Backend gap assessed, found non-blocking:** `trg_create_entry_payment` isn't
+attached to `game_entries` (already documented in `current-state.md`'s `ISSUE-6`
+extension). Verified this doesn't block correctness — `Pick5Engine.settle()`
+already treats a missing `entry_payments` row as unpaid (existing test coverage),
+and `admin-actions`' `mark_paid` upserts the row directly with no dependency on a
+placeholder existing first. Only a Payment Verification *UI* is missing
+(`ISSUE-6`, already tracked, out of scope here). No blocking gap — proceeded.
+
+**Migration:** `hooks/useEntry.js` (`useEntry`/`usePotEntries` now read
+`game_entries` + embedded `pick5_picks`; `useSubmitPicks` calls
+`get-or-create-pick5-entry` then `submit-pick5-picks`), `hooks/useLiveScores.js`
+(realtime subscription retargeted to `pick5_picks`), `hooks/useLeaderboard.js`
+(retargeted to `pot_standings_snapshots` — different shape: `score` not
+`picks_won`/`picks_total`, no `is_void` since void entries are never written to
+this table at all, no `is_overall` flag since `gameweek_id IS NULL` already means
+overall), `LeaderboardCard.jsx`/`LeaderboardTable.jsx` (adapted to the new shape,
+strike rate computed client-side from a new `PICK5_PICK_COUNT` constant in
+`utils/scoring.js` — necessarily duplicated from the Deno-side constant of the
+same name, since the frontend and Edge Functions are separate runtimes with no
+shared module resolution), `PicksPage.jsx` (`entry.pick5_picks`, not
+`entry.user_entry_picks`), `GameweekPage.jsx` (`entry.pick5_picks`,
+`entry.status === 'void'` not `entry.is_void`, and a new Standings section — no
+prior page rendered `pot_standings_snapshots` at all), `PotDetail.jsx` (the
+actual reachable flow — `loadSavedEntry`/`loadMemberEntries` now read
+`game_entries`/`pick5_picks`, `handleSaveEntry` now calls
+`get-or-create-pick5-entry` then `submit-pick5-picks` instead of raw
+insert/update/delete against the retired tables; kept its existing imperative
+fetch style rather than converting to TanStack Query hooks, since that's
+`ISSUE-10`'s separate, out-of-scope concern; added one link to `GameweekPage.jsx`
+so live scores/standings become reachable at all).
+
+**Bug found and fixed mid-verification (`ISSUE-25`):** `supabase.functions.invoke()`
+throws a `FunctionsHttpError` on any non-2xx response whose own `.message` is
+always the generic "Edge Function returned a non-2xx status code" — the real
+server error (e.g. `Pick5Engine.validateEntry()`'s "Entry is locked, not pending")
+is only reachable via `error.context.json()`, which every call site was
+discarding. Existed since Milestone 4 Slice 1 (`hooks/usePick5Entry.js`) but never
+exercised until this cutover actually wired those hooks into a page. Fixed with a
+shared `extractFunctionError()` helper in `lib/supabase.js`, used at all three
+call sites (`useEntry.js`, `usePick5Entry.js`, `PotDetail.jsx`).
+
+**Verification — entirely through the real application** (Playwright driving an
+actual browser against the actual Vite dev server, not a script, except where a
+script was the only way to reach a state the UI can't produce yet — locking a
+past deadline, flipping fixtures to finished, marking payment with no
+Payment-Verification UI to click): created a dedicated test pot (2 real users,
+fee-bearing) via the admin API only for setup; from there, signed in as each user
+through the real sign-in page and drove everything else through the UI. Verified:
+create entry (real `game_entries`/`pick5_picks` rows written), submit picks, edit
+picks before locking (re-upsert confirmed correct), locking (via a real
+`compute-deadlines` call — a post-lock edit attempt was correctly rejected, and
+after the `ISSUE-25` fix, showed the correct specific message), score calculation
+(via a real fixture/goal event + `compute-scores` call, confirmed correct
+`goals_scored`/`result` in the UI), settlement (via a real `settle-gameweek` call
+— the unpaid user's entry correctly voided, the paid user's correctly settled;
+payment marked via a real `admin-actions` call), standings (new UI section,
+correct rank/score, void entry correctly absent), prize awarding (`pot_prizes`
+gross/fee/net correct, `payout_amount` correct), notification creation
+(`pick5.prize_awarded` row with correct payload), and settlement idempotency (a
+second `settle-gameweek` call made zero additional dispatches, no duplicate
+rows). All test data removed by exact ID; all fixture/gameweek state reverted;
+`deadline_utc` restored via a real `compute-deadlines` call per established
+`ISSUE-24` practice.
+
+**Documentation updated:** `current-state.md` (`ISSUE-7` correctness resolved;
+`ISSUE-6`'s note upgraded from theoretical to live/reachable; `ISSUE-17` marked
+resolved-in-practice — the reachable leaderboard now has a real tie-break, the
+old code is merely superseded, not removed; `ISSUE-15` moved to Resolved issues
+outright, since the hook it described no longer exists in that form; new
+`ISSUE-25` added, resolved; the Repository Snapshot's stale "Milestone 4 has not
+started" paragraph corrected), `game-engine.md` (top status note), `project-board.md`
+(Slice 9 and the audit moved to Done; the cutover added to Testing; several
+Backlog notes updated).
+
+**Status:** implemented and fully verified. **Not committed** — per explicit
+instruction. Milestone 5 (LMS) not started — per explicit instruction. Awaiting
+the repo owner's review.
+
+---
+
+## 2026-08-05 (22) — Pick 5 production readiness audit
+
+**Goal:** Milestone 4 (Pick 5) was reviewed, approved, committed, and pushed. Before
+starting Milestone 5 (LMS), the repo owner asked for a comprehensive production
+readiness audit of the entire Pick 5 implementation — Game Engine, database, Edge
+Functions, migrations, documentation, security, every open issue, and technical
+debt — performed as an external senior-engineer audit, investigation only, no code
+changes.
+
+**Top finding, Critical:** the frontend was never cut over to the new Game Engine.
+Confirmed by direct grep: `hooks/usePick5Entry.js` (built in Slice 1) was imported
+by nothing; the entire live, reachable Pick 5 UI (`PotDetail.jsx`, linked from
+every pot card) still read/wrote exclusively `user_entries`/`user_entry_picks`.
+Every slice's live verification through Milestone 4 was performed via direct Edge
+Function invocation or temporary scripts, never through the actual product — a
+real user playing Pick 5 today never touched any Milestone 4 code. A close second:
+`settle-gameweek` has no top-level error handling (unlike its sibling Edge
+Functions), so a single misconfigured pot's `Pick5PrizePoolExceededError` would
+silently halt settlement for every other pot/gameweek in the same batch,
+indefinitely, with zero visibility. Also found: `compute-deadlines`/
+`compute-scores`/`settle-gameweek` have no server-side authentication at all
+(broader than the already-tracked `ISSUE-9`); `current-state.md`/`database.md`/
+`architecture.md` had drifted significantly out of sync with the shipped
+Milestone 4 work, while `game-engine.md`/`decisions.md`/`session-log.md`/
+`project-board.md` (updated turn-by-turn) had not.
+
+**Schema/migrations:** confirmed clean — every Critical/High/Medium finding from
+the Milestone 2 `schema-review.md` is resolved in the applied migrations; desk-
+audited (not executed, to avoid wiping local dev data) migrations 001–010 for
+forward-reference correctness and confirmed replay-from-empty should succeed.
+
+**Scores:** architecture 8.5/10, production readiness 55%, code quality 90%,
+database quality 92%, documentation quality 65% (bimodal — excellent where
+actively maintained, stale where not). **Would not ship to production today** —
+not because the backend is unsound, but because real traffic never reaches it.
+Recommended checklist (in order): cut the frontend over, attach payment
+verification to `game_entries`, add `settle-gameweek` error handling, add
+Edge Function authentication, resolve `ISSUE-24`, build the Payment Verification
+UI, refresh the stale docs, re-verify end-to-end through the real frontend.
+
+**Status:** investigation only, no code changed, nothing to commit from this
+session on its own. Reviewed, approved, and committed by the repo owner (folded
+into the same commit as prior work). See entry 23 for the frontend cutover this
+audit's top finding led to directly.
+
+---
+
 ## 2026-08-05 (21) — Milestone 4 Slice 9: notifyUsers() implemented as a domain-event emitter
 
 **Goal:** Slice 8 was reviewed, approved, committed, and pushed. The repo owner asked

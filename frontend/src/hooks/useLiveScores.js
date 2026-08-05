@@ -32,7 +32,7 @@ export function useLiveScores(gameweekId, potId) {
         }
       )
       .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'user_entry_picks' },
+        { event: 'UPDATE', schema: 'public', table: 'pick5_picks' },
         () => {
           qc.invalidateQueries({ queryKey: ['entry'] })
           qc.invalidateQueries({ queryKey: ['pot-entries', potId, gameweekId] })

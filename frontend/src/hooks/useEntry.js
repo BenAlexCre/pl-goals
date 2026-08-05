@@ -1,7 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { supabase } from '../lib/supabase'
+import { supabase, extractFunctionError } from '../lib/supabase'
 import { useAuthStore } from '../store/authStore'
 
+// Milestone 4 frontend cutover: reads game_entries + pick5_picks (the Game
+// Engine schema) instead of the retired user_entries/user_entry_picks. Same
+// exported names/shapes as before so PicksPage/GameweekPage need minimal
+// changes — only the embedded relation name (pick5_picks, not
+// user_entry_picks) and game_entries' status values (which reuse the exact
+// same entry_status enum as user_entries, including 'void' as a status
+// value rather than a separate is_void boolean) differ at the call sites.
 export function useEntry(potId, gameweekId) {
   const { user } = useAuthStore()
   return useQuery({
@@ -9,10 +16,10 @@ export function useEntry(potId, gameweekId) {
     enabled: !!user?.id && !!potId && !!gameweekId,
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('user_entries')
+        .from('game_entries')
         .select(`
           *,
-          user_entry_picks(
+          pick5_picks(
             id, pick_position, player_id, goal_threshold, goals_scored, result,
             players(
               id, display_name, photo_url,
@@ -39,11 +46,11 @@ export function usePotEntries(potId, gameweekId) {
     enabled: !!potId && !!gameweekId,
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('user_entries')
+        .from('game_entries')
         .select(`
           *,
           profiles(id, display_name, username, avatar_url),
-          user_entry_picks(
+          pick5_picks(
             id, pick_position, player_id, goal_threshold, goals_scored, result,
             players(id, display_name, photo_url)
           )
@@ -101,9 +108,17 @@ export function useFixturePlayerStatuses(gameweekId) {
   })
 }
 
+// Replaces the direct user_entries/user_entry_picks writes with the two
+// Game Engine Edge Functions: get-or-create-pick5-entry (idempotent —
+// returns the existing row if one's already there) then submit-pick5-picks,
+// which runs Pick5Engine.validateEntry() server-side (exact-5 count,
+// eligibility, goalkeeper exclusion) before writing pick5_picks. This is a
+// real correctness improvement, not just a table swap — the old path had no
+// server-side validation at all, only the client-side eligibility check
+// below, which validateEntry() now makes redundant (it returns a more
+// specific error per-player), so it isn't duplicated here.
 export function useSubmitPicks() {
   const qc = useQueryClient()
-  const { user } = useAuthStore()
 
   return useMutation({
     mutationFn: async ({ potId, gameweekId, picks }) => {
@@ -119,47 +134,26 @@ export function useSubmitPicks() {
       if (new Date(gw.deadline_utc) <= new Date())
         throw new Error('The deadline has passed. Picks are now locked.')
 
-      const playerIds = picks.map(p => p.player_id)
-      const { data: valid } = await supabase
-        .from('available_players_by_gameweek')
-        .select('player_id')
-        .eq('gameweek_id', gameweekId)
-        .in('player_id', playerIds)
-
-      const validSet = new Set((valid ?? []).map(p => p.player_id))
-      const invalid = playerIds.filter(id => !validSet.has(id))
-      if (invalid.length > 0)
-        throw new Error('One or more selected players have no fixture this gameweek.')
-
-      const { data: entry, error: entryErr } = await supabase
-        .from('user_entries')
-        .upsert(
-          {
-            pot_id: potId,
-            user_id: user.id,
-            gameweek_id: gameweekId,
-            submitted_at: new Date().toISOString(),
-            status: 'pending',
-            is_void: false,
-          },
-          { onConflict: 'pot_id,user_id,gameweek_id' }
-        )
-        .select()
-        .single()
-      if (entryErr) throw entryErr
-
-      await supabase.from('user_entry_picks').delete().eq('entry_id', entry.id)
-
-      const { error: pickErr } = await supabase.from('user_entry_picks').insert(
-        picks.map((p, i) => ({
-          entry_id: entry.id,
-          player_id: p.player_id,
-          pick_position: i + 1,
-        }))
+      const { data: entryData, error: entryError } = await supabase.functions.invoke(
+        'get-or-create-pick5-entry',
+        { body: { pot_id: potId, gameweek_id: gameweekId } }
       )
-      if (pickErr) throw pickErr
+      if (entryError) throw await extractFunctionError(entryError)
+      if (entryData?.error) throw new Error(entryData.error)
 
-      return entry
+      const { data: picksData, error: picksError } = await supabase.functions.invoke(
+        'submit-pick5-picks',
+        {
+          body: {
+            game_entry_id: entryData.entry.id,
+            player_ids: picks.map((p) => p.player_id),
+          },
+        }
+      )
+      if (picksError) throw await extractFunctionError(picksError)
+      if (picksData?.error) throw new Error(picksData.error)
+
+      return entryData.entry
     },
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['entry', vars.potId, vars.gameweekId] })

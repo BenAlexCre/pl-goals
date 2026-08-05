@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed: 2026-08-03.
+Last reviewed: 2026-08-05.
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,
@@ -56,21 +56,21 @@ belongs in decisions.md.
   populated and the secrets/artifacts that were briefly committed have been removed
   from reachable history — see [Resolved issues](#resolved-issues), ISSUE-5 and
   ISSUE-14.
-- **Strategic direction (2026-08-03):** the product is being rebuilt as a
+- **Strategic direction (updated 2026-08-05):** the product is being rebuilt as a
   three-game-mode platform (Pick 5, Last Man Standing, Score Predictor), all
   launch-quality, all first-class — see [game-engine.md](./game-engine.md), now the
-  authoritative architecture spec. Milestones 1–3 (specification, shared schema
-  design, Game Engine framework) are complete and verified; Milestone 4 (Pick 5
-  implementation) has not started — see
-  [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). **Nothing from
-  this effort is live yet**: `supabase/migrations/004_game_engine_shared_platform.sql`
-  and `005_game_engine_shared_platform_rls.sql` exist in the repo but cannot be
-  applied to the live database until the prototype objects blocking them are removed
-  (ISSUE-21), and the Game Engine framework code
-  (`supabase/functions/_shared/game-engine/`) is unwired to any deployed Edge
-  Function. The previously-undocumented `supabase_admin`-owned LMS/Predictor
-  prototype tables/functions this replaces are treated as retired business-intent
-  signal, not a preserved implementation — see
+  authoritative architecture spec. Milestones 1–4 are complete: specification,
+  shared schema design, Game Engine framework, and the full Pick 5 implementation
+  (all 8 `GameEngine` methods) — see
+  [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). **This is now the
+  live, real-user path for Pick 5**, not just backend code: the frontend cutover
+  (2026-08-05) rewired `PicksPage.jsx`/`PotDetail.jsx`/`GameweekPage.jsx` and their
+  hooks onto `get-or-create-pick5-entry`/`submit-pick5-picks`/`game_entries`/
+  `pick5_picks`/`pot_standings_snapshots`, verified end-to-end through the real UI.
+  No frontend code creates a `user_entries` row anymore. Milestone 5 (Last Man
+  Standing) has not started. The previously-undocumented `supabase_admin`-owned
+  LMS/Predictor prototype tables/functions Milestone 4 replaces are treated as
+  retired business-intent signal, not a preserved implementation — see
   [game-engine.md § GE-15](./game-engine.md#ge-15-explicitly-deferred--not-carried-forward).
 
 ## What's confirmed working
@@ -384,6 +384,20 @@ trigger to `game_entries` is really this same issue's fix, not a settlement conc
 and belongs with whatever slice eventually builds Payment Verification for both
 schemas at once, rather than being patched separately here.
 
+**Now live and reachable, 2026-08-05 — this was previously a masked gap, not a
+theoretical one.** Before the Pick 5 frontend cutover, nothing in the running app
+ever created a `game_entries` row, so this gap had no real-world effect. As of the
+cutover, `get-or-create-pick5-entry` is the actual, only entry-creation path a real
+user hits — every new entry now has no auto-seeded `entry_payments` row, exactly as
+this note already predicted. Verified this does **not** silently break settlement
+(`Pick5Engine.settle()` already treats a missing row as unpaid, and
+`admin-actions`' `mark_paid` upserts the row directly with no dependency on a
+placeholder existing first — confirmed live during cutover verification), but the
+absence of any Payment Verification UI (`ISSUE-6`'s core gap) is now the single
+thing standing between "every entry voids" and a working payment flow. No longer
+a masked, dormant issue — this is now the most direct path to a broken production
+experience if `ISSUE-6` isn't closed before real pots use Pick 5.
+
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
 goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly
@@ -402,10 +416,20 @@ Slice 2's `Pick5Engine.validateEntry()`
 (`supabase/functions/_shared/game-engine/pick5/engine.ts`) picks one rule and
 enforces it server-side: **goalkeepers are excluded** — a decision made explicitly
 for this slice (confirmed with the repo owner) rather than inherited from either
-prototype flow. This does **not** resolve ISSUE-7 as originally described: `PicksPage`
-and `PotDetail.jsx` are unchanged, still diverge from each other, and neither is wired
-to the new engine yet. Close this issue for real only once the frontend cuts over to
-`submit-pick5-picks` and the two old flows are retired.
+prototype flow.
+
+**Correctness resolved 2026-08-05, as part of the Pick 5 frontend cutover** — both
+`PicksPage.jsx` and `PotDetail.jsx` now submit picks through `submit-pick5-picks`
+(`hooks/useEntry.js`'s `useSubmitPicks`, and `PotDetail.jsx`'s own `handleSaveEntry`),
+which runs `Pick5Engine.validateEntry()` server-side regardless of which page was
+used. A goalkeeper pick is now rejected the same way from either entry point —
+verified live via the real UI. **What's left, purely cosmetic:** `PicksPage.jsx`'s
+own player list (via `available_players_by_gameweek`, unfiltered) still lets a user
+*select* a goalkeeper in the UI before the server rejects it, while `PotDetail.jsx`'s
+list filters them out at the query level (`.neq('position', 'Goalkeeper')`) so the
+option never appears. This is a UX inconsistency, not a business-rule bypass —
+closing it (making `PicksPage.jsx`'s list filter goalkeepers too) is optional
+cleanup, not a correctness fix.
 
 #### ISSUE-8 — No self-serve pot-join flow
 `pots.invite_code` exists in the schema (unique-constrained — see
@@ -443,6 +467,18 @@ verification needed). Discovered while writing
 because none currently exists in the system. Since pots involve real money (see
 [business-rules.md § Payment rules](./business-rules.md#payment-rules)), an
 undefined tie-break on the leaderboard is a fairness gap, not just a cosmetic one.
+
+**Resolved in practice, 2026-08-05, via the Pick 5 frontend cutover** — as of this
+date, no code path anywhere in the app creates a `user_entries` row anymore
+(`PicksPage.jsx`/`PotDetail.jsx` both write through `get-or-create-pick5-entry`/
+`submit-pick5-picks` into `game_entries`), so the ranking logic described above is
+still present, unchanged, but no longer exercised by real traffic — it's effectively
+dead code now, not a live fairness gap. The leaderboard a real user actually sees is
+`Pick5Engine.generateStandings()`'s `pot_standings_snapshots`, which has had a real
+tie-break rule since Milestone 4 Slice 6 (`rankWithTies()`, standard competition
+"1224" ranking) and is now verified reachable through the real UI (`GameweekPage.jsx`'s
+Standings section). Not moved to Resolved issues, since the legacy code itself
+hasn't been removed — only superseded.
 Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
@@ -503,15 +539,6 @@ now exists to prevent recurring. **Status: confirmed.** Plan:
 [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
 
 ### P3 — known product gaps (unbuilt, not broken)
-
-#### ISSUE-15 — Overall (cross-gameweek) leaderboard is never populated
-`hooks/useLeaderboard.js` queries `leaderboard_snapshots` for `is_overall = true` when
-no specific gameweek is requested, but `settle-gameweek` only ever writes
-`is_overall: false` rows — see
-[database.md § leaderboard_snapshots](./database.md#leaderboard_snapshots) and
-[api.md § settle-gameweek](./api.md#post-functionsv1settle-gameweek). **Status:
-confirmed.** The season-long leaderboard view will always render empty. Plan:
-[roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 #### ISSUE-16 — No automated tests
 No test runner is configured in `frontend/package.json` (no `test` script, no Jest/
@@ -628,6 +655,39 @@ available_players_by_gameweek` now returns only `Defence, Goalkeeper, Midfield,
 Offence` — `Goalkeeper` still present at the view level, correctly, since excluding
 it is Pick 5-specific business logic (ISSUE-7's resolution, above), not a shared-view
 concern.
+
+#### ISSUE-25 — `supabase.functions.invoke()` error handling swallowed the real Edge Function error message
+**Discovered and resolved 2026-08-05**, during the Pick 5 frontend cutover's live
+verification, while confirming `Pick5Engine.validateEntry()`'s locking rejection
+surfaced correctly through the real UI. It didn't: the toast showed the generic
+"Edge Function returned a non-2xx status code" instead of the actual server
+message ("Entry is locked, not pending — picks can no longer be changed").
+Root cause: `supabase-js`'s `functions.invoke()` throws a `FunctionsHttpError` on
+any non-2xx response whose own `.message` is always that generic string — the
+Edge Function's real JSON error body is only reachable via `error.context` (the
+raw `Response`), which every call site (`hooks/useEntry.js`, `hooks/usePick5Entry.js`,
+`pages/PotDetail.jsx`) was discarding by doing `if (error) throw error`. Not
+previously caught because `hooks/usePick5Entry.js`'s two hooks (which have the
+identical pattern) were written in Milestone 4 Slice 1 but never wired into any
+page until this cutover — the bug existed in the repo for a full milestone with no
+path that ever exercised it. Fixed with a single shared helper,
+`extractFunctionError()` in `lib/supabase.js`, that parses `error.context.json()`
+and returns a proper `Error` with the real message; used at all three call sites.
+Verified live: re-attempting the same locked-entry edit through the real UI after
+the fix correctly displayed the specific server message.
+
+#### ISSUE-15 — Overall (cross-gameweek) leaderboard is never populated
+**Resolved 2026-08-05, via the Pick 5 frontend cutover.** Originally:
+`hooks/useLeaderboard.js` queried `leaderboard_snapshots` for `is_overall = true`
+when no specific gameweek was requested, but `settle-gameweek` only ever wrote
+`is_overall: false` rows, so the season-long leaderboard view always rendered
+empty. `hooks/useLeaderboard.js` now reads `pot_standings_snapshots` instead —
+written by `Pick5Engine.generateStandings()` (Milestone 4 Slice 6), which has
+always written both a per-gameweek row and an overall row (`gameweek_id IS NULL`)
+per user, per [game-engine.md § GE-4.6](./game-engine.md#ge-46-pot_standings_snapshots).
+Verified live through the real UI (`GameweekPage.jsx`'s new Standings section,
+added as part of the same cutover — no prior page rendered this data at all). See
+[session-log.md](./session-log.md) for the cutover session.
 
 #### ISSUE-14 — Chrome profile directories in the working tree
 **Resolved 2026-08-03**, as part of the ISSUE-5 fix above — both

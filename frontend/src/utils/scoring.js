@@ -1,3 +1,8 @@
+// Mirrors PICK5_PICK_COUNT in supabase/functions/_shared/game-engine/pick5/engine.ts —
+// duplicated deliberately, not imported: the frontend (Vite) and the Edge
+// Functions (Deno) are separate runtimes with no shared module resolution.
+export const PICK5_PICK_COUNT = 5
+
 export function computePickResult(goalsScored, threshold, isLive) {
   if (goalsScored >= threshold) return isLive ? 'winning' : 'won'
   return isLive ? 'losing' : 'lost'

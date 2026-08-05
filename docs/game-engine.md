@@ -15,8 +15,14 @@ internally from `settle()` per GE-8.4), Slice 7 (`determineWinner()`, implemente
 standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into
 `settle()` alongside `determineWinner()` — see GE-9), and Slice 9 (`notifyUsers()`,
 domain-event notifications, wired into `awardPrize()`) are done — all eight
-`GameEngine` contract methods are now implemented for Pick 5. See
-[GE-12](#ge-12-milestone-plan) for exact status per milestone.
+`GameEngine` contract methods are now implemented for Pick 5. **Milestone 4 is now
+complete end-to-end, including the frontend**: as of 2026-08-05's frontend cutover,
+`PicksPage.jsx`/`PotDetail.jsx`/`GameweekPage.jsx` all read/write `game_entries`/
+`pick5_picks`/`pot_standings_snapshots` via `get-or-create-pick5-entry`/
+`submit-pick5-picks`, not the retired `user_entries`/`user_entry_picks`/
+`leaderboard_snapshots` — verified live through the real UI, not just the Edge
+Functions directly. See [GE-12](#ge-12-milestone-plan) for exact status per
+milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
 described in [current-state.md](./current-state.md) — those objects communicated *business

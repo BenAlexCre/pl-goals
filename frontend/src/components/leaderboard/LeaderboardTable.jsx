@@ -1,6 +1,7 @@
 import Card from '../ui/Card'
 import Badge from '../ui/Badge'
 import Avatar from '../ui/Avatar'
+import { PICK5_PICK_COUNT, strikeRate } from '../../utils/scoring'
 
 export default function LeaderboardTable({ rows = [] }) {
   return (
@@ -21,16 +22,12 @@ export default function LeaderboardTable({ rows = [] }) {
                 {row.profiles?.display_name ?? 'Unknown'}
               </p>
               <p className="text-xs text-white/35">
-                {row.picks_won}/{row.picks_total} correct • {row.strike_rate}% strike rate
+                {row.score}/{PICK5_PICK_COUNT} correct • {strikeRate(row.score, PICK5_PICK_COUNT)}% strike rate
               </p>
             </div>
-            {row.is_void ? (
-              <Badge status="void">Void</Badge>
-            ) : (
-              <Badge status={row.picks_won === row.picks_total ? 'won' : 'pending'}>
-                {row.picks_won}/{row.picks_total}
-              </Badge>
-            )}
+            <Badge status={row.score === PICK5_PICK_COUNT ? 'won' : 'pending'}>
+              {row.score}/{PICK5_PICK_COUNT}
+            </Badge>
           </div>
         ))}
 

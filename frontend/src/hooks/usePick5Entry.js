@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { supabase } from '../lib/supabase'
+import { supabase, extractFunctionError } from '../lib/supabase'
 
 // Milestone 4, Slice 1 (entry creation) — docs/game-engine.md § GE-5.1.
 // Calls the new get-or-create-pick5-entry Edge Function, which creates a
@@ -20,7 +20,7 @@ export function useGetOrCreatePick5Entry() {
       const { data, error } = await supabase.functions.invoke('get-or-create-pick5-entry', {
         body: { pot_id: potId, gameweek_id: gameweekId },
       })
-      if (error) throw error
+      if (error) throw await extractFunctionError(error)
       if (data?.error) throw new Error(data.error)
       return data.entry
     },
@@ -47,7 +47,7 @@ export function useSubmitPick5Picks() {
       const { data, error } = await supabase.functions.invoke('submit-pick5-picks', {
         body: { game_entry_id: gameEntryId, player_ids: playerIds },
       })
-      if (error) throw error
+      if (error) throw await extractFunctionError(error)
       if (data?.error) throw new Error(data.error)
       return data.picks
     },

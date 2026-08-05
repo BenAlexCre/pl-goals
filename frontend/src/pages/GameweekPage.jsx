@@ -1,10 +1,12 @@
 import { useParams } from 'react-router-dom'
 import { useGameweek } from '../hooks/useGameweek'
 import { usePotEntries, useFixturePlayerStatuses } from '../hooks/useEntry'
+import { useLeaderboard } from '../hooks/useLeaderboard'
 import { useLiveScores } from '../hooks/useLiveScores'
 import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import LivePickCard from '../components/picks/LivePickCard'
+import LeaderboardTable from '../components/leaderboard/LeaderboardTable'
 import { toLocalTimeShort } from '../utils/time'
 
 function eventLabel(event) {
@@ -87,6 +89,7 @@ export default function GameweekPage() {
   const { data: gameweek } = useGameweek(gameweekId)
   const { data: entries = [] } = usePotEntries(potId, gameweekId)
   const { data: playerStatusMap = new Map() } = useFixturePlayerStatuses(gameweekId)
+  const { data: standings = [] } = useLeaderboard(potId, gameweekId ? Number(gameweekId) : null)
 
   useLiveScores(gameweekId, potId)
 
@@ -145,13 +148,13 @@ export default function GameweekPage() {
                   <p className="text-white font-medium">{entry.profiles?.display_name}</p>
                   <p className="text-xs text-white/35">@{entry.profiles?.username}</p>
                 </div>
-                <Badge status={entry.is_void ? 'void' : entry.status}>
-                  {entry.is_void ? 'Void' : entry.status}
+                <Badge status={entry.status}>
+                  {entry.status === 'void' ? 'Void' : entry.status}
                 </Badge>
               </div>
 
               <div className="grid md:grid-cols-2 gap-3">
-                {(entry.user_entry_picks ?? []).map(pick => (
+                {(entry.pick5_picks ?? []).map(pick => (
                   <div key={pick.id} className="space-y-1">
                     <LivePickCard
                       pick={{
@@ -170,6 +173,15 @@ export default function GameweekPage() {
             </Card>
           ))}
         </div>
+      </section>
+
+      {/* Standings — pot_standings_snapshots, written by Pick5Engine.generateStandings()
+          once this gameweek settles. No prior page rendered this table at all
+          (Milestone 4 frontend cutover) — added here since GameweekPage already
+          owns "everything about this pot's gameweek." */}
+      <section>
+        <h2 className="text-lg font-semibold text-white mb-3">Standings</h2>
+        <LeaderboardTable rows={standings} />
       </section>
     </div>
   )

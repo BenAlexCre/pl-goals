@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import {
   Search,
   Users,
@@ -15,7 +15,7 @@ import {
   Eye,
   EyeOff,
 } from 'lucide-react'
-import { supabase } from '../lib/supabase'
+import { supabase, extractFunctionError } from '../lib/supabase'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
 import Spinner from '../components/ui/Spinner'
@@ -258,12 +258,17 @@ export default function PotDetailPage() {
       return
     }
 
+    // Milestone 4 frontend cutover: game_entries/pick5_picks (Game Engine
+    // schema), not the retired user_entries/user_entry_picks. A plain read,
+    // never auto-creating — matches the pre-cutover UX exactly (no entry
+    // exists until the user actually saves picks, via handleSaveEntry()'s
+    // get-or-create-pick5-entry call below).
     const { data: entryRow, error: entryError } = await supabase
-      .from('user_entries')
+      .from('game_entries')
       .select(`
         id,
         status,
-        submitted_at,
+        created_at,
         gameweek_id
       `)
       .eq('pot_id', potId)
@@ -282,7 +287,7 @@ export default function PotDetailPage() {
     setSavedEntry(entryRow)
 
     const { data: picksRows, error: picksError } = await supabase
-      .from('user_entry_picks')
+      .from('pick5_picks')
       .select(`
         id,
         pick_position,
@@ -294,7 +299,7 @@ export default function PotDetailPage() {
           position
         )
       `)
-      .eq('entry_id', entryRow.id)
+      .eq('game_entry_id', entryRow.id)
       .order('pick_position', { ascending: true })
 
     if (picksError) throw picksError
@@ -363,12 +368,12 @@ export default function PotDetailPage() {
       }
 
       const { data: entriesRows, error: entriesError } = await supabase
-        .from('user_entries')
+        .from('game_entries')
         .select(`
           id,
           user_id,
           status,
-          submitted_at,
+          created_at,
           gameweek_id
         `)
         .eq('pot_id', potId)
@@ -383,10 +388,10 @@ export default function PotDetailPage() {
 
       if (entryIds.length > 0) {
         const { data: rawPicks, error: picksError } = await supabase
-          .from('user_entry_picks')
+          .from('pick5_picks')
           .select(`
             id,
-            entry_id,
+            game_entry_id,
             pick_position,
             player_id,
             players (
@@ -395,7 +400,7 @@ export default function PotDetailPage() {
               position
             )
           `)
-          .in('entry_id', entryIds)
+          .in('game_entry_id', entryIds)
           .order('pick_position', { ascending: true })
 
         if (picksError) throw picksError
@@ -436,7 +441,7 @@ export default function PotDetailPage() {
       const picksByEntryId = new Map()
 
       picksRows.forEach((pick) => {
-        const current = picksByEntryId.get(pick.entry_id) || []
+        const current = picksByEntryId.get(pick.game_entry_id) || []
         const team = teamHistoryMap.get(pick.player_id)
 
         current.push({
@@ -449,7 +454,7 @@ export default function PotDetailPage() {
           team_short_name: team?.team_short_name || '',
         })
 
-        picksByEntryId.set(pick.entry_id, current)
+        picksByEntryId.set(pick.game_entry_id, current)
       })
 
       const merged = members.map((member) => {
@@ -458,8 +463,11 @@ export default function PotDetailPage() {
         return {
           member,
           hasEntry: Boolean(entry),
+          // game_entries has no submitted_at column — created_at is the
+          // equivalent moment, since the row is created lazily at first
+          // save (get-or-create-pick5-entry), not at page view.
           entryStatus: entry?.status || 'not_submitted',
-          submittedAt: entry?.submitted_at || null,
+          submittedAt: entry?.created_at || null,
           picks: entry ? picksByEntryId.get(entry.id) || [] : [],
         }
       })
@@ -628,64 +636,32 @@ export default function PotDetailPage() {
         throw new Error(`Select exactly ${MAX_PICKS} players`)
       }
 
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser()
+      // Milestone 4 frontend cutover: get-or-create-pick5-entry (idempotent
+      // — safe to call again on an already-existing entry, e.g. when
+      // editing picks before locking) then submit-pick5-picks, which runs
+      // Pick5Engine.validateEntry() server-side before writing pick5_picks.
+      // Replaces the direct user_entries/user_entry_picks insert+delete+
+      // insert dance above — identity is derived from the forwarded JWT
+      // inside the Edge Functions, so the separate getUser() call this used
+      // to need here is no longer necessary.
+      const { data: entryData, error: entryError } = await supabase.functions.invoke(
+        'get-or-create-pick5-entry',
+        { body: { pot_id: potId, gameweek_id: Number(selectedGameweekId) } }
+      )
+      if (entryError) throw await extractFunctionError(entryError)
+      if (entryData?.error) throw new Error(entryData.error)
 
-      if (userError) throw userError
-      if (!user) throw new Error('You must be signed in')
-
-      let entryId = savedEntry?.id || null
-
-      if (!entryId) {
-        const { data: entryRows, error: entryError } = await supabase
-          .from('user_entries')
-          .insert([
-            {
-              pot_id: potId,
-              user_id: user.id,
-              gameweek_id: Number(selectedGameweekId),
-              status: 'pending',
-              picks_total: MAX_PICKS,
-            },
-          ])
-          .select()
-
-        if (entryError) throw entryError
-        if (!entryRows?.length) throw new Error('Entry was not created')
-
-        entryId = entryRows[0].id
-      } else {
-        const { error: resetEntryError } = await supabase
-          .from('user_entries')
-          .update({
-            status: 'pending',
-            picks_total: MAX_PICKS,
-          })
-          .eq('id', entryId)
-
-        if (resetEntryError) throw resetEntryError
-
-        const { error: deletePicksError } = await supabase
-          .from('user_entry_picks')
-          .delete()
-          .eq('entry_id', entryId)
-
-        if (deletePicksError) throw deletePicksError
-      }
-
-      const picksPayload = selectedPlayers.map((player, index) => ({
-        entry_id: entryId,
-        pick_position: index + 1,
-        player_id: player.player_id,
-      }))
-
-      const { error: picksError } = await supabase
-        .from('user_entry_picks')
-        .insert(picksPayload)
-
-      if (picksError) throw picksError
+      const { data: picksData, error: picksError } = await supabase.functions.invoke(
+        'submit-pick5-picks',
+        {
+          body: {
+            game_entry_id: entryData.entry.id,
+            player_ids: selectedPlayers.map((player) => player.player_id),
+          },
+        }
+      )
+      if (picksError) throw await extractFunctionError(picksError)
+      if (picksData?.error) throw new Error(picksData.error)
 
       await Promise.all([
         loadSavedEntry(selectedGameweekId),
@@ -906,6 +882,16 @@ export default function PotDetailPage() {
           >
             Members
           </button>
+
+          {selectedGameweekId && (
+            <Link
+              to={`/pot/${potId}/gameweek/${selectedGameweekId}`}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-2xl border border-white/10 bg-surface-1 px-4 py-2 text-sm font-medium text-white/65 transition hover:text-white"
+            >
+              Live scores & standings
+              <ChevronRight size={14} />
+            </Link>
+          )}
         </div>
 
         {activeTab === 'entry' ? (

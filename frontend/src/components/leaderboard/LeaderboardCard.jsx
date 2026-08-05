@@ -1,6 +1,7 @@
 import Card from '../ui/Card'
 import Badge from '../ui/Badge'
 import Avatar from '../ui/Avatar'
+import { PICK5_PICK_COUNT, strikeRate } from '../../utils/scoring'
 
 export default function LeaderboardCard({ rows = [] }) {
   return (
@@ -17,12 +18,10 @@ export default function LeaderboardCard({ rows = [] }) {
                 <p className="font-medium text-white truncate">
                   {row.profiles?.display_name ?? 'Unknown'}
                 </p>
-                <Badge status={row.is_void ? 'void' : 'pending'}>
-                  {row.is_void ? 'Void' : `${row.picks_won}/${row.picks_total}`}
-                </Badge>
+                <Badge status="pending">{`${row.score}/${PICK5_PICK_COUNT}`}</Badge>
               </div>
               <p className="text-sm text-white/35 mt-1">
-                {row.picks_won} correct picks • {row.strike_rate}% strike rate
+                {row.score} correct picks • {strikeRate(row.score, PICK5_PICK_COUNT)}% strike rate
               </p>
             </div>
           </div>
