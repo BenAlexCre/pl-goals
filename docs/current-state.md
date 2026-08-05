@@ -361,6 +361,33 @@ deliberately removed/replaced by the manual scraper workflow. Plan:
 
 ### P1 — features that are half-built or internally inconsistent
 
+#### ISSUE-32 — `get-or-create-lms-entry` has no entry-window gate
+**Discovered 2026-08-05**, while updating the LMS architecture for the
+Wipeout Resolution/rollover/late-entry product rules — revised once already
+this same session, see
+[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee).
+`supabase/functions/get-or-create-lms-entry/index.ts` (Milestone 5 Slice 1,
+committed 2026-08-05, `2db86b4`) checks pot membership and `game_type`
+only — it will happily create an LMS entry at any time, for any pot, with no
+regard to whether the competition has already started. That was a reasonable
+reading of the spec when Slice 1 was built (nothing had yet defined an
+entry-window rule for LMS), but the now-final rule is explicit: late entry
+is not generally allowed, and the one exception — a Game-Engine-created
+rollover pot, joinable only while `status = 'draft'` — has a condition this
+function doesn't check either. **Status: confirmed, not fixed.** Not
+low-risk to fix inline right now — the columns the check depends on
+(`pots.start_gameweek_id`, `pots.rollover_source_pot_id`) exist only in a
+drafted, not-yet-applied migration (`013_lms_wipeout_and_rollover.sql`). No
+production/real-user impact today (Milestone 5 hasn't shipped past Slice 1),
+but this must be fixed before Slice 2 (pick submission) builds on top of
+entry creation, since picks presuppose a validly-created entry. Plan: apply
+`013` once reviewed, then add the gate as a small, targeted correction — for
+a normal pot, reject once `now() >= start_gameweek.earliest_kickoff_utc`;
+for a rollover pot (`rollover_source_pot_id is not null`), reject unless
+`pots.status = 'draft'`. See
+[game-engine.md § GE-5.2](./game-engine.md#ge-52-last-man-standing) for the
+exact rule.
+
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
 goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly

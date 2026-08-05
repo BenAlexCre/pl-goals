@@ -660,3 +660,200 @@ recorded here rather than left implicit:**
   row will correctly report "unknown user" until a phone number exists some
   other way. Further normalization (spacing, local-format-to-E.164 guessing) is
   deliberately out of scope — not a case this app's current data can exercise.
+
+## LMS: Tie Outcome, rollover, and late entry
+
+**Superseded 2026-08-05, same session, before any of this was applied or
+shipped** — see [§ LMS: Wipeout Resolution, automatic rollover, and a fixed
+per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee)
+below for the revised, authoritative version. Kept here, not deleted, per
+this document's own "never delete historical decisions" rule — the
+reasoning below was sound given the information available at the time
+(the payment-model and rollover-creation product decisions this entry
+responds to were themselves later revised by the repo owner, not found to
+be a mistake in this entry's own analysis).
+
+**Decided 2026-08-05**, ahead of Milestone 5 Slice 2. The repo owner supplied
+five product decisions before Slice 2 could proceed; this records the schema
+and Game Engine impact of each, and — per the standing instruction to
+determine whether any existing LMS assumption is now invalid — two places
+this specification (`game-engine.md`) and the already-shipped Slice 1 code
+were wrong.
+
+**1. No tiebreak picks.** `game-engine.md`'s GE-5.2 previously left
+`lms_tiebreak_picks` (referenced by the retired prototype, never built) as
+"properly designed as part of Milestone 5, not before." That's now settled:
+it will not be built at all. Tie resolution at competition end is handled
+entirely by a pot-level setting instead (below) — simpler, and it matches
+GE-1's own original product-vision line ("last survivor(s) split the pot")
+more directly than a player-facing tiebreak mechanic would have.
+
+**2. `pots.tie_outcome`, a required LMS setting.** `split_prize` | `roll_prize`,
+new enum `lms_tie_outcome`. Config lives on `pots`, same placement as
+`predictor_cycle_mode`/`predictor_scorer_scope` — GE-3's platform/mode
+boundary (config on the shared `pots` row, calculated per-instance outcome on
+`pot_prizes`) already had a slot for exactly this shape. "Required" is
+enforced at pot creation (application/API layer), not by omitting a default —
+the column is `not null default 'split_prize'`, matching how
+`predictor_cycle_mode` is also mode-specific-but-defaulted rather than
+nullable. Immutable once the pot has entries, joining `entry_fee`'s existing
+guarded set in `trg_pots_contract_immutable` — changing the tie rule after
+money/picks are committed is exactly the fairness problem that trigger
+already exists to prevent for every other pot term.
+
+**3/4. Wipeout detection is new Game Engine logic, not just a settings read.**
+Both Split Prize and Roll Prize only apply to a **wipeout** — every
+currently-`alive` entry eliminated by one gameweek's results, going from N>1
+to 0 in a single step. This is a different condition than "0 entries are
+alive," which can also be reached the ordinary way (elimination narrows to
+exactly 1 survivor, who simply wins — `tie_outcome` never consulted in that
+case). `determineWinner()` (Slice 7 territory, not built yet) must therefore
+know the alive-count immediately before a gameweek's eliminations were
+applied, not just the count after — this needs a real design pass when Slice
+7 is reached, flagged here rather than guessed now. Split Prize reuses the
+existing multi-winner payout path (`awardPrize()` already knows how to split
+`net_amount` across more than one winner, from Pick 5's own standings-tie
+case). Roll Prize needs the new `pot_prizes.rollover` flag (GE-4.4) — chosen
+as an explicit boolean rather than inferring "rolled over" from "no
+`game_entries` row in this pot has `payout_amount > 0`," consistent with
+GE-13's standing preference for explicit columns over nullability-based
+inference.
+
+**Rollover linkage is deliberately manual, not automatic.** The decision is
+explicit: "Do NOT automatically create the new pot." `pots.rollover_source_pot_id`
+lets an organiser attach a new pot to a finished, rolled-over one at creation
+time; nothing in the Game Engine ever creates a pot or sets this column
+itself. Made unconditionally immutable (joins `game_type` in
+`prevent_pot_contract_change()`'s always-blocked set, not the
+entries-gated one) — a pot's lineage isn't a "term" that could plausibly need
+a pre-launch correction the way `entry_fee` might; it's an identity fact
+fixed at creation.
+
+**5. Late entry — the "do not infer from nulls or dates" instruction shaped
+the whole design.** Two explicit facts were needed and didn't exist:
+"when does this competition's fee-charging start" and "is this pot a
+rollover." Both are now real columns (`pots.start_gameweek_id`,
+`pots.rollover_source_pot_id`) rather than derived from e.g. "the earliest
+gameweek this pot has a `game_entries` row for" (fragile — the whole point of
+allowing late entry is that the *first* entry isn't necessarily the *earliest*
+one anymore) or a creation-timestamp comparison (says nothing about which
+gameweek a competition actually starts charging for).
+
+**Billing the backfill reuses Pick 5's payment model exactly — this exposed an
+invalid assumption already sitting in this specification.** GE-4.3 stated
+`entry_payments` `scope = 'season'` (one whole-pot row) was the intended
+shape for LMS. It isn't: a per-gameweek recurring fee, which the backfill
+example makes explicit (weekly fee × gameweeks owed), cannot be represented
+by one row. LMS payment verification now uses `scope = 'gameweek'`, identical
+in shape to Pick 5 — see the correction in
+[game-engine.md § GE-4.3](./game-engine.md#ge-43-entry_payments-generalized--payment-verification-not-payment-processing).
+This is a genuine win for reuse: `admin-actions`, `AdminPayments.jsx`,
+`bulkPayments.ts` need zero changes to support LMS backfill billing once the
+entry-side logic exists — they already operate on `(pot_id, user_id,
+gameweek_id)` rows.
+
+**A second invalid assumption: Slice 1 shipped with no entry-window gate at
+all.** `get-or-create-lms-entry` was built and verified before this session's
+late-entry rule existed — at the time, "any pot member can create their LMS
+entry, any time" was a reasonable reading of GE-4.5's season-scoped shape.
+It no longer is. This is not fixed in this same change — the columns it would
+depend on (`start_gameweek_id`, `rollover_source_pot_id`) exist only in a
+drafted, not-yet-applied migration, and per this project's standing rule,
+migrations get reviewed before they're applied, not applied inline with the
+document that first proposes them. Tracked as
+[current-state.md ISSUE-32](./current-state.md#issue-32--get-or-create-lms-entry-has-no-entry-window-gate),
+to be fixed once `013_lms_tie_outcome_and_rollover.sql` is reviewed and
+applied.
+
+**What was deliberately not designed yet, to avoid inventing behavior:** the
+exact `determineWinner()` wipeout-detection algorithm (needs to know
+"alive-count going into this gameweek," which isn't currently computed
+anywhere — a Slice 7 design question) and the entry-window/backfill billing
+implementation itself (`get-or-create-lms-entry`'s correction plus whatever
+Payment Verification changes are needed to surface an itemized backfill to
+an admin) — both real work, neither guessed at here.
+
+## LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee
+
+**Decided 2026-08-05**, revising [§ LMS: Tie Outcome, rollover, and late
+entry](./decisions.md#lms-tie-outcome-rollover-and-late-entry) above in the
+same session, before that entry's design was ever applied or shipped. The
+repo owner supplied a fuller, more specific set of product decisions and was
+explicit that they "replace any previous assumptions or recommendations" and
+that nothing should be "preserve[d]... simply because [it] already exists."
+Three things changed from the superseded entry, plus one genuinely new rule.
+
+**1. Payment model reversed: LMS is one flat entry fee per competition, not
+a recurring weekly charge.** The previous entry inferred a per-gameweek fee
+from the late-entry backfill example ("Weekly fee = €5... Total due = €15")
+and corrected `game-engine.md`'s original `entry_payments` design (`scope =
+'season'`) to `scope = 'gameweek'` on that basis. The repo owner's revised
+decision states this plainly: "One entry fee per competition... No weekly
+payments... There is NO cumulative billing for missed weeks." The original
+`scope = 'season'` design in `game-engine.md` was correct all along — this
+session's own intermediate "correction" was the mistake, not the
+specification it corrected. Reverted in full: `entry_payments` needs no
+schema change for LMS at all, and **Payment Verification needs no code
+changes whatsoever** (`admin-actions`/`AdminPayments.jsx`/`bulkPayments.ts`
+already handle `scope = 'season'` rows, unmodified, exactly as they do
+today). This is a clean example of why the "design it, review it, don't
+apply automatically" migration discipline matters — the incorrect
+`scope = 'gameweek'` design never reached a live database or shipped code,
+so reverting it costs nothing beyond a documentation correction.
+
+**2. Rollover pot creation is automatic, not organiser-initiated.** The
+previous entry took "Do NOT automatically create the new pot" as a hard
+rule; the revised decision inverts it exactly: "Do NOT ask the organiser to
+create the rollover pot manually. The Game Engine should create it
+automatically." This is now `awardPrize()`'s (or an equivalent settlement-
+adjacent method's) responsibility when a wipeout resolves as `roll_prize` —
+not a manual admin workflow. `pots.rollover_source_pot_id` and the new
+`carry_over_amount` column are therefore set exactly once, atomically, by
+service-role Game Engine code at creation time — never editable afterward by
+anyone, which is why both join `game_type` in
+`prevent_pot_contract_change()`'s unconditionally-immutable set rather than
+the "immutable once entries exist" set most other pot terms use.
+
+**3. The new pot starts in `draft`, with only the organiser as a member —
+reusing `pot_status`'s existing, previously-unused `'draft'` value.** No
+enum change needed; this is genuine reuse of dormant schema, not new
+surface. The organiser's pre-launch workflow (invite, verify payment,
+choose `start_gameweek_id` — including deliberately waiting for next season)
+happens entirely within this draft window. `is_pot_member()`-gated RLS
+already makes a draft pot with one member invisible to everyone else,
+without any policy change — another case of the existing shared platform
+already being exactly general enough for this.
+
+**4. New rule, not a revision: season-end ties are a separate case from
+wipeouts, with their own setting.** Neither product-decision round before
+this one mentioned what happens if multiple entries are simply still alive
+when the season ends (as opposed to a wipeout, where entries are eliminated
+down to zero in one gameweek). `pots.season_end_tie_rule` (`split_prize` |
+`final_prediction`) fills that gap. `final_prediction`'s three-tier
+resolution (winning team → first goalscorer → closest minute → split) needs
+a new pick-type table this decision deliberately does not design yet — it's
+only reachable at the very end of a competition, several slices away, and
+designing it now risks guessing at a shape that later, closer-to-the-work
+context would get right. Flagged in `game-engine.md § GE-5.2` and
+`business-rules.md § Last Man Standing` as identified, not built.
+
+**Net effect on the schema draft:** the first draft's proposal
+(`013_lms_tie_outcome_and_rollover.sql`) is replaced outright, not layered
+on top of — it was never applied, so nothing needed migrating away from it.
+The replacement (`013_lms_wipeout_and_rollover.sql`) adds
+`wipeout_resolution`, `season_end_tie_rule`, `start_gameweek_id`,
+`rollover_source_pot_id`, `carry_over_amount` on `pots`, and `rollover` on
+`pot_prizes` — smaller in one sense (no `entry_payments` change at all,
+where the superseded draft needed none either but for the wrong reason) and
+larger in another (two new required settings instead of one, plus an
+explicit carry-over amount column the superseded draft didn't need since it
+never modeled automatic pot creation).
+
+**What's still deliberately not designed, same reasoning as before:** the
+`determineWinner()` wipeout-detection algorithm, the automatic
+rollover-pot-creation code path itself (which Game Engine method triggers
+it, and how the compensating-rollback pattern already used in
+`get-or-create-lms-entry`/`get-or-create-pick5-entry` extends to a
+multi-table pot+pot_members insert), the pot activation action that moves a
+draft rollover pot to active, and the `final_prediction` pick table and
+scoring logic. All real, all flagged, none guessed at.

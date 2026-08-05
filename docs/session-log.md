@@ -13,6 +13,122 @@ from here.
 
 ---
 
+## 2026-08-05 (28) — LMS architecture revised: Wipeout Resolution, automatic rollover, fixed entry fee
+
+**Goal:** entry 27's architecture update was reviewed and approved for Slice
+1's commit, but the repo owner then supplied a fuller, more specific set of
+LMS product decisions that explicitly replace entry 27's — a payment-model
+reversal (LMS is one flat entry fee per competition, never a recurring
+weekly charge — "no cumulative billing" now stated explicitly) and a
+rollover-creation reversal (the Game Engine creates the new pot
+automatically; entry 27 had this as a manual organiser action, per the
+product decisions available at the time). Also added: a rename ("Tie
+Outcome" → "Wipeout Resolution", same two values, same wipeout-only scope)
+and a genuinely new rule (season-end ties, separate from wipeouts, with
+their own `Split Prize`/`Final Prediction` setting).
+
+**What was reverted:** entry 27's `entry_payments` correction
+(`scope='season'` → `scope='gameweek'` for LMS) was itself wrong — the
+original `game-engine.md` design (`scope='season'`) was correct all along.
+Reverted in full; **zero Payment Verification code changes needed for LMS**,
+now confirmed twice over. The first `013_lms_tie_outcome_and_rollover.sql`
+draft (never applied, never committed) was deleted outright and replaced
+with `013_lms_wipeout_and_rollover.sql`, per the explicit instruction not to
+carry forward a superseded proposal.
+
+**Schema (designed, not applied), `013_lms_wipeout_and_rollover.sql`:**
+`lms_wipeout_resolution` enum, `pots.wipeout_resolution` (renamed from
+`tie_outcome`), new `lms_season_end_tie_rule` enum + `pots.season_end_tie_rule`,
+`pots.start_gameweek_id` (unchanged purpose, simpler role now — no backfill
+calc to anchor), `pots.rollover_source_pot_id` (now unconditionally
+immutable, set only by the Game Engine), new `pots.carry_over_amount`
+(explicit, set once at automatic creation), `pot_prizes.rollover` (unchanged).
+`pot_status`'s existing `'draft'` value (unused since Milestone 1) is reused
+as-is for a new rollover pot's inactive starting state — confirmed via grep
+that nothing in the app currently keys off it, so this is genuine reuse, not
+a repurposing of something load-bearing elsewhere.
+
+**Documentation:** `game-engine.md` (GE-4.1, GE-4.3 reverted to its original
+text, GE-4.4, GE-5.2 fully rewritten, GE-9, GE-12), `business-rules.md`
+(§ Last Man Standing fully rewritten), `decisions.md` (entry 27's ADR marked
+superseded — kept, not deleted, per this file's own rule — plus a new ADR
+recording what changed and why), `current-state.md` (`ISSUE-32`'s fix plan
+simplified to match the new, backfill-free entry-window rule),
+`project-board.md`.
+
+**Status:** documentation and schema design only, same as entry 27 — no
+application code. `013_lms_wipeout_and_rollover.sql` awaits review; not
+applied. Slice 2 still not started, still blocked on that review/apply
+decision. Newly identified, deliberately not designed: the automatic
+rollover-pot-creation code path itself, the pot-activation admin action, and
+the `final_prediction` pick table/scoring.
+
+---
+
+## 2026-08-05 (27) — LMS architecture update: Tie Outcome, rollover, late entry
+
+**Goal:** before Slice 2, the repo owner supplied five product decisions
+(no tiebreak picks; a required `Tie Outcome` pot setting — Split Prize or Roll
+Prize — deciding what happens on a wipeout; rollover linkage to a future
+organiser-created pot; late entry permitted only in a rollover pot, billed as
+a backfill of every gameweek's fee already charged) and asked for the LMS
+architecture to be updated first: smallest schema change, smallest Game
+Engine change, which existing LMS assumptions are now invalid, documentation
+updated to make this the authoritative design. Also found, on starting this
+work: Slice 1's files (`get-or-create-lms-entry/`, the three doc updates from
+entry 26) were still uncommitted despite being reported as reviewed/approved
+— committed them first (`docs/game-engine.md`, `docs/project-board.md`,
+`docs/session-log.md`, `supabase/functions/get-or-create-lms-entry/`), no
+content changes, since they'd already gone through review.
+
+**Schema (designed, not applied)** — `013_lms_tie_outcome_and_rollover.sql`:
+new `lms_tie_outcome` enum, `pots.tie_outcome` (not null default
+`split_prize`, joins `entry_fee`'s existing "immutable once entries exist"
+guarded set), `pots.start_gameweek_id` (nullable, same guarded set — the
+explicit basis for the entry-window cutoff and backfill calculation, never
+inferred from dates), `pots.rollover_source_pot_id` (nullable, but
+*unconditionally* immutable like `game_type` — a pot's lineage, not a
+mutable term), `pot_prizes.rollover boolean not null default false` (explicit
+flag, not inferred from the absence of a payout).
+
+**Two invalid existing assumptions found:**
+1. **GE-4.3's `entry_payments` `scope = 'season'` for LMS was wrong.** The
+   late-entry backfill example (weekly fee × gameweeks owed) only makes sense
+   if LMS bills per gameweek, not once per season. Corrected: LMS now uses
+   `scope = 'gameweek'`, identical in shape to Pick 5 — reuses
+   `admin-actions`/`AdminPayments.jsx`/`bulkPayments.ts` completely unchanged.
+   No schema change needed for this correction, only a documentation one.
+2. **Slice 1 (`get-or-create-lms-entry`) has no entry-window gate at all** —
+   reasonable when it was built (no entry-window rule existed yet), invalid
+   now. Opened `ISSUE-32`. Not fixed in this pass — the columns the gate
+   needs (`start_gameweek_id`, `rollover_source_pot_id`) only exist in the
+   drafted, unapplied migration; fixing it against columns that don't exist
+   live yet isn't verifiable, so it's queued as the next Ready item instead
+   of guessed at now.
+
+**Game Engine changes identified, not built yet (flagged, not invented):**
+`determineWinner()` needs a wipeout detector (alive-count immediately before
+a gameweek's eliminations went from N>1 to 0 — a different check than "0
+entries alive," which the ordinary single-survivor case also reaches) —
+real Slice 7 design work. Split Prize reuses the existing multi-winner
+`awardPrize()` path (already proven by Pick 5's standings-tie case); Roll
+Prize is new (`pot_prizes.rollover = true`, no automatic pot creation, ever —
+explicit product requirement).
+
+**Documentation updated:** `game-engine.md` (GE-4.1, GE-4.3 correction, GE-4.4,
+GE-5.2 full rewrite, GE-9, GE-12), `business-rules.md` (new § Last Man
+Standing), `decisions.md` (new ADR, § LMS: Tie Outcome, rollover, and late
+entry), `current-state.md` (`ISSUE-32` opened), `project-board.md` (Ready/In
+Progress/Testing/Done).
+
+**Status:** documentation and schema design only — no application code
+written this session beyond committing the already-approved Slice 1.
+`013_lms_tie_outcome_and_rollover.sql` awaits review; not applied. Slice 2
+(pick submission) not started — both it and Slice 1's `ISSUE-32` correction
+are blocked on that review/apply decision, not on any further design work.
+
+---
+
 ## 2026-08-05 (26) — Milestone 5 Slice 1: LMS entry creation
 
 **Goal:** Payment Verification was committed and pushed. Instead of Score

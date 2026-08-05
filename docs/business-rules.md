@@ -1,6 +1,6 @@
 # Business Rules
 
-Last reviewed: 2026-08-03.
+Last reviewed: 2026-08-05.
 
 This document describes **what the game's rules are**, in plain language, for anyone
 who needs to reason about the product without reading code — a support conversation,
@@ -179,6 +179,89 @@ Implementation: `entry_payments` table, `create_entry_payment()` trigger,
 ([api.md § admin-actions](./api.md#post-functionsv1admin-actions)), the
 payment-verification check inside `compute-scores`/`Pick5Engine.settle()`, and
 `pages/AdminPayments.jsx`/`hooks/useAdmin.js`/`utils/csv.js` on the frontend.
+
+## Last Man Standing
+
+**Revised 2026-08-05** — see
+[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee)
+and [game-engine.md § GE-5.2](./game-engine.md#ge-52-last-man-standing) for
+the implementation-level detail these rules are drawn from. Supersedes an
+earlier same-session version of this section that proposed cumulative
+per-gameweek backfill billing for late entry — that proposal has been
+withdrawn; see the linked decision for why. **Not yet built** — these are
+the authoritative rules the remaining Milestone 5 slices implement against,
+not a description of shipped behavior.
+
+**Payment.** One entry fee per competition, paid once — never a recurring
+weekly charge. This applies to every LMS pot, rollover or not. (Pick 5's
+payment model — one fee per gameweek — is unchanged and unaffected; the two
+modes have genuinely different payment shapes, tracked identically under the
+hood via `entry_payments.scope`.)
+
+**Elimination.** Each entrant picks one team to win its gameweek's fixture. A
+loss or a draw eliminates that entrant. Elimination continues gameweek by
+gameweek until exactly one entrant remains — that entrant wins the pot. There
+is no tiebreak pick during the competition itself; a **wipeout** is resolved
+by the pot's **Wipeout Resolution** setting, and a **season-end tie** by its
+own, separate **Season-End Tie Rule** setting — both below.
+
+**Wipeout and Wipeout Resolution.** Every LMS pot has a required,
+immutable-once-entries-exist setting, **Wipeout Resolution** — `Split Prize`
+or `Roll Prize` — chosen when the pot is created. It only matters for a
+**wipeout**: every remaining entrant eliminated by the same gameweek's
+results (as opposed to the ordinary case, where elimination narrows down to
+exactly one survivor over several gameweeks).
+- **Split Prize** — every entrant eliminated in that final gameweek is a
+  joint winner; the net prize is split equally between them. The competition
+  ends there.
+- **Roll Prize** — nobody wins, and the competition's net prize becomes a
+  **carry-over amount**. **A new LMS pot is created automatically** —
+  organisers are never asked to create it by hand. Only the organiser is a
+  member of it initially; everyone else must explicitly rejoin, and every
+  joiner (including the organiser, if they want a paid entry themselves)
+  pays that new competition's own entry fee — the carry-over amount is
+  added on top of collected entry fees to form the new prize pool, it is
+  never a substitute for anyone paying in. Example: a finished pot rolls
+  over €300; the new pot collects €220 in entry fees; that new pot's prize
+  pool is €520. The new pot starts inactive (draft) — see "Late entry"
+  below for what the organiser does before opening it. The old pot is never
+  reopened.
+
+**Season-end tie.** A separate case from a wipeout: multiple entrants are
+still alive when the season's actual final gameweek finishes (nobody was
+eliminated that gameweek — they simply ran out of season to play).
+**Season-End Tie Rule**, a second required LMS setting, decides the outcome:
+- **Split Prize** — the net prize is split equally among the remaining
+  entrants.
+- **Final Prediction** — each remaining entrant submits one prediction for a
+  designated fixture: winning team, first goalscorer, and the minute of that
+  goal. The winner is whoever's prediction is closest, checked in this
+  order: (1) correct winning team, (2) correct first goalscorer, (3) closest
+  predicted minute, (4) if still tied after all three, split the prize
+  equally.
+
+**Late entry.** Joining an LMS pot after it has started is **not allowed**,
+with one exception: a **rollover pot** — one the Game Engine created
+automatically after a Roll Prize wipeout, above. While that pot is still in
+its draft (pre-launch) phase, the organiser may invite players, verify
+their payments, and choose the competition's starting gameweek — the next
+gameweek, any future gameweek, or even the following season's first
+gameweek, so a nearly-finished season doesn't force an awkward immediate
+restart. Anyone may join during this draft phase. **Once the organiser
+opens (activates) the pot, normal LMS entry rules apply — no further
+joining, ever, same as any other pot.** There is no cumulative billing and
+no catch-up payment at any point: everyone entering a rollover competition,
+whenever during the draft phase they join, pays exactly one entry fee — the
+new competition's own, same as anyone joining a brand-new (non-rollover)
+pot.
+
+**Status: none of this is implemented yet.** Milestone 5 Slice 1
+(`get-or-create-lms-entry`) shipped before any of these rules existed and
+currently has no entry-window check of any kind — see
+[current-state.md ISSUE-32](./current-state.md#issue-32--get-or-create-lms-entry-has-no-entry-window-gate).
+Automatic rollover-pot creation and the Final Prediction settlement path are
+both identified but not yet designed at the implementation level — real work
+for later Milestone 5 slices, not invented ahead of time.
 
 ## Admin permissions
 
