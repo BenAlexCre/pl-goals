@@ -293,6 +293,19 @@ workaround. See also [decisions.md § Unpaid entries are voided automatically](.
 for the reasoning behind the design this breaks. Plan:
 [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
+**Extends to the new Game Engine schema too, found 2026-08-05 while building
+`Pick5Engine.settle()` (Milestone 4, Slice 5).** `settle()` faithfully implements the
+same payment-void rule against `entry_payments`/`game_entries` — correctly, per
+`business-rules.md`. But `trg_create_entry_payment` (the trigger that auto-creates an
+`entry_payments` row on entry creation) is attached only to `user_entries` (the
+prototype table), not `game_entries` — confirmed via `information_schema.triggers`.
+No Pick 5 entry created through `get-or-create-pick5-entry` (Slice 1) gets a matching
+`entry_payments` row at all, so `settle()` currently voids every new-schema entry too,
+for the same underlying reason as the original issue. Deliberately not fixed as part
+of Slice 5 — extending the trigger to `game_entries` is really this same issue's fix,
+not a settlement concern, and belongs with whatever eventually resolves this ISSUE-6
+for both schemas at once rather than being patched separately here.
+
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
 goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly

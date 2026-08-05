@@ -49,11 +49,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4, Slice 5** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 4 is approved. Candidate: `settle()`/`generateStandings()` — finalizing a gameweek once all its fixtures are finished, including the deferred payment-void rule (`business-rules.md` § Payment rules) that Slice 4's `calculateScore()` deliberately left out of scope.
+- **Milestone 4, Slice 6** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 5 is approved. Candidate: `generateStandings()` — the next step in GE-8.4's settlement flow, writing `pot_standings_snapshots` for a settled gameweek.
 
 ## In Progress
 
-*(nothing in progress — Slice 4 implemented and verified, awaiting review/approval before Slice 5 begins)*
+*(nothing in progress — Slice 5 implemented and verified, awaiting review/approval before Slice 6 begins)*
 
 ## Blocked
 
@@ -66,11 +66,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Testing
 
-- **Milestone 4, Slice 4 — Scoring** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.calculateScore()` (the third real Game Engine contract implementation) wired into `compute-scores` via the dispatcher. 6 new Deno unit tests (50/50 total pass); verified live end-to-end with real seeded `fixture_events` and a manual `player_fixture_goals` refresh — correct `won`/`lost` results, correct duplicate-pick threshold handling, correct `picks_won` aggregation, idempotent on a second run. **Not yet committed** — awaiting review/approval (see `session-log.md`). **Note:** cleanup after this slice's live verification accidentally deleted 63 pre-existing, legitimate `sync_runs` rows for `job_name = 'compute-scores'` (an overly broad `delete ... where job_name = ...` instead of a delete scoped to the specific test-created rows) — audit-log history only, no impact on `game_entries`/`pick5_picks`/current application state. See `session-log.md` for the full account.
-- **Milestone 4, Slice 3 — Locking** — 2026-08-05, approved. `Pick5Engine.lockEntries()` (the second real Game Engine contract implementation) wired into `compute-deadlines` via the dispatcher, data-driven (no hardcoded `game_type`). New index `idx_game_entries_gameweek_status` (`009`, a previously-deferred `schema-review.md` recommendation, applied now that a real query needs it). 44/44 Deno unit tests pass; verified live end-to-end (past-deadline entries lock, future-deadline entries don't, idempotent on a second run, `sync_runs` row written, RLS still blocks a client from self-setting `status` directly). Approved by repo owner; commit status not yet confirmed back to this session.
+- **Milestone 4, Slice 5 — Settlement** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.settle()` (the fourth real Game Engine contract implementation) wired into `settle-gameweek` via the dispatcher — implements the payment-void rule deferred from Slice 4. 8 new Deno unit tests (58/58 total pass); verified live end-to-end with a paid and an unpaid entry against a real gameweek/fixture (temporarily flipped to `finished` and reverted afterward) — correct `settled`/`void` outcomes, correct pick-voiding, correct "no `entry_payments` row defaults to unpaid" behavior, idempotent on a second run, RLS still blocks direct client writes. All test data removed by exact ID per the standing cleanup rule. **Not yet committed** — awaiting review/approval (see `session-log.md`).
 
 ## Done
 
+- **Milestone 4, Slices 3-4 — Locking and scoring** — 2026-08-05, committed (`be06bbd`). `Pick5Engine.lockEntries()`/`calculateScore()` wired into `compute-deadlines`/`compute-scores`. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 2 — Pick submission** — 2026-08-04. `submit-pick5-picks` Edge Function + `Pick5Engine.validateEntry()` (the first real Game Engine contract implementation) + `pick5_picks` table (`007`) + `available_players_by_gameweek` fix (`008`, `ISSUE-23`). See [session-log.md](./session-log.md).
 - **ISSUE-22 resolved — Edge Runtime JWT verification fixed by CLI/Edge Runtime upgrade** — 2026-08-04. CLI `2.75.0`→`2.111.0`, Edge Runtime `v1.70.0`→`v1.74.2`. Re-verified from scratch with a brand-new user via real `supabase.functions.invoke()` calls: `admin-actions` now `403` (correctly authorized-but-denied, not rejected), `get-or-create-pick5-entry` now genuine `200` success. See [current-state.md](./current-state.md#issue-22--edge-runtimes-default-jwt-verification-rejected-gotrues-es256-tokens-no-authenticated-edge-function-call-worked-locally) and [session-log.md](./session-log.md).
 - **Milestone 4, Slice 1 — Pick 5 entry creation** — 2026-08-03. `get-or-create-pick5-entry` Edge Function, `hooks/usePick5Entry.js`. Database-layer logic verified directly at creation time; HTTP/auth-layer end-to-end path now also confirmed live 2026-08-04 following the `ISSUE-22` fix above. See [session-log.md](./session-log.md).

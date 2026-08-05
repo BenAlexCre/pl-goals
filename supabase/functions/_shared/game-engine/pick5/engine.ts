@@ -53,6 +53,24 @@ function parsePicks(picks: unknown): Pick5PickInput[] {
 }
 
 export class Pick5Engine implements GameEngine {
+  // Shared by lockEntries()/calculateScore()/settle() — extracted in Slice 5
+  // once a third method needed the identical "which pots are pick5" lookup.
+  // Internal reuse within one mode's own implementation, not the
+  // cross-mode duplication GE-3/GE-18 forbid (LMS/Predictor each have their
+  // own equivalent, private to their own engine).
+  private async getPick5PotIds(ctx: GameEngineContext): Promise<string[]> {
+    const { data: pick5Pots, error } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('game_type', 'pick5')
+
+    if (error) {
+      throw new Error(`Failed to look up pick5 pots: ${error.message}`)
+    }
+
+    return (pick5Pots ?? []).map((p: { id: string }) => p.id)
+  }
+
   async validateEntry(ctx: GameEngineContext, entry: GameEntry, picks: unknown): Promise<void> {
     if (entry.status !== 'pending') {
       throw new Pick5ValidationError(`Entry is ${entry.status}, not pending — picks can no longer be changed`)
@@ -104,16 +122,7 @@ export class Pick5Engine implements GameEngine {
   // method should silently depend on holding forever) — see GE-18's
   // mode-isolation invariant.
   async lockEntries(ctx: GameEngineContext, gameweekId: number): Promise<number> {
-    const { data: pick5Pots, error: potsError } = await ctx.supabase
-      .from('pots')
-      .select('id')
-      .eq('game_type', 'pick5')
-
-    if (potsError) {
-      throw new Error(`Failed to look up pick5 pots: ${potsError.message}`)
-    }
-
-    const potIds = (pick5Pots ?? []).map((p: { id: string }) => p.id)
+    const potIds = await this.getPick5PotIds(ctx)
     if (potIds.length === 0) {
       return 0
     }
@@ -149,16 +158,7 @@ export class Pick5Engine implements GameEngine {
   // inherits ISSUE-3 (the view is never automatically refreshed) unchanged;
   // fixing that is out of scope for this slice.
   async calculateScore(ctx: GameEngineContext, gameweekId: number): Promise<void> {
-    const { data: pick5Pots, error: potsError } = await ctx.supabase
-      .from('pots')
-      .select('id')
-      .eq('game_type', 'pick5')
-
-    if (potsError) {
-      throw new Error(`Failed to look up pick5 pots: ${potsError.message}`)
-    }
-
-    const potIds = (pick5Pots ?? []).map((p: { id: string }) => p.id)
+    const potIds = await this.getPick5PotIds(ctx)
     if (potIds.length === 0) {
       return
     }
@@ -268,8 +268,100 @@ export class Pick5Engine implements GameEngine {
     }
   }
 
-  settle(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {
-    throw new GameEngineNotImplementedError('pick5', 'settle')
+  // GE-6: "Finalize this gameweek's outcome for the mode." Only touches
+  // 'locked' entries — mirrors calculateScore()'s reasoning: a 'pending'
+  // entry can't be finalized (it was never locked), and a 'settled'/'void'
+  // entry is already finalized and must not be silently reprocessed. Whether
+  // the gameweek's fixtures are actually all finished is the caller's
+  // decision (settle-gameweek already computes this), not this method's —
+  // same caller-selected-gameweekId pattern as every other lifecycle method.
+  //
+  // Implements docs/business-rules.md's payment-void rule (§ Payment rules):
+  // "An entry that is not marked paid by the time scoring runs is
+  // automatically voided." Deliberately deferred out of calculateScore()
+  // (Slice 4) into this method, since voiding is a finalization concern, not
+  // a scoring one (see that slice's session-log entry for the reasoning).
+  //
+  // Does NOT create payout_amount or touch pot_prizes — that's
+  // awardPrize()'s job (a later slice), called only once determineWinner()
+  // has run, per GE-8.4.
+  async settle(ctx: GameEngineContext, gameweekId: number): Promise<void> {
+    const potIds = await this.getPick5PotIds(ctx)
+    if (potIds.length === 0) {
+      return
+    }
+
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id, pot_id, user_id')
+      .eq('gameweek_id', gameweekId)
+      .eq('status', 'locked')
+      .in('pot_id', potIds)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up locked entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return
+    }
+
+    const { data: payments, error: paymentsError } = await ctx.supabase
+      .from('entry_payments')
+      .select('pot_id, user_id, is_paid')
+      .eq('gameweek_id', gameweekId)
+      .eq('scope', 'gameweek')
+      .in('pot_id', potIds)
+
+    if (paymentsError) {
+      throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+    }
+
+    const paidKeys = new Set(
+      ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
+        .filter((p) => p.is_paid)
+        .map((p) => `${p.pot_id}:${p.user_id}`)
+    )
+
+    const unpaidEntryIds: string[] = []
+    const paidEntryIds: string[] = []
+    for (const entry of entries as { id: string; pot_id: string; user_id: string }[]) {
+      if (paidKeys.has(`${entry.pot_id}:${entry.user_id}`)) {
+        paidEntryIds.push(entry.id)
+      } else {
+        unpaidEntryIds.push(entry.id)
+      }
+    }
+
+    if (unpaidEntryIds.length > 0) {
+      const { error: voidEntriesError } = await ctx.supabase
+        .from('game_entries')
+        .update({ status: 'void' })
+        .in('id', unpaidEntryIds)
+
+      if (voidEntriesError) {
+        throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+      }
+
+      const { error: voidPicksError } = await ctx.supabase
+        .from('pick5_picks')
+        .update({ result: 'void' })
+        .in('game_entry_id', unpaidEntryIds)
+
+      if (voidPicksError) {
+        throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+      }
+    }
+
+    if (paidEntryIds.length > 0) {
+      const { error: settleError } = await ctx.supabase
+        .from('game_entries')
+        .update({ status: 'settled', settled_at: ctx.now().toISOString() })
+        .in('id', paidEntryIds)
+
+      if (settleError) {
+        throw new Error(`Failed to settle paid entries: ${settleError.message}`)
+      }
+    }
   }
 
   generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {

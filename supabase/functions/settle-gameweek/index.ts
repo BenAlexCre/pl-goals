@@ -1,6 +1,24 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
+import { UnknownGameTypeError } from '../_shared/game-engine/errors.ts'
+import type { GameType } from '../_shared/game-engine/types.ts'
+// Side-effecting import — registers 'pick5' with the dispatcher (GE-7/GE-18).
+// Same pattern as compute-deadlines/compute-scores (Milestone 4 Slices 3-4).
+import '../_shared/game-engine/pick5/index.ts'
 
+// Milestone 4, Slice 5 — docs/game-engine.md § GE-6 (settle) / GE-8.4
+// (Settlement flow). The "all fixtures finished" check and everything
+// reading/writing user_entries/leaderboard_snapshots below it is the
+// retired prototype's settlement logic, unchanged by this slice (out of
+// scope). The new game_engine dispatch block, added once that same check
+// passes, is entirely independent: separate tables, separate write path,
+// no shared state with the old logic beyond the gameweek id.
+//
+// GE-19's Settlement sequence diagram doesn't show a sync_runs write for
+// this flow (unlike the Locking diagram, which explicitly called for one in
+// compute-deadlines) — none added here, matching the spec as written rather
+// than inferring one from the other two functions' pattern.
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
@@ -9,6 +27,8 @@ Deno.serve(async (req) => {
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
   )
 
+  const ctx = { supabase: sb, now: () => new Date() }
+
   const body = await req.json().catch(() => ({}))
   const targetGameweek = body.gameweek_id ?? null
 
@@ -16,6 +36,7 @@ Deno.serve(async (req) => {
   if (targetGameweek) query = query.eq('id', targetGameweek)
 
   const { data: gameweeks } = await query
+  let gameEngineDispatches = 0
 
   for (const gw of gameweeks ?? []) {
     const { data: fixtures } = await sb
@@ -26,6 +47,33 @@ Deno.serve(async (req) => {
 
     if (!fixtures?.length) continue
     if (!fixtures.every((f) => f.status === 'finished')) continue
+
+    // Game Engine dispatch (new, GE-7/GE-8.4): discover which game types
+    // have locked entries for this gameweek — data-driven, no hardcoded
+    // 'pick5' — and call each one's settle(). Same pattern as the dispatch
+    // blocks already added to compute-deadlines/compute-scores.
+    const { data: lockedEntries } = await sb
+      .from('game_entries')
+      .select('pots(game_type)')
+      .eq('gameweek_id', gw.id)
+      .eq('status', 'locked')
+
+    type PotsEmbed = { game_type: GameType } | { game_type: GameType }[] | null
+    const gameTypes = new Set<GameType>()
+    for (const entry of (lockedEntries ?? []) as Array<{ pots: PotsEmbed }>) {
+      const gameType = Array.isArray(entry.pots) ? entry.pots[0]?.game_type : entry.pots?.game_type
+      if (gameType) gameTypes.add(gameType)
+    }
+
+    for (const gameType of gameTypes) {
+      try {
+        await resolveEngine(gameType).settle(ctx, gw.id)
+        gameEngineDispatches++
+      } catch (err) {
+        if (err instanceof UnknownGameTypeError) continue
+        throw err
+      }
+    }
 
     await sb.from('user_entries')
       .update({ status: 'settled', settled_at: new Date().toISOString() })
@@ -73,7 +121,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ success: true }), {
+  return new Response(JSON.stringify({ success: true, gameEngineDispatches }), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   })
 })   

@@ -552,6 +552,241 @@ Deno.test('calculateScore is a no-op when there are no picks for any locked entr
   assertEquals(state.entryPick5Rows.length, 0)
 })
 
+// --- settle() ------------------------------------------------------------
+// Fake client models: pots -> game_entries (select 'locked', then update) ->
+// entry_payments (select) -> pick5_picks (update, only for voided entries).
+// In-memory state is mutated by the fake's update handlers so tests assert
+// on the actual resulting rows.
+
+interface FakeSettleEntry {
+  id: string
+  pot_id: string
+  user_id: string
+  gameweek_id: number
+  status: string
+  settled_at: string | null
+}
+
+interface FakeSettlePayment {
+  pot_id: string
+  user_id: string
+  gameweek_id: number
+  scope: string
+  is_paid: boolean
+}
+
+interface FakeSettlePick {
+  id: number
+  game_entry_id: string
+  result: string
+}
+
+interface FakeSettleState {
+  pick5PotIds: string[]
+  entries: FakeSettleEntry[]
+  payments: FakeSettlePayment[]
+  picks: FakeSettlePick[]
+}
+
+function fakeSettleContext(state: FakeSettleState): GameEngineContext {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'pots') {
+        return { select: () => ({ eq: () => Promise.resolve({ data: state.pick5PotIds.map((id) => ({ id })), error: null }) }) }
+      }
+      if (table === 'game_entries') {
+        return {
+          select: () => ({
+            eq: (_c1: string, gameweekId: number) => ({
+              eq: (_c2: string, status: string) => ({
+                in: (_c3: string, potIds: string[]) => {
+                  const potIdSet = new Set(potIds)
+                  const rows = state.entries.filter(
+                    (e) => e.gameweek_id === gameweekId && e.status === status && potIdSet.has(e.pot_id)
+                  )
+                  return Promise.resolve({ data: rows.map((e) => ({ id: e.id, pot_id: e.pot_id, user_id: e.user_id })), error: null })
+                },
+              }),
+            }),
+          }),
+          update: (patch: { status?: string; settled_at?: string }) => ({
+            in: (_col: string, ids: string[]) => {
+              const idSet = new Set(ids)
+              for (const entry of state.entries) {
+                if (idSet.has(entry.id)) Object.assign(entry, patch)
+              }
+              return Promise.resolve({ data: null, error: null })
+            },
+          }),
+        }
+      }
+      if (table === 'entry_payments') {
+        return {
+          select: () => ({
+            eq: (_c1: string, gameweekId: number) => ({
+              eq: (_c2: string, scope: string) => ({
+                in: (_c3: string, potIds: string[]) => {
+                  const potIdSet = new Set(potIds)
+                  const rows = state.payments.filter(
+                    (p) => p.gameweek_id === gameweekId && p.scope === scope && potIdSet.has(p.pot_id)
+                  )
+                  return Promise.resolve({ data: rows, error: null })
+                },
+              }),
+            }),
+          }),
+        }
+      }
+      if (table === 'pick5_picks') {
+        return {
+          update: (patch: { result: string }) => ({
+            in: (_col: string, entryIds: string[]) => {
+              const idSet = new Set(entryIds)
+              for (const pick of state.picks) {
+                if (idSet.has(pick.game_entry_id)) Object.assign(pick, patch)
+              }
+              return Promise.resolve({ data: null, error: null })
+            },
+          }),
+        }
+      }
+      throw new Error(`Unexpected table in test fake: ${table}`)
+    },
+  }
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => new Date('2026-08-05T12:00:00Z') }
+}
+
+Deno.test('settle marks a paid entry settled with a settled_at timestamp', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-1'],
+    entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    payments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: true }],
+    picks: [],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'settled')
+  assertEquals(state.entries[0].settled_at, '2026-08-05T12:00:00.000Z')
+})
+
+Deno.test('settle voids an unpaid entry and its picks', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-1'],
+    entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    payments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
+    picks: [
+      { id: 1, game_entry_id: 'entry-1', result: 'won' },
+      { id: 2, game_entry_id: 'entry-1', result: 'lost' },
+    ],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'void')
+  assertEquals(state.entries[0].settled_at, null, 'a voided entry is never marked settled')
+  assertEquals(state.picks[0].result, 'void')
+  assertEquals(state.picks[1].result, 'void')
+})
+
+Deno.test('settle voids an entry with no entry_payments row at all (defaults to unpaid)', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-1'],
+    entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    payments: [], // no row at all — must default to "unpaid", not throw or skip
+    picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'void')
+  assertEquals(state.picks[0].result, 'void')
+})
+
+Deno.test('settle handles a mix of paid and unpaid entries independently and correctly', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-1'],
+    entries: [
+      { id: 'entry-paid', pot_id: 'pot-1', user_id: 'user-paid', gameweek_id: 4, status: 'locked', settled_at: null },
+      { id: 'entry-unpaid', pot_id: 'pot-1', user_id: 'user-unpaid', gameweek_id: 4, status: 'locked', settled_at: null },
+    ],
+    payments: [
+      { pot_id: 'pot-1', user_id: 'user-paid', gameweek_id: 4, scope: 'gameweek', is_paid: true },
+      { pot_id: 'pot-1', user_id: 'user-unpaid', gameweek_id: 4, scope: 'gameweek', is_paid: false },
+    ],
+    picks: [],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries.find((e) => e.id === 'entry-paid')?.status, 'settled')
+  assertEquals(state.entries.find((e) => e.id === 'entry-unpaid')?.status, 'void')
+})
+
+Deno.test('settle never touches an entry that is not locked', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-1'],
+    entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'pending', settled_at: null }],
+    payments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: true }],
+    picks: [],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'pending', 'a non-locked entry must be left exactly as-is')
+})
+
+Deno.test('settle never touches entries belonging to a non-pick5 pot', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: ['pot-pick5'],
+    entries: [{ id: 'entry-1', pot_id: 'pot-other-mode', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    payments: [{ pot_id: 'pot-other-mode', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: true }],
+    picks: [],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'locked')
+})
+
+Deno.test('settle is a no-op when there are no pick5 pots', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = {
+    pick5PotIds: [],
+    entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    payments: [],
+    picks: [],
+  }
+  const ctx = fakeSettleContext(state)
+
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries[0].status, 'locked')
+})
+
+Deno.test('settle is a no-op when there are no locked entries for the gameweek', async () => {
+  const engine = new Pick5Engine()
+  const state: FakeSettleState = { pick5PotIds: ['pot-1'], entries: [], payments: [], picks: [] }
+  const ctx = fakeSettleContext(state)
+
+  // Must not throw even though there's nothing to settle.
+  await engine.settle(ctx, 4)
+
+  assertEquals(state.entries.length, 0)
+})
+
 Deno.test('does not double-count a duplicate pick as two eligibility lookups failing', async () => {
   const engine = new Pick5Engine()
   let inCallCount = 0

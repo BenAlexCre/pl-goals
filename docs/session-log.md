@@ -13,6 +13,114 @@ from here.
 
 ---
 
+## 2026-08-05 (15) — Milestone 4, Slice 5: Pick 5 settlement
+
+**Goal:** Slices 3-4 were committed and pushed (`be06bbd`); implement the
+next vertical slice — `settle()`, per `docs/game-engine.md` § GE-6/GE-8.4.
+Explicit new standing instruction this slice: exact-ID cleanup for every
+test artefact, permanently, no exceptions — directly following from entry
+(14)'s incident.
+
+**Scoping decision:** `settle()`/`generateStandings()` were the Slice 5
+candidate per `project-board.md`. Scoped down to `settle()` alone, keeping
+the one-method-per-slice granularity every prior slice used —
+`generateStandings()` moved to Slice 6 rather than bundled in.
+
+**What was built:**
+- `Pick5Engine.settle(ctx, gameweekId)` — the fourth real Game Engine
+  method. Only touches `locked` entries (same reasoning as `lockEntries()`/
+  `calculateScore()`). Implements `business-rules.md`'s payment-void rule,
+  deliberately deferred out of Slice 4's `calculateScore()`: entries with no
+  paid `entry_payments` row (including no row at all, which correctly
+  defaults to unpaid) are voided — `game_entries.status = 'void'`,
+  `pick5_picks.result = 'void'`; paid entries are marked `settled` with
+  `settled_at`. Does not touch `payout_amount`/`pot_prizes` — that's
+  `awardPrize()`'s job, a later slice.
+- Extracted `getPick5PotIds()` as a private helper on `Pick5Engine` —
+  `lockEntries()`, `calculateScore()`, and now `settle()` all needed the
+  identical "which pots are pick5" lookup. Internal reuse within one mode's
+  own class, not the cross-mode duplication GE-3/GE-18 forbid — refactored
+  `lockEntries()`/`calculateScore()` to use it too, and reran their existing
+  tests to confirm no behavior change.
+- `settle-gameweek/index.ts` extended in place (old `user_entries`/
+  `leaderboard_snapshots` logic untouched) — same dispatch shape as Slices
+  3-4's extensions to `compute-deadlines`/`compute-scores`: discovers game
+  types with `locked` entries once the existing "all fixtures finished"
+  check passes, dispatches `settle()`. No `sync_runs` write added — GE-19's
+  Settlement sequence diagram doesn't call for one here, unlike the Locking
+  diagram, which explicitly did for `compute-deadlines`. Response body
+  gained a `gameEngineDispatches` count for observability parity with the
+  other two extended functions.
+- 8 new Deno unit tests for `settle()` (paid → settled with timestamp,
+  unpaid → void + picks voided, no-payment-row defaults to unpaid, a mix of
+  both handled independently and correctly, non-locked entries untouched,
+  non-pick5 pots untouched, no-op with no pick5 pots, no-op with no locked
+  entries). 58/58 total pass.
+
+**New finding, documented not fixed (extends `ISSUE-6`, doesn't duplicate
+it):** `trg_create_entry_payment` (the trigger auto-creating an
+`entry_payments` row on entry creation) is attached only to `user_entries`,
+confirmed via `information_schema.triggers` — never extended to
+`game_entries` in the Milestone 2 schema work. Every Pick 5 entry created
+through the new flow (`get-or-create-pick5-entry`, Slice 1) has no matching
+`entry_payments` row, so `settle()` will void it — correct behavior for
+`settle()` itself, but the same root problem `ISSUE-6` already describes
+for the old schema, now also true for the new one. Not fixed here:
+extending the trigger is `ISSUE-6`'s fix, not a settlement concern, and
+belongs with whatever eventually resolves it for both schemas together.
+`current-state.md`'s `ISSUE-6` entry updated with this finding.
+
+**Verification:**
+- 58/58 Deno unit tests pass; `deno check` clean on all three extended
+  Edge Functions (`compute-deadlines`, `compute-scores`, `settle-gameweek`).
+- No migration this slice — checked `game_entries`/`pick5_picks`/
+  `entry_payments`'s existing indexes first (a direct lesson from Slice 4's
+  reverted `010`) and confirmed `idx_game_entries_gameweek_status` (Slice 3)
+  and the existing `entry_payments` unique constraint already serve this
+  slice's query shapes at this app's realistic scale.
+- Live end-to-end, following the new exact-ID-only cleanup rule throughout:
+  no gameweek in the seed data had every relevant fixture already
+  `finished` (required for `settle-gameweek`'s own gate to pass), so
+  gameweek 9's single fixture (id 104, real data, prior status `scheduled`)
+  was temporarily flipped to `finished` for the test and reverted to its
+  captured prior value immediately after. Seeded two real users — one
+  marked paid (`entry_payments.is_paid = true`), one left with no
+  `entry_payments` row at all — each with a `locked` entry against
+  gameweek 9, invoked `settle-gameweek` for real via
+  `supabase.functions.invoke()`. Result: paid entry → `settled` with a real
+  `settled_at`; unpaid entry → `void`, all 5 of its picks → `void`;
+  gameweek 9 → `completed` (old logic, unaffected). Ran `settle-gameweek`
+  again — idempotent (gameweek excluded by the initial
+  `neq('status','completed')` filter once already completed, `0`
+  dispatches, no state change). Confirmed RLS/column-grant still blocks a
+  client from self-setting `status` (`permission denied for table
+  game_entries`) — no regression. All test rows (users, `pot_members`,
+  `game_entries` cascading to `game_entry_pick5`/`pick5_picks`,
+  `entry_payments`) removed by their exact captured IDs — no `delete ...
+  where` on any shared column, per the new standing rule.
+- **An unexplained anomaly, disclosed rather than glossed over:** after
+  reverting fixture 104 and gameweek 9's `status`/`is_current`, gameweek
+  9's `deadline_utc` was found at `18:45:00`, not the `18:30:00` captured
+  immediately before the test. `earliest_kickoff_utc` (`19:00:00`) and
+  fixture 104's `kickoff_utc` were unchanged throughout, so the current
+  `compute-deadlines` formula (`earliest − 30 min`) cannot produce `18:45`
+  from that input — ruling out a real recomputation as the explanation.
+  Checked for a trigger on `gameweeks` that could explain a side-effect
+  write (only the standard `set_updated_at()` trigger exists — it doesn't
+  touch `deadline_utc`). No mechanism in this session's own actions (the
+  revert `UPDATE` only set `status`/`is_current`) explains it either.
+  Root cause not found. Given `deadline_utc` is self-correcting (every real
+  `compute-deadlines` tick recomputes it from live fixture data) and this
+  is a past-dated test gameweek with no functional consequence either way,
+  restored it to `18:30:00` — the value consistent with the actual formula
+  and current fixture data — rather than leave a value known to be wrong,
+  and recorded this openly instead of quietly "fixing" it without a note.
+
+**Status:** Slice 5 implemented and fully verified live. **Not committed**
+— awaiting the repo owner's review and explicit approval before Slice 6.
+
+---
+
 ## 2026-08-05 (14) — Full audit and close-out of the Slice 4 sync_runs deletion
 
 **Goal:** before committing Slice 4, fully close out the `sync_runs`
