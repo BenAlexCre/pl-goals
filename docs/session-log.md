@@ -13,6 +13,77 @@ from here.
 
 ---
 
+## 2026-08-05 (18) — Design investigation: pot_prizes row lifecycle (pre-Slice 8, no code changed)
+
+**Goal:** Slice 7 was committed and pushed. Before implementing Slice 8
+(`awardPrize()`), the repo owner asked for a dedicated investigation into
+when a `pot_prizes` row should be created — explicitly **not** an
+implementation task. No code, migrations, or Edge Functions touched this
+session; every finding below is read-only against the live schema.
+
+**Options evaluated** (pot creation, first paid-entry verified, gameweek
+open, first entry created, lazily inside `awardPrize()`), compared across
+advantages/disadvantages, idempotency, effect on settlement, effect on
+manual Payment Verification, effect on multiple winners, and generalization
+to future LMS/Score Predictor support. Full comparison recorded in
+`decisions.md` rather than duplicated here. Every early-creation option
+shares the same fatal flaw: Payment Verification can keep happening right
+up until `settle()` voids whatever's still unverified, so any
+`total_amount` computed before that point is a stale snapshot needing
+reconciliation anyway — turning "early creation" into pure overhead, not a
+head start. "Effect on multiple winners" turned out to be a non-discriminating
+dimension — splitting a total among however many `determineWinner()`
+returns doesn't depend on when the row was created, worth stating
+explicitly rather than forcing an artificial distinction between options.
+
+**Recommendation: lazy creation, inside `awardPrize()` itself**, computed at
+the moment a mode's engine decides a specific competition instance has
+concluded (a gameweek, for Pick 5), as `entry_fee × count(that instance's
+verified-paid, settled entries)` — read directly from `settle()`'s own
+already-finalized output. Generalizes cleanly to LMS's season-long payout
+and Score Predictor's variable cycle boundaries, since each mode's own
+`awardPrize()` decides its own "concluded" moment entirely inside the Game
+Engine — no shared-platform hook needs to exist, keeping GE-3's platform/mode
+boundary intact.
+
+**Confirmed live, not assumed: no migration is required.** Checked
+`pot_prizes`' actual schema and RLS directly:
+`total_amount`/`is_settled`/`settled_at` already exist
+(`004_game_engine_shared_platform.sql`); RLS has only a `SELECT` policy, no
+`INSERT`/`UPDATE` for any role — which is *correct* for this design, not a
+gap, since `awardPrize()` writes via the service-role client like every
+other Game Engine method (same zero-client-write-policy pattern already
+established for `game_entry_pick5`/`pick5_picks`/`pot_standings_snapshots`).
+Also confirmed `pots.entry_fee` is locked by `trg_pots_contract_immutable`
+once a pot has entries (read the trigger source directly) — the formula's
+input is stable once relevant, not a moving target.
+
+**A concrete implementation gotcha flagged now, not left to be
+rediscovered:** `pot_prizes` has the same shape of *partial* unique indexes
+(`pot_prizes_gameweek_key`/`pot_prizes_season_key`) that caused a real,
+live-confirmed bug in Slice 6 against `pot_standings_snapshots`'s
+identically-shaped indexes (PostgREST's `upsert(onConflict: ...)` can't
+target a partial index). `awardPrize()` must reuse the same fix already
+built (`upsertStandingsGroup()`'s look-up-by-natural-key-then-write-by-`id`
+pattern) rather than rediscover the same failure live.
+
+**Left explicitly open, out of scope for this investigation:** the exact
+`total_amount` formula. `entry_fee × verified-paid-settled-count` is the
+working assumption used throughout the analysis, but whether an admin can
+ever override or top up that amount (sponsor contribution, rolling over an
+unclaimed prior week's prize) is a genuine product question — flagged for a
+decision before `awardPrize()` is implemented, not invented here.
+
+**Documentation updated** (investigation conclusions only — no code, no
+migration): `decisions.md` (new ADR), `game-engine.md` § GE-4.4,
+`project-board.md`'s Slice 8 entry.
+
+**Status:** Investigation complete. `awardPrize()` not implemented. Slice 8
+not started. Slice 9 not started. Awaiting the repo owner's review and
+approval before any implementation begins.
+
+---
+
 ## 2026-08-05 (17) — Milestone 4, Slice 7: Pick 5 winner determination
 
 **Goal:** Slice 6 was committed and pushed; implement the next vertical slice

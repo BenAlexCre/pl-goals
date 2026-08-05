@@ -253,3 +253,71 @@ canonical term throughout ([architecture.md](./architecture.md),
 [current-state.md § ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)).
 Implementation (single-entry admin UI, CSV importer) not yet built — see
 `project-board.md` for when it's scheduled.
+
+---
+
+## `pot_prizes` row creation is lazy, inside `awardPrize()` — never pre-created
+
+**Decided 2026-08-05**, following a focused design investigation requested ahead of
+Milestone 4 Slice 8, before `awardPrize()` was implemented.
+
+**What:** A `pot_prizes` row is created (and its `total_amount` computed) at exactly
+one moment: inside a mode's own `awardPrize(ctx, potId)`, at the point that mode's
+engine has decided a specific competition instance has concluded (for Pick 5, the
+gameweek `settle()`/`generateStandings()`/`determineWinner()` just processed; for a
+future season-scoped mode, whenever *its* engine decides the season — or half-cycle,
+for Score Predictor — has ended). No row is pre-created at pot creation, gameweek
+open, first entry, or first payment verification. `total_amount` is computed at that
+same moment as `pots.entry_fee × count(that competition instance's verified-paid,
+settled entries)` — read directly from `settle()`'s own already-finalized output, not
+tracked or incremented separately.
+
+**Why:** Every earlier-creation option (evaluated in full — pot creation, gameweek
+open, first entry, first paid-entry-verified) shares the same fatal flaw: payment
+verification can keep happening right up until settlement voids whatever's still
+unverified, so any `total_amount` computed before that point is a snapshot that goes
+stale the moment one more admin action happens, and would need reconciling against
+the authoritative state at settlement anyway — making the early creation pure
+overhead, not a head start. Lazy creation instead computes the total exactly once,
+from the exact same finalized state `settle()` already produced, with no
+reconciliation step and no staleness window. It also requires zero new shared-platform
+hooks (no gameweek-open event exists to hang a trigger on; inventing one would blur
+GE-3's platform/mode boundary for a mode-specific row), and generalizes cleanly to
+LMS's season-long single payout and Score Predictor's variable half-cycle/full-cycle
+boundaries — each mode's own `awardPrize()` decides its own "concluded" moment
+entirely inside the Game Engine, with no platform code needing to know the difference.
+
+**What it rules out:** Any pre-creation of `pot_prizes` rows anywhere outside
+`awardPrize()` — including as a side effect of pot creation, entry creation, or
+payment verification. Also rules out (for now — not decided, flagged as open) a
+mid-week "live jackpot" display feature backed by a stored, incrementally-updated
+`total_amount`; that would need to be served from a read-only on-demand query instead,
+not this table, if ever built.
+
+**Confirmed, not assumed: no migration is required.** `pot_prizes`' existing schema
+(`004_game_engine_shared_platform.sql`) already has every column this design needs
+(`total_amount`, `is_settled`, `settled_at`), and its existing RLS (only a `SELECT`
+policy, confirmed live) already matches the pattern — `awardPrize()` writes via the
+service-role client, same as every other Game Engine write, no client-insert policy
+needed. The only real gap was application code (`awardPrize()` itself), not schema —
+see [current-state.md](./current-state.md) / `session-log.md` for the full
+investigation.
+
+**Implementation note for Slice 8, recorded now so it isn't rediscovered the hard
+way:** `pot_prizes` has the same shape of *partial* unique indexes
+(`pot_prizes_gameweek_key ... WHERE scope = 'gameweek'`, `pot_prizes_season_key ...
+WHERE scope = 'season'`) that caused a real, live-confirmed bug in Slice 6
+(`generateStandings()`'s first attempt against `pot_standings_snapshots`'s identically-shaped
+partial indexes — PostgREST's `upsert(onConflict: ...)` cannot target a partial
+index). `awardPrize()` must use the same fix already established there
+(`upsertStandingsGroup()`'s pattern): look up any existing row by its natural key
+first, then write by `id` (the real, non-partial primary key) — never
+`upsert(onConflict: 'pot_id,gameweek_id')` directly.
+
+**Still open, deliberately not decided here — out of scope for this investigation:**
+the exact `total_amount` formula (`entry_fee × verified-paid-settled-count` is the
+default assumption used throughout this analysis, but whether an admin can ever
+override or supplement it — e.g. a sponsor top-up, or rolling over an unclaimed
+prior week's prize — is a genuine product question, not something to invent). Needs
+a decision before `awardPrize()` is implemented, the same way Slice 2's goalkeeper
+rule and Slice 6's tie-break rule each needed one.

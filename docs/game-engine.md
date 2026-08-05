@@ -130,6 +130,19 @@ discriminates a per-gameweek jackpot (Pick 5) from a season-long pot (LMS, Predi
 something else. Has `updated_at`/trigger, matching every other mutable table in the schema
 (a gap in the original draft).
 
+**Row lifecycle, decided 2026-08-05** (design investigation ahead of Milestone 4
+Slice 8) — see
+[decisions.md § pot_prizes row creation is lazy, inside awardPrize()](./decisions.md#pot_prizes-row-creation-is-lazy-inside-awardprize--never-pre-created)
+for the full comparison of alternatives considered. A row is created **lazily,
+inside `awardPrize()`**, at the moment a mode's engine decides a specific
+competition instance (a gameweek, for Pick 5) has concluded — never pre-created at
+pot creation, gameweek open, first entry, or first payment verification, since
+`total_amount` can only be authoritative once verification and settlement have
+finished for that instance. No schema/RLS change needed for this — `awardPrize()`
+writes via the service-role client like every other Game Engine method, matching
+the existing zero-client-write-policy pattern on this table. Confirmed live: no
+migration required.
+
 ### GE-4.5 `game_entries` — the shared parent
 
 `id`, `pot_id`, `user_id`, `gameweek_id` (nullable), `entry_scope pot_scope not null`
