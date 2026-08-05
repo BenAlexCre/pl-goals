@@ -8,9 +8,10 @@ review itself and `session-log.md` for what was applied versus deliberately defe
 Milestone 3 (the Game Engine framework — folder structure, interfaces, dispatcher, shared
 types, dependency injection) is complete. Milestone 4 (Pick 5) is in progress: Slice 1
 (entry creation), Slice 2 (pick submission), Slice 3 (locking, wired into
-`compute-deadlines`), Slice 4 (scoring, wired into `compute-scores`), and Slice 5
-(settlement — including the payment-void rule, wired into `settle-gameweek`) are done;
-standings, winner determination, prizes, and notifications don't exist yet. See
+`compute-deadlines`), Slice 4 (scoring, wired into `compute-scores`), Slice 5
+(settlement — including the payment-void rule, wired into `settle-gameweek`), and Slice 6
+(standings, resolving `ISSUE-15`/`ISSUE-17`, called internally from `settle()` per GE-8.4)
+are done; winner determination, prizes, and notifications don't exist yet. See
 [GE-12](#ge-12-milestone-plan) for exact status per milestone.
 
 It supersedes the undocumented, `supabase_admin`-owned LMS/Predictor prototype objects
@@ -162,6 +163,19 @@ leaderboard was never populated) as a side effect. `meta jsonb` is deliberately 
 to display-only metadata, never queried or joined on — see
 [GE-20](#ge-20-architectural-invariants) for the platform-wide JSON policy this is the one
 sanctioned instance of.
+
+**Milestone 4 Slice 6**: `Pick5Engine.generateStandings()` is the first real writer of
+this table, resolving `ISSUE-15` in practice (not just structurally) — it writes both a
+per-gameweek row and a `gameweek_id: null` overall row per user, upserted (idempotent) on
+every `settle()` call. Ranking uses standard competition ranking with ties sharing a rank
+and no further tiebreak, resolving `ISSUE-17` — confirmed with the repo owner rather than
+inferred, since real money is involved. **Implementation note**: this table's two unique
+indexes are both partial (`WHERE gameweek_id IS NOT NULL` / `WHERE gameweek_id IS NULL`),
+which PostgREST's `upsert(onConflict: ...)` cannot target directly — confirmed live
+("no unique or exclusion constraint matching the ON CONFLICT specification"). Worked
+around in `Pick5Engine` by looking up existing rows by their natural key first, then
+upserting only by `id` (the real, non-partial primary key). Any future mode writing to
+this table needs the same pattern, not a direct `upsert(onConflict: 'pot_id,gameweek_id,user_id')`.
 
 ### GE-4.7 Invitations
 
@@ -335,7 +349,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 1 | Architecture finalized, specification produced and approved | **Done** |
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
-| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), and Slice 5 (settlement, wired into `settle-gameweek`) done; standings, winner determination, prizes, and notifications not started |
+| 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), and Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`) done; winner determination, prizes, and notifications not started |
 | 5 | Last Man Standing implementation | Not started |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |

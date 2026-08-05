@@ -40,6 +40,16 @@ deadline itself, only of entry `status` (see
 [database.md § Row Level Security summary](./database.md#row-level-security-summary):
 `user_entries`/`user_entry_picks` can only be updated while `status = 'pending'`).
 
+**Caveat — this 30-minute rule is not reliably what's actually live.** An
+undocumented SQL trigger on `fixtures` recomputes the same column using a
+different, 15-minute offset on every fixture change, silently overwriting
+`compute-deadlines`' correct 30-minute value in the common case. Confirmed
+live 2026-08-05 — see
+[current-state.md ISSUE-24](./current-state.md#issue-24--an-undocumented-sql-trigger-recomputes-gameweeksdeadline_utc-with-a-conflicting-incorrect-offset).
+Until that's resolved, treat the live `deadline_utc` value as potentially 15
+minutes early, not the 30 minutes this section (and the codebase's own
+`compute-deadlines` function) describes as intended.
+
 ## What counts as a valid goal
 
 A goal counts toward a player's tally for a gameweek if it's a `fixture_events` row

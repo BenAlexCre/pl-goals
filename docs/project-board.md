@@ -49,14 +49,15 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Ready
 
-- **Milestone 4, Slice 6** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 5 is approved. Candidate: `generateStandings()` — the next step in GE-8.4's settlement flow, writing `pot_standings_snapshots` for a settled gameweek.
+- **Milestone 4, Slice 7** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). Not started, not yet scoped — next slice after Slice 6 is approved. Candidates: `determineWinner()`/`awardPrize()` (money-touching, needs its own careful scoping) or `notifyUsers()`.
 
 ## In Progress
 
-*(nothing in progress — Slice 5 implemented and verified, awaiting review/approval before Slice 6 begins)*
+*(nothing in progress — Slice 6 implemented and verified, awaiting review/approval before Slice 7 begins)*
 
 ## Blocked
 
+- **ISSUE-24 — undocumented SQL trigger overwrites `gameweeks.deadline_utc` with a conflicting 15-minute offset** → [current-state.md](./current-state.md#issue-24--an-undocumented-sql-trigger-recomputes-gameweeksdeadline_utc-with-a-conflicting-incorrect-offset). Discovered 2026-08-05, live-confirmed via direct reproduction. `supabase_admin`-owned, not in any migration — same out-of-band pattern as ISSUE-1/ISSUE-21. Blocked on: a decision on which offset (15 min or the documented 30 min) is actually correct before either removing the trigger or changing `compute-deadlines` to match.
 - **ISSUE-20 — prototype tables have RLS disabled and full anonymous write access** → [current-state.md](./current-state.md#issue-20--prototype-tables-have-rls-disabled-and-full-anonymous-write-access). Narrowed 2026-08-03 — the new schema ships fully RLS-protected; the 7 original prototype tables remain exposed. Blocked on: Phase 8 of `deployment-checklist.md` (final removal), or a Dashboard/support RLS fix on the old tables directly.
 - **`sync-live-events-every-5-min` cron job removal** — `supabase_admin`-owned, `postgres` cannot unschedule it. Low severity (no data/security impact). Folded into Track B/Phase 8 scope, not tracked separately.
 - **Verify what (if anything) refreshes `player_fixture_goals`** — `ISSUE-3` (P0) → [current-state.md](./current-state.md#issue-3--player_fixture_goals-materialized-view-is-never-refreshed).
@@ -66,10 +67,11 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Testing
 
-- **Milestone 4, Slice 5 — Settlement** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.settle()` (the fourth real Game Engine contract implementation) wired into `settle-gameweek` via the dispatcher — implements the payment-void rule deferred from Slice 4. 8 new Deno unit tests (58/58 total pass); verified live end-to-end with a paid and an unpaid entry against a real gameweek/fixture (temporarily flipped to `finished` and reverted afterward) — correct `settled`/`void` outcomes, correct pick-voiding, correct "no `entry_payments` row defaults to unpaid" behavior, idempotent on a second run, RLS still blocks direct client writes. All test data removed by exact ID per the standing cleanup rule. **Not yet committed** — awaiting review/approval (see `session-log.md`).
+- **Milestone 4, Slice 6 — Standings** → [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan). `Pick5Engine.generateStandings()` (the fifth real Game Engine contract implementation), called internally from `settle()` per GE-8.4 — `settle-gameweek/index.ts` itself was not modified. Resolves `ISSUE-15` (overall leaderboard) and `ISSUE-17` (tie-break rule — standard competition ranking, ties share a rank, confirmed with the repo owner). 15 new Deno unit tests (65/65 total pass). A real bug was found and fixed during live verification: `pot_standings_snapshots`' two partial unique indexes can't be targeted by PostgREST's `upsert(onConflict: ...)` — reworked to look up existing rows first and upsert only by `id`. Verified live end-to-end with 3 real users (2 tied, 1 not) — correct shared-rank tie behavior, correct gameweek + overall snapshots, idempotent on a second run. **Also discovered, unrelated to this slice: `ISSUE-24`** (see Blocked). All test data removed by exact ID per the standing cleanup rule. **Not yet committed** — awaiting review/approval (see `session-log.md`).
 
 ## Done
 
+- **Milestone 4, Slice 5 — Settlement** — 2026-08-05, committed. `Pick5Engine.settle()` wired into `settle-gameweek` via the dispatcher — implements the payment-void rule deferred from Slice 4. See [session-log.md](./session-log.md).
 - **Milestone 4, Slices 3-4 — Locking and scoring** — 2026-08-05, committed (`be06bbd`). `Pick5Engine.lockEntries()`/`calculateScore()` wired into `compute-deadlines`/`compute-scores`. See [session-log.md](./session-log.md).
 - **Milestone 4, Slice 2 — Pick submission** — 2026-08-04. `submit-pick5-picks` Edge Function + `Pick5Engine.validateEntry()` (the first real Game Engine contract implementation) + `pick5_picks` table (`007`) + `available_players_by_gameweek` fix (`008`, `ISSUE-23`). See [session-log.md](./session-log.md).
 - **ISSUE-22 resolved — Edge Runtime JWT verification fixed by CLI/Edge Runtime upgrade** — 2026-08-04. CLI `2.75.0`→`2.111.0`, Edge Runtime `v1.70.0`→`v1.74.2`. Re-verified from scratch with a brand-new user via real `supabase.functions.invoke()` calls: `admin-actions` now `403` (correctly authorized-but-denied, not rejected), `get-or-create-pick5-entry` now genuine `200` success. See [current-state.md](./current-state.md#issue-22--edge-runtimes-default-jwt-verification-rejected-gotrues-es256-tokens-no-authenticated-edge-function-call-worked-locally) and [session-log.md](./session-log.md).

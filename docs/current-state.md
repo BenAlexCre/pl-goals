@@ -98,6 +98,67 @@ was once broken" survives.
 
 ### P0 — verify or fix before building further on pots/scoring
 
+#### ISSUE-24 — An undocumented SQL trigger recomputes `gameweeks.deadline_utc` with a conflicting, incorrect offset
+**Discovered and confirmed live 2026-08-05**, by accident, during Milestone 4 Slice
+6's live verification (unrelated to Slice 6's own work — surfaced while
+temporarily flipping a fixture's status for a settlement test). `deadline_utc`
+kept reverting to a value inconsistent with `compute-deadlines`' own formula
+immediately after any change to a row in `fixtures`, with no Edge Function
+involved. Root-caused via `information_schema.triggers`: `fixtures` has an
+`AFTER INSERT OR UPDATE OR DELETE` trigger,
+`trg_refresh_gameweek_deadlines_on_fixtures`, calling
+`trigger_refresh_gameweek_deadlines()`, which calls `refresh_gameweek_deadlines()`
+— a SQL function that recomputes **every** gameweek's `earliest_kickoff_utc`/
+`deadline_utc` from `fixtures` directly, using
+`earliest_kickoff_utc - interval '15 minutes'`.
+
+This **conflicts with** `compute-deadlines/index.ts`'s formula (`earliest - 30
+minutes`) and with the documented business rule
+([business-rules.md § When picks lock](./business-rules.md#when-picks-lock):
+"30 minutes before the earliest kickoff... one single deadline for the whole
+gameweek"). Both mechanisms write the same column; whichever ran most recently
+wins — in practice, since any real fixture status change (a normal, frequent
+occurrence via `sync-fixtures`/`sync-live-events`) fires this trigger
+immediately, the *documented* 30-minute deadline is silently overwritten by an
+undocumented 15-minute one on essentially every live update, not just
+occasionally.
+
+**Confirmed via direct, controlled reproduction** (not inferred): a real,
+isolated `compute-deadlines` invocation correctly set gameweek 9's
+`deadline_utc` to `18:30:00` (matching `19:00:00 earliest_kickoff_utc - 30
+min`, and matching the row's own already-consistent `earliest_kickoff_utc`);
+a subsequent plain `UPDATE fixtures SET status = ...` on that gameweek's one
+fixture — no Edge Function call at all — immediately changed it to
+`18:45:00` (`19:00:00 - 15 min`). **Re-confirmed a third time** later the
+same session, purely from background activity: with no deliberate change to
+gameweek 9's own fixture at all, `deadline_utc` drifted back to `18:45:00`
+again. `refresh_gameweek_deadlines()`'s single `UPDATE ... FROM (... group by
+gameweek_id)` recomputes **every** gameweek in one statement, so it doesn't
+need anyone to touch a *specific* gameweek's own fixture — any write
+anywhere in the `fixtures` table (routine background sync activity) fires
+the trigger and re-derives all gameweeks' deadlines with the wrong offset.
+This is continuous, ambient drift, not an occasional coincidence.
+
+**Not in any migration** — confirmed via `grep` across
+`supabase/migrations/`, zero matches for either function/trigger name. Owned
+by `supabase_admin`, matching the same out-of-band, undocumented-prototype
+pattern as [ISSUE-1](#issue-1--pot-creation-likely-violates-its-own-rls-policy)'s
+policy and [ISSUE-21](#issue-21--postgres-role-cannot-alter-supabase_admin-owned-prototype-objects)'s
+ownership split — created directly against the live database at some point,
+never captured as a migration.
+
+**Impact:** real, not cosmetic. If this trigger fires after `compute-deadlines`
+computes the correct 30-minute deadline (the common case, since fixture
+updates are frequent), the live deadline enforced by the rest of the system is
+15 minutes before kickoff, not 30 — a fairness/correctness gap directly
+affecting real-money pots, on top of the already-known
+[ISSUE-17](#issue-17--leaderboard-ranking-has-no-tie-break-rule) tie-break
+gap. **Not fixed as part of Slice 6** — entirely unrelated to that slice's
+scope (`generateStandings()`/`ISSUE-15`/`ISSUE-17`); flagged here for a
+deliberate decision on which value is actually correct (this repo's own
+documentation says 30 minutes) before either removing the trigger or updating
+`compute-deadlines` to match it.
+
 #### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
 **Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
 (26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
@@ -576,6 +637,7 @@ opposed to inferred from the migrations in this repo:
 | ISSUE-20 (prototype RLS/anon-write exposure) | **Yes** | 2026-08-03 | Confirmed live and still open |
 | ISSUE-21 (ownership split) | **Yes** | 2026-08-03 | Confirmed live and still open |
 | ISSUE-22 (Edge Runtime JWT verification) | **Yes** | 2026-08-04 | Resolved by CLI/Edge Runtime upgrade, see [Resolved issues](#resolved-issues) |
+| ISSUE-24 (conflicting `deadline_utc` triggers) | **Yes** | 2026-08-05 | Confirmed live via direct, controlled reproduction — real bug, still open |
 
 Update this table the first time each item is actually checked, even if the result is
 "confirmed broken" — an unverified guess and a confirmed fact should not look the same

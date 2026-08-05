@@ -31,6 +31,23 @@ interface EligiblePlayerRow {
   position: string | null
 }
 
+// GE-6/GE-8.4: standard competition ranking ("1224" — ties share a rank;
+// the next distinct score skips ahead by however many were tied). Resolves
+// ISSUE-17 — confirmed with the repo owner rather than invented, since
+// real money is riding on it and no rule could be inferred from existing
+// docs. Tied members are never arbitrarily favored over one another;
+// splitting a prize among tied winners is awardPrize()'s job (a later
+// slice), not this ranking function's.
+function rankWithTies(entries: { userId: string; score: number }[]): { userId: string; score: number; rank: number }[] {
+  const sorted = [...entries].sort((a, b) => b.score - a.score)
+  const ranked: { userId: string; score: number; rank: number }[] = []
+  for (let index = 0; index < sorted.length; index++) {
+    const rank = index === 0 || sorted[index].score < sorted[index - 1].score ? index + 1 : ranked[index - 1].rank
+    ranked.push({ ...sorted[index], rank })
+  }
+  return ranked
+}
+
 function parsePicks(picks: unknown): Pick5PickInput[] {
   if (!Array.isArray(picks)) {
     throw new Pick5ValidationError('picks must be an array')
@@ -362,10 +379,159 @@ export class Pick5Engine implements GameEngine {
         throw new Error(`Failed to settle paid entries: ${settleError.message}`)
       }
     }
+
+    // GE-8.4's Settlement sequence diagram shows generateStandings() as a
+    // self-call from within settle() ("GE->>GE: generateStandings(ctx, potId)"),
+    // not a separate step the Edge Function dispatches — so it's invoked
+    // here, once per distinct pot represented in this gameweek's entries,
+    // rather than from settle-gameweek/index.ts. Runs even for a pot whose
+    // entries were all voided this gameweek: the overall/cumulative
+    // standings snapshot must still reflect current reality either way, and
+    // regenerating is idempotent (upsert), so there's no correctness reason
+    // to skip it.
+    const distinctPotIds = [...new Set(entries.map((e: { pot_id: string }) => e.pot_id))]
+    for (const potId of distinctPotIds) {
+      await this.generateStandings(ctx, potId)
+    }
   }
 
-  generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {
-    throw new GameEngineNotImplementedError('pick5', 'generateStandings')
+  // GE-6: "Write pot_standings_snapshots rows." Called (per GE-8.4) from
+  // within settle() after finalizing a gameweek, and potentially on-demand
+  // elsewhere later — this method itself doesn't care which. Only 'settled'
+  // entries are ranked; 'void' entries are excluded entirely
+  // (docs/business-rules.md § Payment rules: "excluded from the leaderboard
+  // entirely, regardless of how well its picks would have scored").
+  //
+  // Writes two shapes per docs/game-engine.md § GE-4.6 / the schema's own
+  // two partial unique indexes: one row per (pot, gameweek, user) for every
+  // gameweek this pot has ever settled, plus one row per (pot, user) with
+  // gameweek_id null — the cumulative/overall standing, resolving ISSUE-15
+  // (the prototype's leaderboard_snapshots never wrote this shape at all).
+  // Recomputed from scratch across the pot's full settled history each
+  // call rather than just the gameweek just settled, since this method only
+  // receives a potId (GE-6's contract), not a gameweekId — full recompute
+  // is the only way to stay correct regardless of call order, and upserting
+  // makes repeat calls idempotent rather than accumulating duplicates.
+  //
+  // Ranking is standard competition ranking with no further tie-break — see
+  // rankWithTies() above for the ISSUE-17 resolution and reasoning.
+  async generateStandings(ctx: GameEngineContext, potId: string): Promise<StandingsRow[]> {
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('user_id, gameweek_id, game_entry_pick5(picks_won)')
+      .eq('pot_id', potId)
+      .eq('status', 'settled')
+
+    if (entriesError) {
+      throw new Error(`Failed to look up settled entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return []
+    }
+
+    // Same defensive array-or-object handling as compute-deadlines/
+    // compute-scores/settle-gameweek's embedded-resource reads — supabase-js
+    // infers this many-to-one relation's shape generically without a
+    // generated Database type.
+    type Pick5Embed = { picks_won: number } | { picks_won: number }[] | null
+    type EntryRow = { user_id: string; gameweek_id: number; game_entry_pick5: Pick5Embed }
+
+    const byGameweek = new Map<number, { userId: string; score: number }[]>()
+    const overallByUser = new Map<string, number>()
+
+    for (const entry of entries as EntryRow[]) {
+      const picksWon = Array.isArray(entry.game_entry_pick5)
+        ? entry.game_entry_pick5[0]?.picks_won ?? 0
+        : entry.game_entry_pick5?.picks_won ?? 0
+
+      if (!byGameweek.has(entry.gameweek_id)) {
+        byGameweek.set(entry.gameweek_id, [])
+      }
+      byGameweek.get(entry.gameweek_id)!.push({ userId: entry.user_id, score: picksWon })
+      overallByUser.set(entry.user_id, (overallByUser.get(entry.user_id) ?? 0) + picksWon)
+    }
+
+    const standingsRows: StandingsRow[] = []
+
+    for (const [gameweekId, rows] of byGameweek) {
+      const ranked = rankWithTies(rows)
+      for (const r of ranked) {
+        standingsRows.push({ potId, gameweekId, userId: r.userId, rank: r.rank, score: r.score })
+      }
+      await this.upsertStandingsGroup(ctx, potId, gameweekId, ranked)
+    }
+
+    const overallEntries = [...overallByUser.entries()].map(([userId, score]) => ({ userId, score }))
+    const overallRanked = rankWithTies(overallEntries)
+    for (const r of overallRanked) {
+      standingsRows.push({ potId, gameweekId: null, userId: r.userId, rank: r.rank, score: r.score })
+    }
+    await this.upsertStandingsGroup(ctx, potId, null, overallRanked)
+
+    return standingsRows
+  }
+
+  // pot_standings_snapshots has TWO partial unique indexes
+  // (pot_standings_gameweek_key on (pot_id,gameweek_id,user_id) WHERE
+  // gameweek_id IS NOT NULL, and pot_standings_overall_key on
+  // (pot_id,user_id) WHERE gameweek_id IS NULL — 004_game_engine_shared_platform.sql).
+  // PostgREST's upsert(onConflict: '...') generates a bare
+  // `ON CONFLICT (columns) DO UPDATE`, and Postgres's conflict-target
+  // inference does not match a partial index unless the WHERE predicate is
+  // also specified — which the JS client has no way to pass. Confirmed live
+  // (not assumed): upserting directly against either partial index by
+  // column list fails with "there is no unique or exclusion constraint
+  // matching the ON CONFLICT specification." Worked around by never using
+  // ON CONFLICT against these partial indexes at all — look up existing
+  // rows by their natural key first, then upsert the matches by `id` (the
+  // real, non-partial primary key) and plain-insert the rest.
+  private async upsertStandingsGroup(
+    ctx: GameEngineContext,
+    potId: string,
+    gameweekId: number | null,
+    rows: { userId: string; score: number; rank: number }[]
+  ): Promise<void> {
+    if (rows.length === 0) {
+      return
+    }
+
+    let existingQuery = ctx.supabase.from('pot_standings_snapshots').select('id, user_id').eq('pot_id', potId)
+    existingQuery = gameweekId === null ? existingQuery.is('gameweek_id', null) : existingQuery.eq('gameweek_id', gameweekId)
+    const { data: existing, error: existingError } = await existingQuery
+
+    if (existingError) {
+      throw new Error(`Failed to look up existing standings: ${existingError.message}`)
+    }
+
+    const existingIdByUser = new Map<string, number>(
+      ((existing ?? []) as { id: number; user_id: string }[]).map((r) => [r.user_id, r.id])
+    )
+
+    const toUpdate: Record<string, unknown>[] = []
+    const toInsert: Record<string, unknown>[] = []
+
+    for (const row of rows) {
+      const base = { pot_id: potId, gameweek_id: gameweekId, user_id: row.userId, rank: row.rank, score: row.score }
+      const existingId = existingIdByUser.get(row.userId)
+      if (existingId !== undefined) {
+        toUpdate.push({ ...base, id: existingId })
+      } else {
+        toInsert.push(base)
+      }
+    }
+
+    if (toUpdate.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').upsert(toUpdate, { onConflict: 'id' })
+      if (error) {
+        throw new Error(`Failed to update standings: ${error.message}`)
+      }
+    }
+    if (toInsert.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').insert(toInsert)
+      if (error) {
+        throw new Error(`Failed to insert standings: ${error.message}`)
+      }
+    }
   }
 
   determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {

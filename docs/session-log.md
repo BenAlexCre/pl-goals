@@ -13,6 +13,144 @@ from here.
 
 ---
 
+## 2026-08-05 (16) — Milestone 4, Slice 6: Pick 5 standings, a real upsert bug, and an unrelated undocumented-trigger discovery (ISSUE-24)
+
+**Goal:** Slice 5 was committed and pushed; implement the next vertical
+slice — `generateStandings()`, per `docs/game-engine.md` § GE-6/GE-8.4.
+Stated the objective, its relationship to Slice 5, and the issues it was
+expected to resolve (`ISSUE-15`, `ISSUE-17`) before writing any code, per
+this turn's explicit instruction.
+
+**Scoping decision made before implementation, from re-reading GE-8.4's own
+sequence diagram carefully:** the Settlement diagram shows
+`GE->>GE: generateStandings(ctx, potId)` — a *self-call* from within
+`settle()`, not a separate step the Edge Function dispatches (unlike
+`lockEntries()`/`calculateScore()`/`settle()` itself, which are each
+independently dispatched from `compute-deadlines`/`compute-scores`/
+`settle-gameweek`). This meant `settle-gameweek/index.ts` needed **no
+changes at all** this slice — `generateStandings()` is called internally by
+`Pick5Engine.settle()` (already built in Slice 5), once per distinct pot
+represented in that gameweek's entries. Catching this before writing code
+avoided building the wrong integration shape.
+
+**Tie-break decision (`ISSUE-17`):** asked the repo owner directly rather
+than inventing a rule, since real money is involved and no rule could be
+inferred from existing docs. Decision: **standard competition ranking** —
+tied members share a rank, the next distinct score skips ahead by however
+many were tied. No one is arbitrarily favored over an equally-deserving
+player; splitting a prize among tied winners becomes `awardPrize()`'s job
+(a later slice), not the leaderboard's.
+
+**What was built:**
+- `rankWithTies()` — a pure, standalone ranking function implementing the
+  above rule.
+- `Pick5Engine.generateStandings(ctx, potId)` — the fifth real Game Engine
+  method. Reads every `settled` entry for the pot (`void` entries excluded
+  entirely, per `business-rules.md`'s payment-void rule), groups by
+  gameweek for per-gameweek rankings, and separately sums `picks_won` per
+  user across every settled gameweek for the cumulative "overall" ranking
+  — resolving `ISSUE-15` (the prototype's `leaderboard_snapshots` never
+  wrote an overall row at all). Recomputed from scratch on every call
+  (this method only receives a `potId`, not a `gameweekId`, per GE-6's
+  contract) rather than incrementally, since that's the only way to stay
+  correct regardless of call order.
+- `Pick5Engine.settle()` extended (not rewritten) to call
+  `this.generateStandings(ctx, potId)` once per distinct pot after
+  finalizing entries.
+- 15 new Deno unit tests. This required rebuilding the settle()/
+  generateStandings() test fake from scratch: the previous, simpler fake
+  (from Slice 5) didn't understand `generateStandings()`'s query shape at
+  all, so `settle()`'s existing tests were **silently short-circuiting the
+  new internal `generateStandings()` call into a no-op** rather than
+  actually exercising it — passing without proving the integration worked.
+  Replaced it with a small generic, thenable query builder
+  (`.select/.eq/.is/.in/.update/.insert/.upsert`, chainable to arbitrary
+  depth) modeling real in-memory tables, so both methods' actual query
+  shapes are genuinely exercised. 65/65 total pass.
+
+**Bug found and fixed, via live testing — not caught by unit tests:**
+`pot_standings_snapshots` has two **partial** unique indexes
+(`pot_standings_gameweek_key ... WHERE gameweek_id IS NOT NULL` and
+`pot_standings_overall_key ... WHERE gameweek_id IS NULL`,
+`004_game_engine_shared_platform.sql`). The first live invocation of
+`settle-gameweek` failed outright:
+`Error: there is no unique or exclusion constraint matching the ON CONFLICT
+specification`. Root cause: PostgREST's `upsert(onConflict: '...')`
+generates a bare `ON CONFLICT (columns) DO UPDATE`, and Postgres's
+conflict-target inference does not match a partial index unless its WHERE
+predicate is also specified — which the JS client has no way to pass.
+Confirmed this diagnosis was correct by fixing it: reworked
+`generateStandings()` to never upsert against those two partial indexes at
+all — look up existing rows by their natural key first
+(`upsertStandingsGroup()`), then upsert matches by `id` (the real,
+non-partial primary key) and plain-insert the rest. This is a real
+limitation of PostgREST's upsert mechanism worth remembering for any future
+table using partial unique indexes as a natural key, not specific to this
+table. The test fake's simplified in-memory matching could not have caught
+this on its own — it doesn't model real Postgres constraint-matching
+semantics — which is exactly why live verification against the real
+database remains mandatory, not just a formality, for anything touching
+schema constraints.
+
+**A second, unrelated discovery — `ISSUE-24`, not fixed, out of scope:**
+while resetting test state between live-verification runs, `gameweek 9`'s
+`deadline_utc` was observed reverting from the correct `18:30:00` to
+`18:45:00` — the same anomaly briefly seen and not explained in Slice 5,
+but this time it recurred reproducibly and was run to ground properly
+rather than shrugged off a second time. Confirmed via
+`information_schema.triggers` that `fixtures` has an undocumented
+`AFTER INSERT OR UPDATE OR DELETE` trigger
+(`trg_refresh_gameweek_deadlines_on_fixtures`) calling
+`refresh_gameweek_deadlines()`, a `supabase_admin`-owned SQL function (not
+in any migration) that recomputes every gameweek's `deadline_utc` as
+`earliest_kickoff_utc − 15 minutes` — conflicting with
+`compute-deadlines/index.ts`'s documented, correct 30-minute formula.
+Proved this precisely with a controlled, isolated reproduction: a direct
+`compute-deadlines` call correctly set `18:30:00`; a subsequent plain
+`UPDATE fixtures SET status = ...` — no Edge Function involved at all —
+immediately changed it to `18:45:00`. Real, live-money-relevant impact:
+since any ordinary fixture update (a routine, frequent event via
+`sync-fixtures`/`sync-live-events`) fires this trigger, the documented
+30-minute deadline is silently overwritten by an undocumented 15-minute one
+in the common case, not an edge case. Logged as `ISSUE-24` (P0) in
+`current-state.md`, cross-referenced from `business-rules.md`'s "When picks
+lock" section (added a caveat rather than silently trusting the previously
+"confirmed" 30-minute claim) and `project-board.md`'s Blocked column. Not
+fixed here — entirely unrelated to Slice 6's scope, and fixing it requires
+a product decision (which offset is actually correct) before touching
+either the trigger or `compute-deadlines`.
+
+**Verification:**
+- 65/65 Deno unit tests pass; `deno check` clean (no Edge Function code
+  changed this slice — `settle-gameweek/index.ts` untouched, confirmed via
+  `git status` before writing any documentation).
+- No migration this slice — no schema change was needed.
+- Live end-to-end: 3 real users seeded against gameweek 9 (2 tied at
+  `picks_won = 3`, 1 at `picks_won = 1`), all paid, invoked
+  `settle-gameweek` for real. First attempt surfaced the partial-index bug
+  above (entries settled correctly before the failure — confirmed
+  transactionally independent REST calls, not a partial-write concern).
+  After the fix: entries settled, `pot_standings_snapshots` correct for
+  both tied users (`rank: 1` each) and the third user (`rank: 3`, skipping
+  2 — proving the tie-break rule live, not just in a unit test), both
+  gameweek-scoped and overall rows written. Ran `settle-gameweek` again —
+  idempotent, row count unchanged. Confirmed RLS unchanged (`select`-only
+  policy on `pot_standings_snapshots`, no new client-writable path added,
+  consistent with "keep settlement/scoring/business rules inside the Game
+  Engine"). All test data removed by exact ID; fixture 104 and gameweek 9
+  reverted to their prior state, using a *real* `compute-deadlines`
+  invocation to restore the correct `18:30:00` value rather than a raw SQL
+  patch, since a manual value would have been indistinguishable from
+  another guess.
+
+**Status:** Slice 6 implemented and fully verified live, including a real
+bug found and fixed during that verification. **Not committed** — awaiting
+the repo owner's review and explicit approval before Slice 7. `ISSUE-24` is
+a separate, pre-existing, live production-relevant bug this slice happened
+to uncover — flagged for a decision, not addressed here.
+
+---
+
 ## 2026-08-05 (15) — Milestone 4, Slice 5: Pick 5 settlement
 
 **Goal:** Slices 3-4 were committed and pushed (`be06bbd`); implement the
