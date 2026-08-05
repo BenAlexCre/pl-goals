@@ -137,21 +137,48 @@ as paid or unpaid in one of two ways:
 voided** — all of its picks are marked `void` and it's excluded from the leaderboard
 entirely, regardless of how well its picks would have scored. Settlement depends
 **only** on `entry_payments.is_paid` — never on any external payment gateway's status,
-by design. This rule is already implemented for the current game engine
-(`Pick5Engine.settle()`, Milestone 4 Slice 5) and, for the retired prototype schema,
-in `compute-scores`. There is currently no UI for a pot admin to actually verify an
-entry as paid, single or bulk (see
-[current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)),
-so in practice every entry is being voided right now — this is a rule the system
-enforces correctly and consistently, it just currently has no way to be satisfied.
+by design. This rule is implemented in `Pick5Engine.settle()` (Milestone 4 Slice 5)
+and, for the retired prototype schema, in `compute-scores`.
 
-Implementation today: `entry_payments` table (already has `marked_by`/`marked_at`/
-`notes` columns — a useful head start on the audit-trail requirement above, though
-not sufficient by itself for a full history of bulk-import batches),
-`create_entry_payment()` trigger, `admin-actions`' `mark_paid`/`mark_unpaid` actions
-([api.md § admin-actions](./api.md#post-functionsv1admin-actions)), and the
-payment-verification check inside `compute-scores`/`Pick5Engine.settle()`. The
-single-entry admin UI and the CSV bulk importer are not yet built.
+**Implemented, 2026-08-05**: a pot admin (or app admin) can now actually verify
+payments, both ways, through `/admin/payments` — `pages/AdminPayments.jsx`. Single
+entry: a table of every pot member's payment status for the selected pot+gameweek,
+with Mark paid/Mark unpaid buttons, calling `admin-actions`' existing `mark_paid`/
+`mark_unpaid` actions. Bulk CSV: upload a file in the exact format above, click
+"Validate & preview" (calls the new `bulk_verify_payments` action with `dry_run:
+true` — resolves every identifier/pot, validates every row, writes nothing, shows
+the full outcome table), review it, then "Confirm import" (the same call with
+`dry_run: false`) to apply. Every row in one import applies to a single gameweek,
+selected in the UI before uploading — the fixed CSV format has no gameweek column.
+Verified live, end-to-end, through the real application: manual paid/unpaid,
+CSV import (including duplicate identifiers, unknown users, unknown pots, an
+invalid status value, and rows already in their target state), and settlement
+correctly respecting a payment verified via CSV (an entry that would otherwise
+void settled and won its pot once its CSV row was applied).
+
+**Two rules from the spec above with a real, disclosed limitation, not silently
+assumed satisfied:**
+- **"Never partially apply an import without explicit confirmation"** — satisfied
+  for the write step itself (nothing is written until "Confirm import" is clicked,
+  and the confirm step re-validates from scratch server-side, never trusting a
+  stale client-side preview) — but within one confirmed batch, rows are still
+  reported individually as updated/skipped/failed, per the CSV format's own
+  row-level granularity and the required processed/updated/skipped/failed summary.
+  This was the correct reading, not an all-or-nothing single-transaction import —
+  see [decisions.md § Payment Verification bulk import](./decisions.md#payment-verification-bulk-import-no-schema-change-needed).
+- **"Keep a full audit trail of what was imported, by whom, and when"** — satisfied
+  at the **row** level (`entry_payments.marked_by`/`marked_at`/`notes`, identical to
+  manual verification) but **not** at the batch level — there is no record of "admin
+  X ran a CSV import of N rows at time Y" as a single auditable event, only the
+  per-row outcome. Exactly the gap `entry_payments`' own column set already
+  anticipated (see the file's git history) and not closed here — it would need a
+  new table, out of scope for a no-schema-change implementation.
+
+Implementation: `entry_payments` table, `create_entry_payment()` trigger,
+`admin-actions`' `mark_paid`/`mark_unpaid`/`bulk_verify_payments` actions
+([api.md § admin-actions](./api.md#post-functionsv1admin-actions)), the
+payment-verification check inside `compute-scores`/`Pick5Engine.settle()`, and
+`pages/AdminPayments.jsx`/`hooks/useAdmin.js`/`utils/csv.js` on the frontend.
 
 ## Admin permissions
 

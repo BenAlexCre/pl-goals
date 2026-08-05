@@ -13,6 +13,94 @@ from here.
 
 ---
 
+## 2026-08-05 (25) — Payment Verification admin workflow (ISSUE-6 resolved)
+
+**Goal:** with Pick 5's backend, Game Engine, frontend cutover, and hardening
+sprint all committed, the repo owner named Payment Verification (`ISSUE-6`) the
+highest-priority production feature and asked for the full admin workflow —
+manual paid/unpaid plus CSV bulk import — instead of starting Milestone 5 (LMS).
+
+**Architecture review (before any code):** `admin-actions` already had
+`mark_paid`/`mark_unpaid` (single-entry, already correct) and its own
+pot-admin/app-admin authorization gate; `PaymentTable.jsx`/`MemberTable.jsx`
+existed but were never wired to a page. Nothing existed for CSV bulk import.
+**No schema changes were needed** — `entry_payments` already had every column
+the workflow needs, and the one real capability gap (resolving a CSV's
+email/phone `Identifier` to a `user_id` — `profiles` has no email/phone column
+at all) is reachable via the service-role client's existing GoTrue Admin API
+(`auth.admin.listUsers()`), not a new SQL function or view. Full reasoning:
+[decisions.md § Payment Verification bulk import](./decisions.md#payment-verification-bulk-import-no-schema-change-needed).
+
+**Backend:** one new `admin-actions` action, `bulk_verify_payments` — same code
+path for preview (`dry_run: true`, validates and resolves everything, writes
+nothing) and apply (`dry_run: false`). Resolves every distinct pot name and
+identifier in a batch with a small, fixed number of queries (never one per
+row), then hands off to a pure, DB-free classification function
+(`bulkPayments.ts`'s `classifyBulkPaymentRows()` — 18 unit tests, same
+validate.ts-style split as `get-or-create-pick5-entry`/`submit-pick5-picks`)
+that decides each row's outcome: `updated`, `skipped` (already in the target
+state, or a duplicate identifier+pot within the same batch — first occurrence
+wins), or `failed` (missing fields, invalid status, unknown pot, ambiguous pot
+name, unknown user, not a pot member, or the caller not authorized for that
+specific pot). Also fixed a pre-existing `error.message`-on-`unknown` type
+error in this file (never previously run through `deno check`), matching the
+same fix already applied elsewhere in this codebase.
+
+**Frontend:** new page `pages/AdminPayments.jsx` (`/admin/payments`, linked
+from `AdminDashboard.jsx`) — pot + gameweek selectors (gameweek is chosen in
+the UI, not the CSV, since the fixed `Identifier,Pot,Status,Notes` format has
+no gameweek column and Payment Verification is currently gameweek-scoped),
+`PaymentTable.jsx` reused for manual verification, a CSV upload + client-side
+parse (`utils/csv.js`, no dependency) + preview table + confirm flow for bulk
+import, with a processed/updated/skipped/failed summary and per-row outcome.
+New hooks in `hooks/useAdmin.js` use `supabase.functions.invoke()` +
+`extractFunctionError()` (not `useAdminAction()`'s raw `fetch()`, which is
+missing the `apikey` header Kong needs locally — already known, not fixed
+here, since fixing it would touch `AdminDashboard.jsx`'s existing feature).
+
+**Bug found and fixed during live verification:** a CSV row using the correct
+E.164 phone format (`+353871234567`) failed to resolve. Root cause: GoTrue
+stores phone numbers digits-only — a user created with `+353871234567` is
+stored as `auth.users.phone = "353871234567"`, confirmed live via
+`getUserById()`. Fixed by stripping a leading `+` from the identifier before
+the phone lookup; added a unit test for it.
+
+**Verification — entirely through the real application:** a dedicated test
+pot with 4 users (one admin, one with an existing unpaid record, one with an
+existing paid record, one with an E.164 phone number set) and a locked
+`game_entries` row. Through the real UI: manual mark-paid, manual
+mark-unpaid, both confirmed live in the table. An 8-row CSV covering every
+required scenario in one file — a valid new-paid row, an already-paid row
+(correctly skipped), the E.164 phone row (correctly resolved after the fix),
+the same number in the CSV's own local format (correctly "unknown user" —
+proves the exact-match limitation, not a bug), an unregistered email
+(unknown user), a wrong pot name (unknown pot), an invalid status value, and
+a duplicate of the first row (correctly skipped as a batch duplicate) —
+previewed, then confirmed and applied, with `marked_by`/`marked_at`/`notes`
+verified correct in the database for the two real writes and correctly
+*unchanged* for the skipped-already-paid row. Then: flipped the gameweek's
+fixtures to finished and triggered real settlement — the newly-paid user's
+entry settled (not voided) and won its pot, `pot_prizes`/`payout_amount`
+correct — proving settlement genuinely respects a payment verified through
+this workflow, not just that the write succeeded. All test data removed by
+exact ID; all shared gameweek/fixture state reverted; `deadline_utc`
+restored via a real `compute-deadlines` call after the same, already-known
+`ISSUE-24` drift recurred yet again.
+
+**Documentation updated:** `business-rules.md` (full rewrite of the "not yet
+built" closing note, including two disclosed limitations — batch-level, not
+just row-level, audit trail; row-level partial-failure reporting within one
+confirmed import, not a single all-or-nothing transaction), `current-state.md`
+(`ISSUE-6` moved to Resolved), `decisions.md` (new ADR covering the
+no-schema-change reasoning and every design decision made along the way),
+`project-board.md`.
+
+**Status:** implemented and fully verified. **Not committed** — per explicit
+instruction. Milestone 5 (LMS) not started — per explicit instruction.
+Awaiting the repo owner's review.
+
+---
+
 ## 2026-08-05 (24) — Pick 5 production hardening sprint
 
 **Goal:** the frontend cutover (entry 23) was committed. Instead of starting

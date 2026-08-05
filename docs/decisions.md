@@ -586,3 +586,77 @@ narrows the window as tightly as a single request can, consistent with the
 "best-effort, not perfect" mitigation already accepted elsewhere in this
 codebase (e.g. `get-or-create-pick5-entry`'s `23505`-conflict fallback for
 concurrent entry creation).
+
+## Payment Verification bulk import: no schema change needed
+
+**Decided 2026-08-05.** Before implementing the Payment Verification admin
+workflow (`ISSUE-6`), reviewed whether CSV bulk import needs any schema change.
+It doesn't — two reasons:
+
+1. **`entry_payments` already has every column this workflow needs**: `pot_id`,
+   `user_id`, `gameweek_id`, `is_paid`, `marked_by`, `marked_at`, `notes` — the
+   CSV's `Notes` column maps directly to the existing `notes` column, unchanged
+   since `001_initial_schema.sql`.
+2. **Identifier (email/phone) resolution — the one real capability gap — doesn't
+   need a new SQL function or view either.** `profiles` has no email or phone
+   column at all (by design — Supabase Auth owns that data), so resolving a CSV
+   row's `Identifier` to a `user_id` genuinely can't be done via any client-
+   reachable table. But `admin-actions` already uses a service-role client, and
+   the service-role client already has access to the **GoTrue Admin API**
+   (`adminClient.auth.admin.listUsers()`) — which returns every user's email and
+   phone directly, no RLS, no PostgREST schema exposure required (`auth` isn't
+   exposed via PostgREST in this project, but the Admin Auth API is a separate
+   mechanism entirely, unaffected by that). Paginating through `listUsers()`
+   once per bulk request and matching in application code is a few lines, adds
+   no new schema surface, and needs no `security definer` function bridging
+   `public` to `auth` the way e.g. `redeem_invite()` bridges to `pot_members`.
+
+**What this means for the new `bulk_verify_payments` action**
+(`supabase/functions/admin-actions/bulkPayments.ts`): it resolves every distinct
+pot name and every distinct identifier referenced in a CSV batch in a small,
+fixed number of queries (one `pots` lookup, one paginated `listUsers()` walk, one
+`pot_members` lookup, one `entry_payments` lookup — never one query per row),
+then classifies each row via a pure function (`classifyBulkPaymentRows()`) that
+takes no DB dependency at all, so it's fully unit-testable without a live
+database — same split as `validate.ts` in `get-or-create-pick5-entry`/
+`submit-pick5-picks`.
+
+**Design decisions made along the way, none required by the CSV format itself,
+recorded here rather than left implicit:**
+
+- **Gameweek is selected in the UI, not the CSV.** The fixed
+  `Identifier,Pot,Status,Notes` format has no gameweek column (Payment
+  Verification is currently Pick-5-only, always gameweek-scoped —
+  `entry_payments.scope = 'gameweek'`). Every row in one import applies to a
+  single gameweek, chosen in `pages/AdminPayments.jsx` before uploading —
+  mirroring how `PotDetail.jsx` already scopes its own gameweek-dependent
+  actions. A CSV spanning pots on genuinely different "current" gameweeks needs
+  two separate imports; not solved automatically, since the format gives no way
+  to express it.
+- **Duplicate identifier+pot within one CSV**: the first occurrence is applied,
+  every subsequent one is reported `skipped` with an explicit reason — never
+  "last one wins" silently, which would make the outcome depend on row order in
+  a way nobody reviewing the preview could predict.
+- **A row's target user must already be a member of the resolved pot.** Not
+  required by the spec, but a resolved (pot, user) pair that isn't a real
+  `pot_members` row almost certainly means a typo somewhere (wrong pot, wrong
+  person) — reported as a failure rather than silently creating an orphaned
+  `entry_payments` row for a non-member.
+- **Authorization is per-row, not per-request.** Unlike every other
+  `admin-actions` action (single `pot_id` in the body, one authorization check
+  up front), a CSV can reference multiple pots. `bulk_verify_payments` bypasses
+  the shared single-pot gate and instead resolves, per unique pot in the batch,
+  whether the caller is that pot's admin (or an app admin, authorized for every
+  resolved pot regardless of membership) — a row for a pot the caller doesn't
+  administer fails with "not authorized," not "unknown pot" (deliberately
+  distinct reasons, even though both currently render as a failed row).
+- **Phone matching strips a leading `+`.** Confirmed live: GoTrue stores phone
+  numbers digits-only (a user created with `+353871234567` is stored as
+  `353871234567`) — found via this feature's own end-to-end verification, where
+  a correctly-formatted E.164 identifier was failing to resolve. Beyond that one
+  normalization, phone matching is exact-string only; this codebase has no
+  phone-auth UI anywhere (sign-up is email/password only), so no user has
+  `auth.users.phone` populated by any normal flow today — a phone-identified CSV
+  row will correctly report "unknown user" until a phone number exists some
+  other way. Further normalization (spacing, local-format-to-E.164 guessing) is
+  deliberately out of scope — not a case this app's current data can exercise.

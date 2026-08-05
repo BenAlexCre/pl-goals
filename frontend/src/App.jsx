@@ -10,6 +10,7 @@ import PotDetail from './pages/PotDetail'
 import GameweekPage from './pages/GameweekPage'
 import PicksPage from './pages/PicksPage'
 import AdminDashboard from './pages/AdminDashboard'
+import AdminPayments from './pages/AdminPayments'
 import Profile from './pages/Profile'
 import NotFound from './pages/NotFound'
 import ToastContainer from './components/ui/ToastContainer'
@@ -55,6 +56,7 @@ export default function App() {
           <Route path="/pot/:potId/gameweek/:gameweekId" element={<GameweekPage />} />
           <Route path="/pot/:potId/picks" element={<PicksPage />} />
           <Route path="/admin" element={<AdminDashboard />} />
+          <Route path="/admin/payments" element={<AdminPayments />} />
           <Route path="/profile" element={<Profile />} />
         </Route>
 

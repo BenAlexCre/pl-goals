@@ -361,65 +361,6 @@ deliberately removed/replaced by the manual scraper workflow. Plan:
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-6 — Payment Verification has no UI or bulk import; `compute-scores`/`settle` will void every entry
-**Reframed 2026-08-05** — the underlying gap is unchanged, but the target design is
-now explicit: see
-[decisions.md § Payment Verification, not payment processing](./decisions.md#payment-verification-not-payment-processing)
-and
-[business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules).
-The application never processes payments or integrates a payment gateway; it only
-records whether an entry has been **verified as paid**, off-platform. Two admin
-capabilities are needed and neither exists yet: (a) mark a single entry
-paid/unpaid manually, (b) bulk-verify via CSV import
-(`Identifier,Pot,Status,Notes`, identifier = email or phone), with validation,
-preview, error reporting, an audit trail, and no partial imports without
-confirmation.
-
-`entry_payments`, `admin-actions`' `mark_paid`/`mark_unpaid` actions, and the
-auto-void-on-unverified logic in `compute-scores` are all implemented and consistent
-with each other (see [api.md § admin-actions](./api.md#post-functionsv1admin-actions)
-and [database.md § entry_payments](./database.md#entry_payments)) — this schema
-already fits the Payment Verification model naturally (it was always recording an
-off-platform payment, never processing one). The UI components that would let an
-admin actually verify someone as paid — `components/admin/MemberTable.jsx` and
-`PaymentTable.jsx` — exist but are never imported by `AdminDashboard.jsx` or any
-other page, and there is no CSV importer anywhere in the repo. Every entry is created
-with `is_paid: false` by default and nothing in the reachable UI can change that.
-**Status: confirmed.** Every entry in every pot will be voided the first time
-`compute-scores` runs against real data, unless payments are being verified directly
-through the Supabase dashboard as a manual workaround. See also
-[decisions.md § Unpaid entries are voided automatically](./decisions.md#unpaid-entries-are-voided-automatically-at-scoring-time-not-at-submission-time)
-for the reasoning behind the design this breaks. Plan:
-[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
-
-**Extends to the new Game Engine schema too, found 2026-08-05 while building
-`Pick5Engine.settle()` (Milestone 4, Slice 5).** `settle()` faithfully implements the
-same payment-verification-void rule against `entry_payments`/`game_entries` —
-correctly, per `business-rules.md`. But `trg_create_entry_payment` (the trigger that
-auto-creates an `entry_payments` row on entry creation) is attached only to
-`user_entries` (the prototype table), not `game_entries` — confirmed via
-`information_schema.triggers`. No Pick 5 entry created through
-`get-or-create-pick5-entry` (Slice 1) gets a matching `entry_payments` row at all, so
-`settle()` currently voids every new-schema entry too, for the same underlying reason
-as the original issue. Deliberately not fixed as part of Slice 5 — extending the
-trigger to `game_entries` is really this same issue's fix, not a settlement concern,
-and belongs with whatever slice eventually builds Payment Verification for both
-schemas at once, rather than being patched separately here.
-
-**Now live and reachable, 2026-08-05 — this was previously a masked gap, not a
-theoretical one.** Before the Pick 5 frontend cutover, nothing in the running app
-ever created a `game_entries` row, so this gap had no real-world effect. As of the
-cutover, `get-or-create-pick5-entry` is the actual, only entry-creation path a real
-user hits — every new entry now has no auto-seeded `entry_payments` row, exactly as
-this note already predicted. Verified this does **not** silently break settlement
-(`Pick5Engine.settle()` already treats a missing row as unpaid, and
-`admin-actions`' `mark_paid` upserts the row directly with no dependency on a
-placeholder existing first — confirmed live during cutover verification), but the
-absence of any Payment Verification UI (`ISSUE-6`'s core gap) is now the single
-thing standing between "every entry voids" and a working payment flow. No longer
-a masked, dormant issue — this is now the most direct path to a broken production
-experience if `ISSUE-6` isn't closed before real pots use Pick 5.
-
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
 goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly
@@ -612,6 +553,34 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-6 — Payment Verification has no UI or bulk import; `compute-scores`/`settle` will void every entry
+**Resolved 2026-08-05.** A pot admin (or app admin) can now verify payments, both
+manually and via CSV, through `/admin/payments` (`pages/AdminPayments.jsx`) —
+see [business-rules.md § Payment verification rules](./business-rules.md#payment-verification-rules)
+for the full user-facing behavior and the two disclosed limitations (per-row, not
+batch-level, audit trail; row-level partial-failure reporting within one confirmed
+import). Backend: `admin-actions` gained one new action, `bulk_verify_payments`
+(dry-run preview + apply, same shape either way — `supabase/functions/admin-actions/
+bulkPayments.ts`, 18 unit tests). **No schema changes were required** — see
+[decisions.md § Payment Verification bulk import: no schema change needed](./decisions.md#payment-verification-bulk-import-no-schema-change-needed)
+for why: `entry_payments` already had every column needed, and identifier (email/
+phone) resolution — the one capability that genuinely didn't exist anywhere in the
+codebase — is reachable via the service-role client's existing GoTrue Admin API
+(`auth.admin.listUsers()`), not a new SQL function or view. A real bug was found and
+fixed during live verification: GoTrue stores phone numbers without their leading
+`+` (E.164 in, digits-only out, confirmed live) — phone matching now strips a
+leading `+` from the CSV identifier before comparing. Verified live, end-to-end,
+through the real application: manual paid/unpaid, CSV import (valid rows, duplicate
+identifiers, unknown users — both an unregistered email and a phone number in the
+wrong format — unknown pots, an invalid status value, rows already in their target
+state), and settlement correctly respecting a payment verified via CSV (an entry
+that would otherwise void settled and won its pot once its CSV row was applied).
+The `trg_create_entry_payment`-not-attached-to-`game_entries` gap this issue's entry
+previously extended to remains accurate and unfixed (still true, still non-blocking
+for the reasons already recorded) — not this issue's concern to close, since
+`admin-actions`' `mark_paid`/`bulk_verify_payments` never depended on that trigger's
+placeholder row existing first.
 
 #### ISSUE-29 — `supabase_realtime` publication had zero tables registered; every realtime subscription was silently non-functional
 **Discovered and resolved 2026-08-05**, during the production hardening sprint

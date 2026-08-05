@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom'
+import { CreditCard } from 'lucide-react'
 import { useTriggerSync, useSyncLogs } from '../hooks/useAdmin'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
@@ -36,6 +38,17 @@ export default function AdminDashboard() {
       </Card>
 
       <div className="grid md:grid-cols-2 gap-4">
+        <Card className="p-4 space-y-3">
+          <h2 className="text-sm font-semibold text-white">Payment verification</h2>
+          <p className="text-xs text-white/40">Mark entries paid/unpaid, single or via CSV import.</p>
+          <Link to="/admin/payments">
+            <Button fullWidth variant="secondary">
+              <CreditCard size={16} />
+              Open payment verification
+            </Button>
+          </Link>
+        </Card>
+
         <Card className="p-4 space-y-3">
           <h2 className="text-sm font-semibold text-white">Manual jobs</h2>
           <Button fullWidth variant="secondary" loading={syncFixtures.isPending} onClick={() => runSync(syncFixtures, 'Fixture sync')}>
