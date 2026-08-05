@@ -102,6 +102,32 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: err instanceof Error ? err.message : 'Validation failed' }, 500)
   }
 
+  // Production readiness audit (2026-08-05): validateEntry() above checked
+  // entry.status against the snapshot read at the top of this request — if
+  // compute-deadlines locks this entry in the (typically millisecond-scale,
+  // but real) window between that read and this write, the pending check
+  // above would have already passed on stale data, and the write below
+  // would otherwise proceed against a now-locked entry with no further
+  // check. Re-verified directly, immediately before the write, to close
+  // that window as tightly as this request can — not a full re-run of
+  // validateEntry() (picks/eligibility can't have changed in that window,
+  // only entry status can), just the one fact that actually can.
+  const { data: freshEntry, error: freshEntryError } = await adminClient
+    .from('game_entries')
+    .select('status')
+    .eq('id', gameEntryId)
+    .single()
+
+  if (freshEntryError) {
+    return jsonResponse({ error: freshEntryError.message }, 500)
+  }
+  if (freshEntry.status !== 'pending') {
+    return jsonResponse(
+      { error: `Entry is ${freshEntry.status}, not pending — picks can no longer be changed` },
+      400
+    )
+  }
+
   const rows = playerIds.map((playerId, index) => ({
     game_entry_id: gameEntryId,
     pick_position: index + 1,

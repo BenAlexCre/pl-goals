@@ -46,6 +46,7 @@ export default function PotDetailPage() {
   const [memberEntries, setMemberEntries] = useState([])
 
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [positionFilter, setPositionFilter] = useState('')
   const [teamFilter, setTeamFilter] = useState('')
   const [selectedPlayers, setSelectedPlayers] = useState([])
@@ -215,8 +216,8 @@ export default function PotDetailPage() {
           .neq('position', 'Goalkeeper')
           .order('display_name', { ascending: true })
 
-        if (search.trim()) {
-          const term = search.trim().replace(/[%_]/g, '')
+        if (debouncedSearch.trim()) {
+          const term = debouncedSearch.trim().replace(/[%_]/g, '')
           query = query.or(
             `display_name.ilike.%${term}%,team_name.ilike.%${term}%,team_short_name.ilike.%${term}%`
           )
@@ -509,6 +510,17 @@ export default function PotDetailPage() {
     syncFilterData()
   }, [selectedGameweekId])
 
+  // Production readiness audit (2026-08-05): this previously re-queried
+  // available_players_by_gameweek on every keystroke (search was a direct
+  // effect dependency) — a real query per character typed, against a view
+  // joining four tables with an ilike/or filter. Debounced so a query only
+  // fires once typing pauses; `search` itself still updates the input
+  // immediately for responsive UI feedback, only the query trigger is delayed.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300)
+    return () => clearTimeout(timer)
+  }, [search])
+
   useEffect(() => {
     async function syncPlayers() {
       try {
@@ -520,7 +532,7 @@ export default function PotDetailPage() {
     }
 
     syncPlayers()
-  }, [selectedGameweekId, search, positionFilter, teamFilter])
+  }, [selectedGameweekId, debouncedSearch, positionFilter, teamFilter])
 
   useEffect(() => {
     async function syncSavedEntry() {

@@ -1,0 +1,37 @@
+-- Production readiness audit (2026-08-05): a full live audit of pg_policies
+-- (not just the documented set in 002_rls_policies.sql) found several
+-- policies that were never captured in any migration — the same
+-- out-of-band pattern already documented for ISSUE-1 (a Supabase
+-- Studio/SQL-Editor change made directly against the live database).
+-- Cross-checked every undocumented policy found; almost all of them are
+-- functionally redundant duplicates of an already-documented, equally or
+-- more permissive policy (harmless — RLS policies for the same command are
+-- OR'd together, so a narrower duplicate never restricts anything; not
+-- touched here, since dropping them changes nothing observable and isn't
+-- the point of a hardening pass). Two were not redundant — both dropped
+-- below, both confirmed via grep to have zero legitimate caller anywhere in
+-- the frontend or Edge Functions:
+--
+-- 1. public.pots — "users can delete pots they admin" (DELETE, authenticated,
+--    creator or pot-admin). database.md's own RLS summary documents pots as
+--    having NO delete policy at all, by design ("select | insert | update |
+--    —" — delete is the one blank cell). Deleting a pot cascades to
+--    pot_members/entry_payments/user_entries (on delete cascade,
+--    001_initial_schema.sql) — a real, irreversible data-loss vector for a
+--    capability the application never intended to expose and no frontend
+--    code calls.
+--
+-- 2. public.leagues — "allow import writes" (INSERT, authenticated,
+--    with check (true)). leagues is reference data; database.md documents
+--    it (like every other reference table) as read-only for clients —
+--    written only by sync-fixtures via its service-role client, which
+--    bypasses RLS and does not need this policy to function.
+--    `with check (true)` is the least-restrictive check possible, exactly
+--    the anti-pattern engineering-principles.md's own Security section
+--    warns against ("default to owner-only or pot-member-only access...
+--    not using (true) for convenience"). Any signed-up user could insert
+--    arbitrary rows into shared reference data — confirmed exploitable
+--    (self-serve signup exists), confirmed unused by any legitimate path.
+
+drop policy if exists "users can delete pots they admin" on public.pots;
+drop policy if exists "allow import writes" on public.leagues;

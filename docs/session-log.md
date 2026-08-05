@@ -13,6 +13,84 @@ from here.
 
 ---
 
+## 2026-08-05 (24) — Pick 5 production hardening sprint
+
+**Goal:** the frontend cutover (entry 23) was committed. Instead of starting
+Milestone 5 (LMS), the repo owner asked for a complete production-readiness
+audit of the entire Pick 5 system — database, migrations, RLS, indexes, Edge
+Functions, Game Engine, frontend, React Query, auth, realtime, notifications,
+admin actions, Payment Verification, documentation — classified P0–P3, with
+only P0s and small/safe P1s actually implemented.
+
+**Biggest findings, both from a live `pg_policies`/`pg_publication_tables`
+audit that went deeper than the previous production-readiness audit's static
+read:**
+- `supabase_realtime` had **zero tables registered** (`puballtables = false`,
+  confirmed via direct query) — every `postgres_changes` subscription in the
+  app (`useLiveScores.js`) had been silently non-functional the whole time,
+  no error anywhere. Fixed: `011_realtime_publication.sql` (`ISSUE-29`).
+- `pots` had an undocumented DELETE policy (any creator/admin could delete
+  their own pot, cascading real data loss) and `leagues` had an undocumented
+  `with check (true)` INSERT policy (any signed-up user could write arbitrary
+  reference data) — neither in any migration, neither used by any legitimate
+  code path, both contradicting `database.md`'s documented design. Fixed:
+  `012_drop_undocumented_rls_policies.sql` (`ISSUE-30`/`ISSUE-31`). A further
+  ~15 redundant-but-harmless duplicate policies found across `pot_members`/
+  `user_entries`/`user_entry_picks`/`profiles` — real migration/live drift,
+  not a security gap (each is a subset of an already-documented policy) —
+  logged as `ISSUE-28`, not bulk-dropped (needs per-policy verification).
+
+**Also fixed:** `settle-gameweek`/`Pick5Engine.settle()` had no per-gameweek/
+per-pot failure isolation — one misconfigured pot's `Pick5PrizePoolExceededError`
+silently aborted settlement for every other unrelated pot/gameweek in the same
+batch, with no structured error anywhere. Both loops now isolate failures and
+report them (`{ success, errors: [...] }` from the Edge Function; a single
+aggregated `Error` from `settle()`, since its return type is part of the fixed
+`GameEngine` contract and can't change) — see
+[decisions.md § Failure isolation](./decisions.md#failure-isolation-one-pots-gameweeks-error-must-never-block-anothers).
+A TOCTOU race in `submit-pick5-picks` (entry status checked once at the top of
+the request, not re-checked before the write) narrowed with a fresh re-check
+immediately before the `pick5_picks` write. `PotDetail.jsx`'s player search
+had no debounce — a real query per keystroke against a 4-table view join —
+fixed with a 300ms debounce.
+
+**Found, documented, deliberately not fixed:** `ISSUE-26`
+(`compute-deadlines`/`compute-scores`/`settle-gameweek` accept unauthenticated
+requests — needs a product decision, since a blind service-role-only gate
+would break `AdminDashboard.jsx`'s existing manual-trigger buttons, which use
+the signed-in user's own session token); `ISSUE-27` (`PotDetail.jsx`'s five
+data-loading effects have no stale-response guard — a real, narrow race
+condition, folds into `ISSUE-10`'s eventual fix rather than a standalone
+patch); documentation drift in `api.md`/`database.md` (still describe
+pre-Milestone-4 behavior for `compute-scores`/`settle-gameweek` — too large a
+rewrite for this pass); the legacy `user_entries`/`leaderboard_snapshots` code
+paths in `compute-scores`/`settle-gameweek` are now provably dead weight
+(zero real traffic reaches them since the frontend cutover) but removing
+"working" code deserves its own deliberate pass, not a blind rip-out here.
+
+**Verification:** 88/88 Deno unit tests pass (1 new, covering `settle()`'s
+per-pot isolation). RLS/realtime fixes confirmed directly against
+`pg_publication_tables`/`pg_policies` live. The failure-isolation fix proven
+live and end-to-end: two real gameweeks, one hosting a deliberately
+misconfigured pot, one hosting a healthy one, both settled in a single real
+`settle-gameweek` invocation — the healthy gameweek's pot was fully settled
+(entries, standings, correct `net_amount`, prize awarded) despite the other
+gameweek's pot failing, and the response correctly identified which gameweek
+and pot failed and why. All test data removed by exact ID; `deadline_utc`
+restored via a real `compute-deadlines` call after the same, already-known
+`ISSUE-24` drift recurred yet again.
+
+**Documentation updated:** `current-state.md` (`ISSUE-26`/`27`/`28` opened;
+`ISSUE-29`/`30`/`31` added directly to Resolved issues), `decisions.md` (two
+new ADRs: failure isolation, and the TOCTOU re-check pattern), `game-engine.md`
+(a note on `settle()`'s hardened error handling), `project-board.md`.
+
+**Status:** implemented and fully verified. **Not committed** — per explicit
+instruction. Milestone 5 (LMS) not started — per explicit instruction.
+Awaiting the repo owner's review.
+
+---
+
 ## 2026-08-05 (23) — Pick 5 frontend cutover: retired user_entries/user_entry_picks/leaderboard_snapshots
 
 **Goal:** the production readiness audit (entry 22) identified its top Critical

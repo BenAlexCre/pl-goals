@@ -981,6 +981,50 @@ Deno.test('settle does not call generateStandings for a pot with no entries this
   )
 })
 
+Deno.test('settle isolates one pot\'s awardPrize failure so other pots in the same gameweek still get standings and prizes', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-bad', 'pot-good'],
+    potFeeConfig: {
+      // admin fee (20) exceeds gross (entry_fee 10 x 1 entry = 10) -> Pick5PrizePoolExceededError
+      'pot-bad': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 20 },
+      'pot-good': { entry_fee: 10 },
+    },
+    gameEntries: [
+      { id: 'entry-bad', pot_id: 'pot-bad', user_id: 'user-bad', gameweek_id: 4, status: 'locked', settled_at: null },
+      { id: 'entry-good', pot_id: 'pot-good', user_id: 'user-good', gameweek_id: 4, status: 'locked', settled_at: null },
+    ],
+    entryPayments: [
+      { pot_id: 'pot-bad', user_id: 'user-bad', gameweek_id: 4, scope: 'gameweek', is_paid: true },
+      { pot_id: 'pot-good', user_id: 'user-good', gameweek_id: 4, scope: 'gameweek', is_paid: true },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.settle(ctx, 4), Error, 'pot-bad')
+
+  assertEquals(
+    db.potPrizes.some((p) => p.pot_id === 'pot-good'),
+    true,
+    'the unrelated, correctly-configured pot must still be awarded despite pot-bad failing'
+  )
+  assertEquals(
+    db.potPrizes.some((p) => p.pot_id === 'pot-bad'),
+    false,
+    'the misconfigured pot correctly has no prize row — its own pre-check already prevented that write'
+  )
+  assertEquals(
+    db.potStandingsSnapshots.some((s) => s.pot_id === 'pot-good'),
+    true,
+    'the unrelated pot\'s standings must still be generated'
+  )
+  assertEquals(
+    db.gameEntries.find((e) => e.id === 'entry-good')?.status,
+    'settled',
+    'entry finalization (voiding/settling) for both pots already happened before the per-pot loop and is unaffected either way'
+  )
+})
+
 // --- generateStandings() (direct calls, not via settle()) -----------------
 
 Deno.test('generateStandings ranks by cumulative picks_won, ties sharing a rank (ISSUE-17)', async () => {

@@ -353,7 +353,12 @@ are both called from *within* `awardPrize()` itself, not as separate self-calls 
 `settle()` — `awardPrize()` is the one method that already resolves the
 idempotent-no-op-vs-real-award question, so it's the natural single call site for both.
 See [decisions.md § Notifications](./decisions.md#notifications-domain-events-not-delivery)
-for why this doesn't contradict the diagram below.
+for why this doesn't contradict the diagram below. **As hardened (production
+readiness sprint, 2026-08-05):** `settle()`'s per-pot loop and
+`settle-gameweek/index.ts`'s per-gameweek loop each isolate failures in their
+own try/catch, so one pot's or one gameweek's failure (e.g.
+`Pick5PrizePoolExceededError`) can no longer block unrelated pots/gameweeks in
+the same batch — see [decisions.md § Failure isolation](./decisions.md#failure-isolation-one-pots-gameweeks-error-must-never-block-anothers).
 
 ### GE-8.5 Payment Verification flow
 Shared `admin-actions` (`mark_paid`/`mark_unpaid`), unchanged in shape, now writing to the

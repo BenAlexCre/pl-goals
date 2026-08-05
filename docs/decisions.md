@@ -524,3 +524,65 @@ the "call from the method that already resolved idempotency," and the
 "failure is caught and logged, never allowed to block money" pattern all
 generalize identically — none of this slice's implementation is Pick-5-specific
 except the one `pick5.prize_awarded` event type itself.
+
+## Failure isolation: one pot's/gameweek's error must never block another's
+
+**Decided 2026-08-05**, during the production hardening sprint audit, after live
+evidence that it mattered: `Pick5PrizePoolExceededError` — a real, documented,
+intentional failure mode (a misconfigured pot's fees exceed its gross pool) —
+previously propagated, uncaught, out of `Pick5Engine.settle()`'s per-pot loop and
+`settle-gameweek/index.ts`'s per-gameweek loop alike. One misconfigured pot could
+silently halt standings/prize processing for every *other*, unrelated,
+correctly-configured pot in the same gameweek, and every *other* gameweek in the
+same batch invocation — with no structured error anywhere, since
+`settle-gameweek` deliberately writes no `sync_runs` row (GE-19's Settlement
+diagram doesn't call for one). This directly undermined the "fail loudly" intent
+behind `Pick5PrizePoolExceededError`/`Pick5NoEligibleWinnersError` in the first
+place (Milestone 4 Slice 8) — the errors were thrown loudly, into a void nothing
+caught.
+
+**What:** both loops now isolate each unit of work (pot, gameweek) in its own
+try/catch, so a failure in one never prevents the others from being attempted.
+`Pick5Engine.settle()`'s return type is part of the fixed `GameEngine` contract
+(GE-6) and can't change to return a per-pot error list, so it collects failures
+per pot, finishes attempting every pot regardless, and — only if one or more
+failed — throws a single aggregated error identifying which pot(s) and why,
+after everything that *could* succeed already has.
+`settle-gameweek/index.ts` mirrors the same shape one layer up: each gameweek's
+processing is wrapped in its own try/catch, errors are collected into an
+`errors: [{ gameweek_id, message }]` array, and the response's `success` field
+reflects whether any occurred — replacing an unstructured raw 500 with a
+response that names exactly what failed and what didn't.
+
+**Why this is a hardening fix, not a redesign:** neither method's job changed
+("finalize this gameweek's outcome," "identify winners and split the pool") —
+only what happens when one unit of that job fails changed, from "abort
+everything else too" to "isolate and report." No interface changed, no new
+behavior was added for the success path (verified: existing test suite
+unaffected, 88/88 pass including the new isolation test).
+
+**Verified live**, not just via unit test: two real gameweeks, one hosting a
+pot with fees exceeding its gross pool, one hosting a correctly-configured pot,
+both settled in a single real `settle-gameweek` invocation. The
+correctly-configured gameweek's pot was fully settled (entries settled,
+standings written, `net_amount` correct, prize awarded) despite the other
+gameweek's pot failing; the response's `errors` array correctly identified the
+failing gameweek and pot.
+
+## Same-request write races get a re-check immediately before the write, not a redesign
+
+**Decided 2026-08-05**, same audit. `submit-pick5-picks` read `game_entries.status`
+once, at the top of the request, and `Pick5Engine.validateEntry()` checked that
+snapshot — leaving a real (if narrow, typically millisecond-scale) window
+between that read and the `pick5_picks` write during which `compute-deadlines`
+could lock the entry, with nothing re-checking status at write time. Fixed with
+a direct re-read of `game_entries.status` immediately before the write, aborting
+with the same "not pending" message `validateEntry()` already uses if the status
+changed. Not a full re-run of `validateEntry()` (picks/eligibility can't change
+mid-request, only entry status can) and not a database-level constraint or
+trigger (a more invasive, schema-level fix that would close the window
+completely but wasn't judged a "small, low-risk" hardening change) — this
+narrows the window as tightly as a single request can, consistent with the
+"best-effort, not perfect" mitigation already accepted elsewhere in this
+codebase (e.g. `get-or-create-pick5-entry`'s `23505`-conflict fallback for
+concurrent entry creation).

@@ -159,6 +159,28 @@ deliberate decision on which value is actually correct (this repo's own
 documentation says 30 minutes) before either removing the trigger or updating
 `compute-deadlines` to match it.
 
+#### ISSUE-26 — `compute-deadlines`/`compute-scores`/`settle-gameweek` accept unauthenticated requests
+**Discovered 2026-08-05**, during the production hardening sprint audit. Unlike
+`get-or-create-pick5-entry`/`submit-pick5-picks`/`admin-actions` (all of which
+require and verify a caller JWT), these three Edge Functions have no
+`Authorization` check at all — any caller with the public anon key (embedded in
+the frontend bundle, or trivially obtainable) can invoke settlement, scoring, or
+deadline computation directly and repeatedly, with `settle-gameweek` additionally
+accepting an arbitrary `gameweek_id` body parameter. Broader and more specific
+than `ISSUE-9` (which is scoped to `/admin`'s missing UI-level role gate) — this
+is the underlying Edge Functions themselves having no server-side authentication,
+and it now also gates money-moving logic (`Pick5Engine.awardPrize()`) since the
+Pick 5 frontend cutover. **Status: confirmed, not fixed.** Mitigated somewhat by
+idempotency (repeated calls are safe no-ops) and by `settle-gameweek`'s "all
+fixtures finished" gate (blocks premature settlement, not abusive/repeated
+invocation). **Deliberately not fixed in the hardening sprint**: `AdminDashboard.jsx`'s
+"Manual jobs" buttons (`hooks/useAdmin.js:useTriggerSync`) call these same three
+functions using the signed-in user's own session token, not the service-role key
+— a naive "service-role-only" gate would silently break that existing, real
+UI feature. The correct fix needs a product decision (mirror `admin-actions`'
+pattern: allow either a valid app-admin session or the service-role key), not a
+blind lockdown; flagging for a deliberate pass rather than guessing.
+
 #### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
 **Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
 (26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
@@ -483,6 +505,45 @@ Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-ha
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
 
+#### ISSUE-27 — `PotDetail.jsx`'s data-loading effects have no stale-response guard
+**Discovered 2026-08-05**, during the production hardening sprint audit.
+`PotDetail.jsx` has five separate `useEffect` hooks driving async loads
+(`loadFilterSourceRows`, `loadPlayers`, `loadSavedEntry`, `loadMemberEntries`,
+plus the initial `loadPot`/`loadMembers`/`loadGameweeks`), none of which guard
+against out-of-order resolution — unlike `hooks/useAuth.js`'s auth-state effect,
+which uses a `mounted` flag for exactly this reason. **Status: confirmed** (directly
+readable from the effects' source — none check a cancellation flag or an
+`AbortController` before calling `setState`). If a user changes the selected
+gameweek quickly (e.g. picks GW1 then immediately GW2), and GW1's fetch resolves
+after GW2's, GW1's stale data can overwrite the already-correct GW2 render. Low
+real-world likelihood at current usage patterns (requires two selections within
+one network round-trip), but genuinely reachable, not theoretical. Same root
+cause as `ISSUE-10` (this component's imperative fetch style, not the shared
+hook layer) — the correct fix is likely part of that same eventual conversion to
+`hooks/`, not a standalone patch to five independent effects. Not fixed in the
+hardening sprint (bigger than a small, low-risk change).
+
+#### ISSUE-28 — Numerous undocumented, redundant RLS policies not captured in any migration
+**Discovered 2026-08-05**, during a full live audit of `pg_policies` (not just the
+policies documented in `002_rls_policies.sql`) as part of the production
+hardening sprint. `pots`, `pot_members`, `user_entries`, `user_entry_picks`, and
+`profiles` all have 2–6 more live policies than their migrations define — the
+same out-of-band pattern already known from `ISSUE-1`, just more extensive than
+previously documented there. Confirmed, table by table, that every one of these
+extra policies is functionally redundant with an already-documented,
+equally-or-more-permissive policy for the same command (RLS policies for the
+same command are OR'd together, so a narrower duplicate never restricts
+anything) — harmless to current security posture, but real drift between
+`supabase/migrations/` and the live database, contradicting
+`engineering-principles.md`'s "every schema change is a migration" rule and
+making the migration history untrustworthy as a complete record. **Two
+exceptions, both were NOT redundant and were fixed directly — see
+[Resolved issues § ISSUE-30 / ISSUE-31](#resolved-issues).** Not fixed for the
+harmless duplicates themselves — dropping ~15 policies safely requires
+confirming each one individually adds no capability beyond its documented
+sibling, which is more verification than a "small, low-risk" hardening pass
+allows; recommend a dedicated cleanup pass, not a blind bulk drop.
+
 #### ISSUE-10 — Duplicated data-fetching pattern
 `pages/PotDetail.jsx` and `components/pot/potManager.jsx` re-implement data
 fetching/mutation with local `useState`/`useEffect` + direct `supabase.from(...)`
@@ -551,6 +612,57 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-29 — `supabase_realtime` publication had zero tables registered; every realtime subscription was silently non-functional
+**Discovered and resolved 2026-08-05**, during the production hardening sprint
+audit. `select * from pg_publication_tables where pubname = 'supabase_realtime'`
+returned zero rows live, and `pg_publication.puballtables = false` — meaning
+`frontend/src/hooks/useLiveScores.js`'s four `postgres_changes` subscriptions
+(`fixtures`, `fixture_events`, `fixture_player_status`, `pick5_picks`) never
+received a single change event, ever, with no error raised anywhere — the
+subscription callback simply never fires. "Live pick outcomes"
+(`architecture.md` § Request flow, `GameweekPage.jsx`'s own header text) had
+never actually updated in real time in this environment, only via each hook's
+own polling fallback (`refetchInterval`/`staleTime`). Not in any migration —
+same out-of-band pattern as `ISSUE-1`/`ISSUE-21`/`ISSUE-24`.
+`011_realtime_publication.sql` adds `fixtures`, `fixture_events`, and
+`pick5_picks` to the publication (`fixture_player_status` deliberately excluded
+— it isn't itself in any migration, `ISSUE-2`, so adding it would break replay
+from an empty database; add it once that table gets a proper migration).
+Verified live: `pg_publication_tables` now lists all three. Realtime respects
+each subscriber's own RLS policies for `postgres_changes` — this is Supabase's
+documented default behavior, unaffected by this fix — so no RLS/security
+posture changed, only the previously-dead change-stream was restored.
+
+#### ISSUE-30 — Undocumented `pots` DELETE policy allowed a pot's creator/admin to delete it directly
+**Discovered and resolved 2026-08-05**, during the same audit. A live-only
+policy, `"users can delete pots they admin"` (`DELETE`, authenticated, creator
+or pot-admin), existed with no corresponding migration.
+[database.md](./database.md)'s own RLS summary documents `pots` as having **no**
+delete policy at all, by design. Deleting a pot cascades to
+`pot_members`/`entry_payments`/`user_entries` (`on delete cascade`,
+`001_initial_schema.sql`) — a real, irreversible data-loss path for a
+capability the application never intended and no frontend code calls (confirmed
+via grep: nothing in `frontend/src` ever calls `.from('pots').delete(...)`).
+Dropped via `012_drop_undocumented_rls_policies.sql`. Verified live: `pots` now
+has only the three documented commands (select/insert/update), no delete.
+
+#### ISSUE-31 — Undocumented `leagues` INSERT policy allowed any authenticated user to write arbitrary reference data
+**Discovered and resolved 2026-08-05**, during the same audit. A live-only
+policy, `"allow import writes"` (`INSERT`, authenticated, `with check (true)`),
+existed with no corresponding migration. `leagues` is reference data —
+[database.md](./database.md) documents every reference table (seasons, leagues,
+teams, players, gameweeks, fixtures, fixture_events) as read-only for clients,
+written only by `sync-fixtures` via its service-role client, which bypasses RLS
+and never needed this policy. `with check (true)` is the least-restrictive
+check possible — the exact anti-pattern
+[engineering-principles.md](./engineering-principles.md#security) warns against
+("default to owner-only or pot-member-only access... not `using (true)` for
+convenience"). Any signed-up user (self-serve signup exists) could have
+inserted arbitrary rows into shared reference data, with no legitimate path
+depending on the ability to do so. Dropped via
+`012_drop_undocumented_rls_policies.sql`. Verified live: `leagues` now has only
+the two (redundant, harmless) read policies.
 
 #### ISSUE-1 — Pot creation likely violates its own RLS policy
 **Resolved, confirmed live 2026-08-03** (verification, not a fix performed this

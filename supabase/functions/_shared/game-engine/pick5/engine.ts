@@ -437,10 +437,36 @@ export class Pick5Engine implements GameEngine {
     // gameweek nobody paid for and, via getMostRecentGameweekWithStandings(),
     // either no-ops against an already-awarded earlier gameweek or has
     // nothing to do at all.
+    // Production readiness audit (2026-08-05): a single pot's awardPrize()
+    // failure (e.g. Pick5PrizePoolExceededError — a real, documented
+    // failure mode) used to propagate straight out of this loop, so every
+    // other pot in the same gameweek — entirely unrelated, correctly
+    // configured — silently never got its standings/prize processed
+    // either. Each pot's processing is now isolated; entry
+    // voiding/settlement above (already durably written) is unaffected
+    // either way. settle()'s own return type is part of the fixed
+    // GameEngine contract (GE-6) and can't change to return a per-pot
+    // error list, so failures are collected and, if any occurred, raised
+    // as a single aggregated error only after every pot has had its
+    // chance to process — not on the first failure. settle-gameweek's own
+    // per-gameweek try/catch (the identical fix, one layer up) is what
+    // actually catches this and keeps it from blocking other gameweeks.
     const distinctPotIds = [...new Set(entries.map((e: { pot_id: string }) => e.pot_id))]
+    const potErrors: { potId: string; message: string }[] = []
     for (const potId of distinctPotIds) {
-      await this.generateStandings(ctx, potId)
-      await this.awardPrize(ctx, potId)
+      try {
+        await this.generateStandings(ctx, potId)
+        await this.awardPrize(ctx, potId)
+      } catch (err) {
+        potErrors.push({ potId, message: err instanceof Error ? err.message : String(err) })
+      }
+    }
+
+    if (potErrors.length > 0) {
+      throw new Error(
+        `settle() finalized entries for gameweek ${gameweekId}, but standings/prize processing failed for ${potErrors.length} pot(s): ` +
+          potErrors.map((e) => `${e.potId}: ${e.message}`).join('; ')
+      )
     }
   }
 
