@@ -213,6 +213,14 @@ rollover competition is a brand-new pot with brand-new entries (see
 "Roll Prize" below), so every entrant's available-team pool starts fresh
 there naturally, not because anything reset mid-competition.
 
+**When picks lock.** Each gameweek's pick locks independently, at that
+gameweek's own deadline (the same 30-minutes-before-earliest-kickoff rule
+as Pick 5 — see [§ When picks lock](#when-picks-lock)) — locking one
+gameweek's pick never affects any other gameweek. This is different from
+Pick 5, where locking an entry locks the entry as a whole: an LMS entry
+lasts the whole competition, so only the individual pick can lock, never
+the entry itself.
+
 **Wipeout and Wipeout Resolution.** Every LMS pot has a required,
 immutable-once-entries-exist setting, **Wipeout Resolution** — `Split Prize`
 or `Roll Prize` — chosen when the pot is created. It only matters for a
@@ -274,11 +282,12 @@ whenever during the draft phase they join, pays exactly one entry fee — the
 new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
-**Status: entry creation (`ISSUE-32`'s entry-window rule included) and pick
-submission are implemented and verified live, 2026-08-05** — see
-[current-state.md § Resolved issues](./current-state.md#resolved-issues)
-and [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented).
-Pick submission enforces the no-repeat-team rule above via a real database
+**Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
+submission, and locking are implemented and verified live, as of
+2026-08-06** — see [current-state.md § Resolved issues](./current-state.md#resolved-issues),
+[decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
+and [decisions.md § LMS locking](./decisions.md#lms-locking). Pick
+submission enforces the no-repeat-team rule above via a real database
 constraint, not just application logic. Elimination itself (turning a loss
 into `competitive_status = eliminated`), wipeout resolution, season-end
 resolution, and — most visibly — automatic rollover-pot creation and the

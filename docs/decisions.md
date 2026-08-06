@@ -1028,3 +1028,85 @@ rejected. All test data (picks, `game_entry_lms`, `game_entries`,
 order, and re-verified as zero rows afterward — the ordering lesson from
 the `ISSUE-32` verification session was applied here from the start, not
 re-learned.
+
+## LMS locking
+
+**Decided 2026-08-06**, ahead of Milestone 5 Slice 3, per the repo owner's
+explicit "review Pick 5's locking first, reuse what's reusable, identify
+only the LMS-specific differences" instruction.
+
+**What's fully reusable, unchanged:** the `GameEngine.lockEntries(ctx,
+gameweekId): Promise<number>` contract signature; deadline computation
+itself (`gameweeks.earliest_kickoff_utc`/`deadline_utc`, `compute-deadlines`
+§ GE-8.2); the dispatcher pattern.
+
+**What genuinely differs, and why — found by reasoning through the schema
+before writing code, not by a live failure:**
+
+1. **"Locking the entry" doesn't make sense for LMS.** Pick5Engine's
+   `lockEntries()` flips `game_entries.status` from `pending` to `locked`.
+   That's correct for Pick 5 because a gameweek-scoped entry has no life
+   beyond that one gameweek. LMS's `game_entries` is season-scoped
+   (GE-4.5) — one row for the whole competition — so locking it at gameweek
+   13's deadline would make it impossible to ever submit a pick for
+   gameweek 14. What actually needs to become immutable at a deadline is
+   the individual gameweek's *pick*, not the entry. `LmsEngine.lockEntries()`
+   instead sets a new column, `lms_team_picks.locked_at`
+   (`016_lms_team_picks_locked_at.sql`) — this is also simpler than
+   Pick5Engine's version: no pot-id/game-type filter is needed, because
+   `lms_team_picks` is written only by `submit-lms-pick`, itself gated to
+   `last_man_standing` pots, so every row already belongs to LMS
+   unambiguously.
+2. **`validateEntry()` needs a live deadline check LMS-side, unlike Pick 5's
+   stored-status check.** Pick 5 can gate a submission on
+   `entry.status !== 'pending'` because `lockEntries()` is the one thing
+   that ever changes that field. LMS has no equivalent single flag to check
+   — `game_entries.status` stays `pending` all competition, and a pick
+   might not exist yet for the gameweek being submitted (so there's no
+   `locked_at` to check either, for a brand-new pick). `LmsEngine.validateEntry()`
+   therefore queries `gameweeks.deadline_utc` directly and compares against
+   `ctx.now()`. `lms_team_picks.locked_at` still gets set by
+   `lockEntries()` regardless — genuinely useful as an explicit, queryable
+   "this pick is final" signal for `calculateScore()`/`settle()` (Slice
+   4/5), just not the mechanism `validateEntry()` itself checks.
+3. **A real, load-bearing bug found in the *shared* `compute-deadlines`
+   function, not LMS-specific duplication to fix.** Its discovery step
+   (find which game types have entries needing locking for a gameweek)
+   queried `game_entries.gameweek_id = <this gameweek>` — which can never
+   match an LMS row, since `game_entries.gameweek_id` is always `null` for
+   LMS (GE-4.5). This function's own comment, written during Milestone 4
+   Slice 3, explicitly assumed this would "work unchanged once LMS/Predictor
+   register... since only Pick 5 has any [gameweek-scoped entries] today" —
+   an assumption that turned out to be wrong the moment a season-scoped
+   mode needed locking. Found by reading the existing code before writing
+   any LMS locking logic, not by a live failure. Fixed by replacing the
+   pre-filter entirely: `compute-deadlines` now calls every `isRegistered()`
+   mode's `lockEntries()` unconditionally on every due gameweek, trusting
+   each mode's own implementation to no-op cheaply when there's nothing to
+   lock (both `Pick5Engine`'s and `LmsEngine`'s already do). This is a
+   genuine shared-platform fix, not LMS-specific code living in a shared
+   file — `compute-deadlines` still has zero mode-specific branches.
+
+**What's still not decided, flagged rather than guessed:** what happens to
+an entry that never submitted a pick for a gameweek that has now locked.
+"No pick = eliminated" is a plausible reading of "Last Man Standing," but
+it is not stated anywhere in the product decisions this session has
+received, and inventing it would violate the standing "never invent
+undocumented business rules" instruction. `lockEntries()` simply has
+nothing to lock for such an entry (no `lms_team_picks` row exists) and
+does nothing further — no elimination, no notification. This needs an
+explicit product decision before `calculateScore()`/`settle()` can be
+designed, since those methods will need to know what a "no pick" outcome
+means for standings and elimination.
+
+**Verified live**, through the real Edge Functions, not just unit tests: a
+pick submitted before its gameweek's deadline; the real `compute-deadlines`
+function (not a direct engine call) locking that pick once its gameweek's
+fixture — and therefore computed deadline — moved into the past; a further
+submission attempt for that now-locked gameweek correctly rejected. Test
+gameweeks/fixtures were used instead of real ones specifically to avoid
+disturbing live Premier League fixture data, and incidentally re-confirmed
+`ISSUE-24`'s undocumented trigger live again (recomputing a fresh test
+gameweek's `earliest_kickoff_utc` to `null` because it briefly had no
+fixtures of its own) — worked around by giving that gameweek a fixture too,
+not by touching the trigger, since fixing `ISSUE-24` is out of scope here.

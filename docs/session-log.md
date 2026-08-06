@@ -13,6 +13,60 @@ from here.
 
 ---
 
+## 2026-08-06 (32) — Milestone 5 Slice 3: LMS locking
+
+**Goal:** Slice 2 was reviewed, approved, committed, and pushed. Begin
+Slice 3 — same vertical-slice approach, review Pick 5's `lockEntries()`
+first, reuse what's reusable, implement only the genuine LMS differences.
+
+**Review, before writing code:** Pick5Engine.lockEntries() flips
+`game_entries.status` `pending → locked`, gated by a `compute-deadlines`
+pre-filter that queries `game_entries.gameweek_id = <this gameweek>`.
+Reasoned through both pieces against LMS's season-scoped shape (GE-4.5)
+before writing anything: (1) locking the season-scoped entry itself would
+break every future gameweek's picks — wrong; (2) the `compute-deadlines`
+pre-filter can never match an LMS row at all, since `game_entries.gameweek_id`
+is always null for LMS — a real, load-bearing gap in shared code, not
+something LMS-specific to work around.
+
+**Implemented:** `LmsEngine.lockEntries()` sets a new column,
+`lms_team_picks.locked_at` (`016_lms_team_picks_locked_at.sql`, applied) —
+locks the individual gameweek's pick, not the entry. `validateEntry()`
+gained a live `gameweeks.deadline_utc` check (Pick 5's stored-status check
+has no LMS equivalent — nothing else changes `game_entries.status`
+mid-competition for LMS). Fixed `compute-deadlines` itself: replaced the
+broken discovery pre-filter with an unconditional "call every
+`isRegistered()` mode's `lockEntries()`" loop, trusting each mode's own
+no-op efficiency — simpler than before, and genuinely mode-agnostic rather
+than incidentally so. Full reasoning: [decisions.md § LMS locking](./decisions.md#lms-locking).
+
+**Verified:** 7 new unit tests (140/140 total pass — 3 new `validateEntry()`
+deadline cases, 4 `lockEntries()` cases via an in-memory-mutation fake,
+mirroring Pick5Engine's own test pattern). Live, through the real
+`compute-deadlines` function (not a direct engine call, and not real
+Premier League fixtures — dedicated test gameweeks/fixtures used instead,
+cleaned up by exact ID): a pick submitted while its gameweek's deadline was
+still in the future; that gameweek's one fixture moved into the past; a
+real `compute-deadlines` invocation correctly recomputed the deadline and
+locked the pick; a further submission attempt for that gameweek correctly
+rejected with a deadline-specific message. Along the way, re-confirmed
+`ISSUE-24`'s undocumented trigger live again (a fresh test gameweek's
+manually-set `earliest_kickoff_utc` was wiped to null the moment any
+`fixtures` row was written, because that gameweek itself had no fixtures
+yet) — worked around by giving the test gameweek a fixture too, not by
+touching the trigger.
+
+**Documentation updated:** `game-engine.md` (GE-5.2, GE-8.2, GE-9, GE-12,
+GE-17), `business-rules.md` (§ Last Man Standing), `decisions.md` (new ADR,
+§ LMS locking), `project-board.md`.
+
+**Status:** migration `016` applied; Slice 3 implemented and fully
+verified. Nothing committed, per explicit instruction. Slice 4 (scoring)
+is next, blocked on one flagged, unanswered product question: what happens
+to an entry with no pick for a gameweek that's now locked.
+
+---
+
 ## 2026-08-06 (31) — LMS cycles removed; Slice 2 (pick submission) implemented
 
 **Goal:** Slice 1, migration 013, and `ISSUE-32` were reviewed and approved.

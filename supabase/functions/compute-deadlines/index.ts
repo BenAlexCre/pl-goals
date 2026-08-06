@@ -1,27 +1,42 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
-import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
-import { UnknownGameTypeError } from '../_shared/game-engine/errors.ts'
+import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
-// Side-effecting import — registers 'pick5' with the dispatcher (GE-7/GE-18).
-// This is the only mode registered today; lms/predictor imports land in
-// Milestones 5/6 and this function's dispatch loop below picks them up
-// automatically, with no further changes here.
+// Side-effecting imports — register each mode with the dispatcher (GE-7/
+// GE-18). Predictor's import lands in Milestone 6 and this function's
+// dispatch loop below picks it up automatically, with no further changes
+// here.
 import '../_shared/game-engine/pick5/index.ts'
+import '../_shared/game-engine/lms/index.ts'
 
 // Milestone 4, Slice 3 — docs/game-engine.md § GE-6 (lockEntries) / GE-8.2
 // (Locking flow) / GE-19 (sequence diagram, which names this exact function
 // as the locking flow's Edge Function). Deadline computation itself
 // (earliest_kickoff_utc/deadline_utc) is unchanged from before this slice;
 // what's new is that once a gameweek's just-computed deadline has already
-// passed, this function now also asks the dispatcher which game types have
-// pending entries for that gameweek and calls each one's lockEntries().
+// passed, this function now also calls every registered mode's
+// lockEntries().
 //
-// Discovering game types from the data (not hardcoding 'pick5') keeps this
-// function mode-agnostic per GE-7 ("Edge functions never branch on
-// game_type directly") — it works unchanged once LMS/Predictor register,
-// without needing gameweek-scoped entries at all today, since only Pick 5
-// has any (GE-4.5).
+// Revised, Milestone 5 Slice 3 (docs/decisions.md § LMS locking): this used
+// to pre-filter which game types to call by querying game_entries for rows
+// with gameweek_id = this gameweek — which only ever matched Pick 5,
+// because that pre-filter silently assumed every mode's entries are
+// gameweek-scoped. LMS's are season-scoped (GE-4.5, gameweek_id always
+// null on game_entries itself), so that filter would have permanently
+// excluded LMS from ever being locked, confirmed by reasoning through it
+// before writing any LMS locking code (not discovered by a live failure).
+// Replaced with the simpler, genuinely mode-agnostic version below: call
+// every *registered* engine's lockEntries() unconditionally and let each
+// mode's own implementation decide internally whether it has anything to
+// do (Pick5Engine and LmsEngine both already short-circuit to a fast
+// no-op query when there's nothing to lock) — no assumption here about
+// what "has entries for this gameweek" even means for a given mode.
+//
+// Every GameType this specification names (GE-1), not just the ones
+// registered today — isRegistered() below is what actually gates the call,
+// so this list doesn't need updating as Milestone 6 lands.
+const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predictor']
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
@@ -64,30 +79,9 @@ Deno.serve(async (req) => {
 
       if (ctx.now() < deadline) continue
 
-      const { data: pendingEntries } = await sb
-        .from('game_entries')
-        .select('pots(game_type)')
-        .eq('gameweek_id', gw.id)
-        .eq('status', 'pending')
-
-      // supabase-js infers embedded-resource shape generically (as an array)
-      // when the client has no generated Database type to confirm this is
-      // really a many-to-one (game_entries.pot_id -> pots.id, always exactly
-      // one pot). Handled defensively rather than trusting either shape.
-      type PotsEmbed = { game_type: GameType } | { game_type: GameType }[] | null
-      const gameTypes = new Set<GameType>()
-      for (const entry of (pendingEntries ?? []) as Array<{ pots: PotsEmbed }>) {
-        const gameType = Array.isArray(entry.pots) ? entry.pots[0]?.game_type : entry.pots?.game_type
-        if (gameType) gameTypes.add(gameType)
-      }
-
-      for (const gameType of gameTypes) {
-        try {
-          locked += await resolveEngine(gameType).lockEntries(ctx, gw.id)
-        } catch (err) {
-          if (err instanceof UnknownGameTypeError) continue
-          throw err
-        }
+      for (const gameType of ALL_GAME_TYPES) {
+        if (!isRegistered(gameType)) continue
+        locked += await resolveEngine(gameType).lockEntries(ctx, gw.id)
       }
     }
 
