@@ -311,23 +311,26 @@ new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
 **Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
-submission, locking, scoring, elimination, payment-void settlement, and
-standings are all implemented and verified live, as of 2026-08-06** — see
+submission, locking, scoring, elimination, payment-void settlement,
+standings, and winner determination are all implemented and verified live,
+as of 2026-08-06** — see
 [current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
 [decisions.md § LMS locking](./decisions.md#lms-locking),
 [decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination),
-[decisions.md § LMS settlement](./decisions.md#lms-settlement), and
-[decisions.md § LMS standings](./decisions.md#lms-standings).
+[decisions.md § LMS settlement](./decisions.md#lms-settlement),
+[decisions.md § LMS standings](./decisions.md#lms-standings), and
+[decisions.md § LMS winner determination](./decisions.md#lms-winner-determination).
 Pick submission enforces the no-repeat-team rule above via a real database
-constraint, not just application logic. Wipeout resolution and season-end
-resolution themselves (splitting or rolling the prize once the competition
-actually concludes) are not yet implemented — `LmsEngine.determineWinner()`
-still needs to detect a wipeout specifically, and neither method exists
-yet. Automatic rollover-pot creation and the Final Prediction settlement
-path are also still ahead, identified but not yet designed at the
-implementation level. Real work for later Milestone 5
-slices, not invented ahead of time.
+constraint, not just application logic. `LmsEngine.determineWinner()` can
+now correctly tell a single survivor, a wipeout, a season-end tie, and a
+still-in-progress competition apart — but it only *identifies* which one
+occurred, purely by reading state; **actually paying out is still not
+implemented**. Wipeout Resolution and Season End Resolution themselves
+(splitting or rolling the prize) remain unbuilt, along with automatic
+rollover-pot creation and the Final Prediction settlement path — all
+identified but not yet designed at the implementation level. Real work for
+later Milestone 5 slices, not invented ahead of time.
 
 ## Admin permissions
 

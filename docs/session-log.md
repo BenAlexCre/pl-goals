@@ -13,6 +13,70 @@ from here.
 
 ---
 
+## 2026-08-06 (36) — Milestone 5 Slice 7: LMS winner determination
+
+**Goal:** Slice 6 was reviewed, approved, committed, and pushed. Begin
+Slice 7 — review Pick 5's `determineWinner()` first, do not assume its
+logic is reusable, design LMS's around the approved rules (single
+survivor, wipeout, Wipeout Resolution and Season End Resolution kept
+strictly separate, no prize awarding or rollover creation yet), correctly
+distinguishing one survivor / multiple survivors / wipeout / still in
+progress.
+
+**Review, before writing code:** `Pick5Engine.determineWinner()` is a
+one-line "rank 1 of the most recently settled gameweek" lookup — correct
+for Pick 5 only because every settled gameweek genuinely is a concluded,
+payable instance. LMS's competition concludes exactly once, so "not yet" —
+a state Pick 5's version has no equivalent of at all — has to be a
+first-class, common outcome. Confirmed nothing about Pick 5's actual logic
+carries over, only the `Promise<string[]>` contract shape.
+
+**Implemented:** `LmsEngine.determineWinner()`, four outcomes derived
+entirely from existing `game_entry_lms` state: one alive → that entry
+wins; zero alive → wipeout, returns the group sharing the most recent
+`eliminated_gameweek_id`; multiple alive with `pots.end_gameweek_id`'s
+deadline passed → season-end tie, returns every alive entry (reusing
+`end_gameweek_id`, existing since Milestone 2, never used by any mode
+until now); multiple alive, season not concluded → `[]`. Deliberately
+never reads `wipeout_resolution`/`season_end_tie_rule` — a caller
+distinguishes a wipeout from a season-end tie by checking
+`competitive_status` on the returned ids instead, keeping the two
+resolution concepts genuinely separate as instructed. Purely read-only,
+no writes of any kind. Not wired into `settle()` — exists standalone,
+mirroring exactly when Pick 5's own `determineWinner()` first existed
+(Slice 7, wired in at Slice 8). **No schema change.**
+
+**A real, unresolved sequencing gap identified while designing this, not
+fixed:** nothing today stops `calculateScore()` from continuing to score a
+lone remaining survivor in a later gameweek, since it has no pot-wide
+awareness of "is this the sole survivor." Flagged for whichever slice
+wires `determineWinner()` in.
+
+**Verified:** 9 new unit tests (172/172 total pass) via a purpose-built
+fake. Live, against the real database directly (no HTTP endpoint exists
+for this method yet, matching Pick 5's own Slice 7) — all five scenarios
+correct: single survivor, wipeout, still-in-progress, season-end tie,
+not-yet-concluded. Hit a real local-dev debugging pitfall along the way:
+`auth.admin.createUser()` failed with a generic `AuthRetryableFetchError`
+that looked like a transient/rate-limit issue on the same call every
+retry; `docker logs supabase_auth_pl-goals` revealed the real cause —
+`handle_new_user()`'s trigger deriving `profiles.display_name` from the
+new user's email tripped a 60-character check constraint because a test
+label was too long. Fixed by shortening the label, saved as a memory for
+future sessions rather than re-discovered next time. All test data
+removed by exact ID, re-verified as zero rows.
+
+**Documentation updated:** `game-engine.md` (GE-5.2, GE-12, GE-17),
+`business-rules.md` (§ Last Man Standing status line), `decisions.md`
+(new ADR, § LMS winner determination), `project-board.md`.
+
+**Status:** Slice 7 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Slice 8 (prize awarding +
+wiring `determineWinner()` in) is next, and must also close the
+sequencing gap above.
+
+---
+
 ## 2026-08-06 (35) — Milestone 5 Slice 6: LMS standings
 
 **Goal:** Slice 5 was reviewed, approved, committed, and pushed. Begin

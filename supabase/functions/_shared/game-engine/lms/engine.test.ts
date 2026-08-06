@@ -808,3 +808,158 @@ Deno.test('settle calls generateStandings for every eligible pot, writing overal
 
   assertEquals(db.game_entries[0].status, 'pending')
 })
+
+// --- determineWinner() --------------------------------------------------------
+// Same purpose-built-fake reasoning as generateStandings()'s tests —
+// determineWinner() reads the same game_entries -> game_entry_lms embed,
+// plus pots.end_gameweek_id and gameweeks.deadline_utc for the season-end
+// check.
+
+interface FakeWinnerEntry { user_id: string; competitive_status: string; eliminated_gameweek_id: number | null; malformed?: boolean }
+
+function fakeDetermineWinnerContext(
+  entries: FakeWinnerEntry[],
+  options: { endGameweekId?: number | null; endGameweekDeadlineUtc?: string | null; now?: Date } = {}
+): GameEngineContext {
+  const endGameweekId = options.endGameweekId ?? null
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'game_entries') {
+        return {
+          select() {
+            return {
+              eq: () =>
+                Promise.resolve({
+                  data: entries.map((e) => ({
+                    user_id: e.user_id,
+                    game_entry_lms: e.malformed
+                      ? null
+                      : { competitive_status: e.competitive_status, eliminated_gameweek_id: e.eliminated_gameweek_id },
+                  })),
+                  error: null,
+                }),
+            }
+          },
+        }
+      }
+      if (table === 'pots') {
+        return {
+          select() {
+            return { eq: () => ({ maybeSingle: () => Promise.resolve({ data: { end_gameweek_id: endGameweekId }, error: null }) }) }
+          },
+        }
+      }
+      if (table === 'gameweeks') {
+        return {
+          select() {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({ data: { deadline_utc: options.endGameweekDeadlineUtc ?? null }, error: null }),
+              }),
+            }
+          },
+        }
+      }
+      throw new Error(`Unexpected table in test fake: ${table}`)
+    },
+  }
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => options.now ?? new Date('2026-06-01T00:00:00Z') }
+}
+
+Deno.test('determineWinner returns [] for a pot with no entries', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([])
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), [])
+})
+
+Deno.test('determineWinner: exactly one alive entry wins immediately', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([
+    { user_id: 'user-winner', competitive_status: 'alive', eliminated_gameweek_id: null },
+    { user_id: 'user-out', competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), ['user-winner'])
+})
+
+Deno.test('determineWinner: a wipeout returns everyone eliminated in the same, most recent gameweek', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([
+    { user_id: 'user-a', competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { user_id: 'user-b', competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+  assertEquals(new Set(winners), new Set(['user-a', 'user-b']))
+})
+
+Deno.test('determineWinner: zero alive but eliminated in staggered gameweeks returns only the most-recent group', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([
+    { user_id: 'user-earlier', competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+    { user_id: 'user-latest', competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), ['user-latest'])
+})
+
+Deno.test('determineWinner: multiple alive, no end_gameweek_id configured -> still in progress', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext(
+    [
+      { user_id: 'user-a', competitive_status: 'alive', eliminated_gameweek_id: null },
+      { user_id: 'user-b', competitive_status: 'alive', eliminated_gameweek_id: null },
+    ],
+    { endGameweekId: null }
+  )
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), [])
+})
+
+Deno.test('determineWinner: multiple alive, end_gameweek_id set but its deadline has not passed -> still in progress', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext(
+    [
+      { user_id: 'user-a', competitive_status: 'alive', eliminated_gameweek_id: null },
+      { user_id: 'user-b', competitive_status: 'alive', eliminated_gameweek_id: null },
+    ],
+    { endGameweekId: 38, endGameweekDeadlineUtc: '2026-12-01T00:00:00Z', now: new Date('2026-06-01T00:00:00Z') }
+  )
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), [])
+})
+
+Deno.test('determineWinner: multiple alive, season concluded -> season-end tie, returns every alive entry', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext(
+    [
+      { user_id: 'user-a', competitive_status: 'alive', eliminated_gameweek_id: null },
+      { user_id: 'user-b', competitive_status: 'alive', eliminated_gameweek_id: null },
+    ],
+    { endGameweekId: 38, endGameweekDeadlineUtc: '2026-01-01T00:00:00Z', now: new Date('2026-06-01T00:00:00Z') }
+  )
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+  assertEquals(new Set(winners), new Set(['user-a', 'user-b']))
+})
+
+Deno.test('determineWinner excludes an entry with no game_entry_lms extension row', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([
+    { user_id: 'user-winner', competitive_status: 'alive', eliminated_gameweek_id: null },
+    { user_id: 'user-malformed', competitive_status: 'alive', eliminated_gameweek_id: null, malformed: true },
+  ])
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), ['user-winner'])
+})
+
+Deno.test('determineWinner: zero alive and zero resolved-eliminated entries -> []', async () => {
+  const engine = new LmsEngine()
+  const ctx = fakeDetermineWinnerContext([
+    { user_id: 'user-malformed', competitive_status: 'alive', eliminated_gameweek_id: null, malformed: true },
+  ])
+
+  assertEquals(await engine.determineWinner(ctx, 'pot-1'), [])
+})

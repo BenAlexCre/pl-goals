@@ -1345,3 +1345,87 @@ with each other both times, correctly pushed one rank further down once a
 third entrant was eliminated more recently). Confirmed `meta.eliminatedGameweekId`
 carries the right value and `score` is `1`/`0` as designed. All test data
 removed by exact ID, re-verified as zero rows.
+
+## LMS winner determination
+
+**Decided 2026-08-06**, ahead of Milestone 5 Slice 7. The repo owner's
+instruction was explicit: review Pick 5's `determineWinner()`, but do not
+assume its logic is reusable — design LMS's around the approved rules
+(single survivor, wipeout, Wipeout Resolution vs. Season End Resolution
+kept separate, no prize awarding or rollover creation yet), correctly
+distinguishing one survivor, multiple survivors, a wipeout, and a
+competition still in progress.
+
+**Why Pick 5's model doesn't transfer, confirmed by reading it first.**
+`Pick5Engine.determineWinner()` is a single query: rank 1 of the most
+recently settled gameweek's standings. That's *correct* for Pick 5 only
+because every settled gameweek genuinely is a concluded, payable instance
+(GE-8.4) — there is no "still in progress" state for that method to
+express. LMS's competition concludes exactly once; most calls to
+`determineWinner()` over its lifetime should genuinely report "not yet."
+Pick 5's version has no equivalent of that at all, so nothing about its
+actual logic — only its `Promise<string[]>` contract shape — carries over.
+
+**Four outcomes, derived from the same `game_entry_lms` state
+`calculateScore()`/`generateStandings()` already maintain — no new schema,
+no new tracking mechanism:**
+1. **Exactly one `alive` entry** → that entry wins, `[userId]`.
+2. **Zero `alive` entries** → a wipeout. The returned group is every entry
+   whose `eliminated_gameweek_id` equals the `max` among all eliminated
+   entries — "all remaining players eliminated in the same gameweek,"
+   computed directly, not inferred from a separate flag.
+3. **More than one `alive` entry, and the season has concluded** → a
+   season-end tie, returning every `alive` entry. "Has the season
+   concluded" reuses `pots.end_gameweek_id` (existing since Milestone 2,
+   previously unused by any mode) compared against that gameweek's
+   `deadline_utc` via a live check — the same `ctx.now()`-against-
+   `deadline_utc` pattern `validateEntry()`/`calculateScore()` already
+   established, rather than inventing a new "season status" flag.
+4. **More than one `alive` entry, season not concluded (or
+   `end_gameweek_id` unset)** → still in progress, `[]`.
+
+**Wipeout Resolution and Season End Resolution are deliberately never read
+here, per the explicit instruction not to mix them into this method.**
+`determineWinner()` returns *who's involved* in whichever outcome
+occurred; it never reads `pots.wipeout_resolution` or
+`pots.season_end_tie_rule`, and never decides split vs. roll or split vs.
+Final Prediction. A caller can tell a wipeout group apart from a
+season-end group without this method returning two different shapes for
+GE-6's fixed `string[]` contract — by checking `competitive_status` on the
+returned ids (`'eliminated'` for a wipeout, `'alive'` for a season-end
+tie). Prize awarding and automatic rollover-pot creation remain entirely
+unbuilt — `awardPrize()` still throws `GameEngineNotImplementedError`, and
+nothing calls this method from anywhere yet, mirroring exactly when
+`Pick5Engine.determineWinner()` first existed (its own Slice 7, standalone
+until Slice 8 wired it into `awardPrize()`).
+
+**A real, unresolved sequencing gap, found while designing this method,
+not fixed here.** Nothing today stops `calculateScore()` from continuing
+to process a lone remaining survivor's pick in a later gameweek — it has
+no pot-wide awareness of "is this entry already the sole survivor," so a
+technically-possible (if currently unlikely in practice) sequence exists
+where the sole survivor is scored again after having effectively already
+won, and could even be eliminated afterward if their next pick loses. This
+means `determineWinner()`'s "zero alive, wipeout" branch could theoretically
+receive an eliminated group of size one — a case its own logic still
+handles consistently (identifies the most-recent-elimination group either
+way), but which shouldn't be reachable under the intended rules. Whichever
+future slice wires `determineWinner()` into `settle()` (mirroring Pick 5's
+own Slice 8) needs to close this gap — most likely by having `settle()`
+check `determineWinner()`'s result and stop calling `calculateScore()` for
+a pot once it's concluded. Flagged, not guessed at.
+
+**Verified live**, through the real module (not a mocked test, and not an
+HTTP endpoint — none exists yet for this method, same as Pick 5's own
+Slice 7) against the real local Postgres: single survivor, wipeout,
+still-in-progress (no `end_gameweek_id`), season-end tie (`end_gameweek_id`
+set, deadline passed), and not-yet-concluded (`end_gameweek_id` set,
+deadline still future) — all five scenarios correct. Hit and root-caused a
+real, non-obvious local-dev pitfall along the way: `auth.admin.createUser()`
+failed with a generic `AuthRetryableFetchError` that looked like a
+transient/rate-limit issue, but `docker logs supabase_auth_pl-goals`
+showed the real cause — `handle_new_user()`'s trigger deriving
+`profiles.display_name` from the new user's email tripped
+`profiles_display_name_check` (max 60 characters) because a test label was
+too descriptive. Fixed by shortening the label, not by retrying blindly.
+All test data removed by exact ID, re-verified as zero rows.

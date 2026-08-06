@@ -1,9 +1,13 @@
 // Milestone 5 (docs/game-engine.md § GE-5.2, GE-12): validateEntry (Slice 2),
-// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5), and
-// generateStandings (Slice 6) are implemented — determineWinner/awardPrize/
-// notifyUsers still throw GameEngineNotImplementedError, same "half-built
-// mode fails loudly" pattern Pick5Engine used between its own Slice 2 and
-// Slice 9.
+// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5),
+// generateStandings (Slice 6), and determineWinner (Slice 7) are
+// implemented — awardPrize/notifyUsers still throw
+// GameEngineNotImplementedError, same "half-built mode fails loudly"
+// pattern Pick5Engine used between its own Slice 2 and Slice 9.
+// determineWinner() is deliberately not wired into settle() (or anywhere
+// else) this slice — it exists standalone, read-only, exactly like
+// Pick5Engine's own determineWinner() did between its Slice 7 and Slice 8
+// (when awardPrize() first called it).
 //
 // lockEntries() deliberately does NOT touch game_entries.status, unlike
 // Pick5Engine's version. game_entries is season-scoped for LMS (GE-4.5) —
@@ -620,8 +624,115 @@ export class LmsEngine implements GameEngine {
     }
   }
 
-  async determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {
-    throw new GameEngineNotImplementedError('last_man_standing', 'determineWinner')
+  // GE-6: "Identify the winner(s)." Not modeled on Pick5Engine's version at
+  // all — that one is a one-line "rank 1 of the most recently settled
+  // gameweek" lookup because for Pick 5, every settled gameweek genuinely
+  // is a concluded, payable instance (a weekly jackpot). LMS's competition
+  // concludes exactly once, so "no outcome yet, still in progress" has to
+  // be a real, first-class return value here, with no Pick 5 equivalent to
+  // borrow from.
+  //
+  // Four outcomes, decided 2026-08-06 by reasoning through the approved
+  // rules (docs/decisions.md § LMS winner determination has the full
+  // design, including what's still unresolved):
+  //   - exactly one alive entry -> that entry wins immediately, [userId].
+  //   - zero alive entries -> a wipeout. Returns every entry eliminated in
+  //     the most recent (max) eliminated_gameweek_id among them — "all
+  //     remaining players eliminated in the same gameweek." What to DO
+  //     with that group (split vs. roll) is Wipeout Resolution's job
+  //     (awardPrize(), not built yet) — this method only identifies who's
+  //     in the group, never reads pots.wipeout_resolution itself.
+  //   - more than one alive entry, AND the pot's designated final gameweek
+  //     (pots.end_gameweek_id) has already passed its deadline -> a
+  //     season-end tie. Returns every still-alive entry. Season End
+  //     Resolution (split vs. Final Prediction) is equally out of scope
+  //     here, deliberately — this is a genuinely separate concept from
+  //     Wipeout Resolution and must not be resolved by the same code path
+  //     (explicit repo owner instruction) — the caller distinguishes this
+  //     case from a wipeout by checking competitive_status on the returned
+  //     ids (all 'alive' here; all 'eliminated' for a wipeout) rather than
+  //     this method returning two different shapes for a fixed-by-GE-6
+  //     string[] contract.
+  //   - more than one alive entry, and the final gameweek hasn't concluded
+  //     (or pots.end_gameweek_id isn't set at all) -> still in progress,
+  //     []. Same meaning as Pick5Engine's own "nothing to report yet" [].
+  //
+  // No writes of any kind happen here — no elimination (calculateScore()'s
+  // job already), no pot_prizes, no rollover pot creation. Purely a read
+  // and a classification, per the repo owner's explicit "only determine
+  // the outcome" instruction.
+  async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('user_id, game_entry_lms(competitive_status, eliminated_gameweek_id)')
+      .eq('pot_id', potId)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return []
+    }
+
+    type LmsEmbed = { competitive_status: string; eliminated_gameweek_id: number | null }
+      | { competitive_status: string; eliminated_gameweek_id: number | null }[]
+      | null
+    type EntryRow = { user_id: string; game_entry_lms: LmsEmbed }
+
+    const alive: { userId: string }[] = []
+    const eliminated: { userId: string; eliminatedGameweekId: number }[] = []
+
+    for (const entry of entries as EntryRow[]) {
+      const lms = Array.isArray(entry.game_entry_lms) ? entry.game_entry_lms[0] : entry.game_entry_lms
+      if (!lms) continue // malformed — no extension row; excluded rather than guessed at
+      if (lms.competitive_status === 'alive') {
+        alive.push({ userId: entry.user_id })
+      } else if (lms.eliminated_gameweek_id !== null) {
+        eliminated.push({ userId: entry.user_id, eliminatedGameweekId: lms.eliminated_gameweek_id })
+      }
+    }
+
+    if (alive.length === 1) {
+      return [alive[0].userId]
+    }
+
+    if (alive.length === 0) {
+      if (eliminated.length === 0) {
+        return [] // no entries resolved at all yet — nothing to determine
+      }
+      const mostRecentGameweek = Math.max(...eliminated.map((e) => e.eliminatedGameweekId))
+      return eliminated.filter((e) => e.eliminatedGameweekId === mostRecentGameweek).map((e) => e.userId)
+    }
+
+    // alive.length > 1 — only a season-end tie if the pot's own designated
+    // final gameweek has actually passed; otherwise still in progress.
+    const { data: pot, error: potError } = await ctx.supabase
+      .from('pots')
+      .select('end_gameweek_id')
+      .eq('id', potId)
+      .maybeSingle()
+
+    if (potError) {
+      throw new Error(`Failed to look up pot: ${potError.message}`)
+    }
+    if (!pot?.end_gameweek_id) {
+      return []
+    }
+
+    const { data: endGameweek, error: gameweekError } = await ctx.supabase
+      .from('gameweeks')
+      .select('deadline_utc')
+      .eq('id', pot.end_gameweek_id)
+      .maybeSingle()
+
+    if (gameweekError) {
+      throw new Error(`Failed to look up the pot's final gameweek: ${gameweekError.message}`)
+    }
+    if (!endGameweek?.deadline_utc || ctx.now() < new Date(endGameweek.deadline_utc)) {
+      return []
+    }
+
+    return alive.map((a) => a.userId)
   }
 
   async awardPrize(_ctx: GameEngineContext, _potId: string): Promise<void> {
