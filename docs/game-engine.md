@@ -652,8 +652,62 @@ at all, closing the gap identified in Slice 7.
 Full reasoning: [decisions.md § LMS prize awarding](./decisions.md#lms-prize-awarding).
 No schema change — every column used (`pot_prizes.rollover`,
 `pots.rollover_source_pot_id`/`carry_over_amount`/`rollover_generation`)
-already existed from `013_lms_wipeout_and_rollover.sql`. Only
-`notifyUsers()` still throws `GameEngineNotImplementedError` for LMS.
+already existed from `013_lms_wipeout_and_rollover.sql`.
+
+**Transactionality correction — 2026-08-06, found during Slice 8 review
+ahead of Slice 9, before any code was written for this slice.** Asked
+explicitly whether `awardPrize()`'s rollover sequence (`pot_prizes` write,
+new pot creation, organiser membership creation) is fully transactional.
+It was not: `pot_prizes` was written **first**, with `is_settled = true` —
+the exact flag every future call (and `getEligibleLmsPotIds()`) trusts as
+"this competition has concluded." Since supabase-js has no cross-table
+transaction, any failure in a *later* step (settling entries, paying out,
+or `createRolloverPot()` itself, including the `pots` insert failing, not
+just the `pot_members` insert the existing compensating rollback already
+covered) would leave the pot permanently marked settled/rolled-over with
+the rest of the work undone and no way to retry — `awardPrize()` would
+short-circuit on every future call without ever finishing. **Fixed**: the
+`pot_prizes` write now happens **last**, after every other write in the
+method — settling/paying entries are naturally idempotent updates, safe to
+repeat on a retry; `createRolloverPot()` gained its own idempotency guard
+(reuses an existing pot whose `rollover_source_pot_id` already points at
+the source, rather than creating a duplicate), so a retry that finds the
+rollover pot already created from a prior, since-failed attempt does not
+create a second one. Not fully ACID-transactional in the database sense —
+still several separate writes — but now safely retryable from any partial
+failure point, which is the property that actually matters given the
+constraint. Verified: 2 new unit tests (failure-injection: the trailing
+write failing, and retrying after a rollover pot already exists) plus a
+live check against the real database simulating the exact partial-failure
+state. Full reasoning:
+[decisions.md § LMS prize awarding: transactionality correction](./decisions.md#lms-prize-awarding-transactionality-correction).
+
+**Notifications — implemented, Milestone 5 Slice 9, 2026-08-06, a
+one-for-one reuse of Pick 5's architecture.** `LmsEngine.notifyUsers()` is
+identical in every respect to `Pick5Engine.notifyUsers()` — a pure
+domain-event emitter, inserting one row into `notifications` and nothing
+else (GE-4.8's shared shape, not mode-specific; kept as a separate copy
+rather than a shared import only because [GE-18](#ge-18-dependency-boundaries)
+forbids crossing the `pick5/`/`lms/` boundary). One event type,
+`lms.prize_awarded`, mirroring Pick 5's single `pick5.prize_awarded` —
+fired once per actual payout recipient (single survivor, wipeout
+`split_prize`, season-end `split_prize`), called from `awardPrize()`
+**after** its own trailing `pot_prizes` write (not from inside the payout
+loop the way Pick 5's does — Pick 5 writes `pot_prizes` first, so by the
+time its loop runs that row already exists; LMS now writes it last, per
+the correction above, so placing the notification after it instead
+preserves the same invariant: a notification only ever fires once both the
+money and the settlement record it describes are already durably
+written). Best-effort — wrapped in try/catch, logged and swallowed on
+failure, never blocks or unwinds a payout already written, identical
+reasoning to Pick 5's own call site. A `roll_prize` wipeout writes no
+notification at all — `recipients` is empty, nobody was actually paid. A
+rollover-specific notification (telling the organiser their competition
+rolled over into a new pot) was considered and deliberately **not** built
+this slice — no Pick 5 equivalent to model, and genuinely new scope; same
+"flag, don't guess" discipline as Final Prediction and rollover-pot
+activation. All eight `GameEngine` contract methods are now implemented
+for LMS — Milestone 5's implementation work is complete.
 
 ### GE-5.3 Score Predictor
 
@@ -839,7 +893,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
 | 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`), and Slice 9 (`notifyUsers()`, domain-event notifications, wired into `awardPrize()`) done — all eight `GameEngine` contract methods now implemented for Pick 5 |
-| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed. Architecture revised three times 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions; `013_lms_wipeout_and_rollover.sql` applied. `ISSUE-32` (entry-window gate) fixed and verified live. **Slice 2 (pick submission, `submit-lms-pick` + `lms_team_picks` + `LmsEngine.validateEntry()`) done and committed** — unblocked by the repo owner's decision to remove LMS cycles entirely (`current_cycle` dropped, `014_lms_remove_cycle.sql`); a team may never be picked twice across the whole competition, enforced by a real unique constraint, not just application logic. **Slice 3 (locking) done and committed** — `LmsEngine.lockEntries()` implemented (`lms_team_picks.locked_at`, not `game_entries.status` — a genuine, necessary divergence from Pick 5, see [GE-5.2](#ge-52-last-man-standing)); found and fixed a real gap in the shared `compute-deadlines` function, which had silently never been able to discover LMS's season-scoped entries as needing locking at all. **Slice 4 (scoring) done and committed** — `LmsEngine.calculateScore()` implemented, answering the repo owner's product decision that a missed pick eliminates identically to a losing pick; also fixed the identical discovery bug in `compute-scores`. No schema change — reused `game_entry_lms.competitive_status`/`eliminated_gameweek_id`, `lms_team_picks.result`, and `pots.start_gameweek_id`, all already existing. **Slice 5 (settlement) done and committed** — `LmsEngine.settle()` implements the payment-void rule (`entry_payments.scope = 'season'`), per the explicit instruction not to duplicate `calculateScore()`'s already-done elimination work; never transitions `game_entries.status` to `'settled'` (that only makes sense once the competition concludes). Also fixed the identical discovery bug in `settle-gameweek`. No schema change. **Slice 6 (standings) done and committed** — `LmsEngine.generateStandings()` implemented from scratch, not modeled on Pick 5's (no points exist for LMS): alive entries tie for rank 1, eliminated entries rank below by elimination recency, only the overall snapshot row is written. Now wired into `settle()`, revising Slice 5's blanket "never calls generateStandings()" reasoning for this one harmless, idempotent method. No schema change — `pot_standings_snapshots.meta` already existed, unused until now. **Slice 7 (winner determination) done, 2026-08-06** — `LmsEngine.determineWinner()` implemented from scratch, not modeled on Pick 5's (a one-line "rank 1 of the most recent gameweek" lookup that assumes every settlement is a concluded instance — false for LMS): distinguishes one survivor, a wipeout, a season-end tie, and still-in-progress; purely read-only, no elimination/prize/rollover writes; not wired into `settle()` yet, same as Pick 5's own Slice 7. Identified, not fixed, a real sequencing gap: nothing yet stops `calculateScore()` from continuing to score a lone survivor in a later gameweek. No schema change. **Slice 8 (prize awarding) done, 2026-08-06** — `LmsEngine.awardPrize()` implemented (single survivor gets the full net prize; wipeout `split_prize`/`roll_prize` — the latter automatically creating a draft rollover pot via `createRolloverPot()`; season-end `split_prize`; season-end `final_prediction` throws `LmsFinalPredictionNotImplementedError` rather than guessing, deliberately not built this slice), wired into `settle()`, idempotent via `pot_prizes.is_settled`. Closed Slice 7's sequencing gap — `getEligibleLmsPotIds()` now excludes any pot with a settled season `pot_prizes` row. No schema change — every column used already existed from `013_lms_wipeout_and_rollover.sql`. Only `notifyUsers` still throws `GameEngineNotImplementedError` for LMS. Not committed — awaiting review |
+| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed. Architecture revised three times 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions; `013_lms_wipeout_and_rollover.sql` applied. `ISSUE-32` (entry-window gate) fixed and verified live. **Slice 2 (pick submission, `submit-lms-pick` + `lms_team_picks` + `LmsEngine.validateEntry()`) done and committed** — unblocked by the repo owner's decision to remove LMS cycles entirely (`current_cycle` dropped, `014_lms_remove_cycle.sql`); a team may never be picked twice across the whole competition, enforced by a real unique constraint, not just application logic. **Slice 3 (locking) done and committed** — `LmsEngine.lockEntries()` implemented (`lms_team_picks.locked_at`, not `game_entries.status` — a genuine, necessary divergence from Pick 5, see [GE-5.2](#ge-52-last-man-standing)); found and fixed a real gap in the shared `compute-deadlines` function, which had silently never been able to discover LMS's season-scoped entries as needing locking at all. **Slice 4 (scoring) done and committed** — `LmsEngine.calculateScore()` implemented, answering the repo owner's product decision that a missed pick eliminates identically to a losing pick; also fixed the identical discovery bug in `compute-scores`. No schema change — reused `game_entry_lms.competitive_status`/`eliminated_gameweek_id`, `lms_team_picks.result`, and `pots.start_gameweek_id`, all already existing. **Slice 5 (settlement) done and committed** — `LmsEngine.settle()` implements the payment-void rule (`entry_payments.scope = 'season'`), per the explicit instruction not to duplicate `calculateScore()`'s already-done elimination work; never transitions `game_entries.status` to `'settled'` (that only makes sense once the competition concludes). Also fixed the identical discovery bug in `settle-gameweek`. No schema change. **Slice 6 (standings) done and committed** — `LmsEngine.generateStandings()` implemented from scratch, not modeled on Pick 5's (no points exist for LMS): alive entries tie for rank 1, eliminated entries rank below by elimination recency, only the overall snapshot row is written. Now wired into `settle()`, revising Slice 5's blanket "never calls generateStandings()" reasoning for this one harmless, idempotent method. No schema change — `pot_standings_snapshots.meta` already existed, unused until now. **Slice 7 (winner determination) done, 2026-08-06** — `LmsEngine.determineWinner()` implemented from scratch, not modeled on Pick 5's (a one-line "rank 1 of the most recent gameweek" lookup that assumes every settlement is a concluded instance — false for LMS): distinguishes one survivor, a wipeout, a season-end tie, and still-in-progress; purely read-only, no elimination/prize/rollover writes; not wired into `settle()` yet, same as Pick 5's own Slice 7. Identified, not fixed, a real sequencing gap: nothing yet stops `calculateScore()` from continuing to score a lone survivor in a later gameweek. No schema change. **Slice 8 (prize awarding) done, 2026-08-06** — `LmsEngine.awardPrize()` implemented (single survivor gets the full net prize; wipeout `split_prize`/`roll_prize` — the latter automatically creating a draft rollover pot via `createRolloverPot()`; season-end `split_prize`; season-end `final_prediction` throws `LmsFinalPredictionNotImplementedError` rather than guessing, deliberately not built this slice), wired into `settle()`, idempotent via `pot_prizes.is_settled`. Closed Slice 7's sequencing gap — `getEligibleLmsPotIds()` now excludes any pot with a settled season `pot_prizes` row. No schema change — every column used already existed from `013_lms_wipeout_and_rollover.sql`. **Transactionality correction, 2026-08-06** — the repo owner asked whether the rollover sequence (`pot_prizes` write, new pot creation, organiser membership) was fully transactional; it wasn't (`pot_prizes.is_settled = true` was written first, so any later failure left the pot permanently, incorrectly "concluded" with the rest of the work undone and no way to retry). Fixed by moving the `pot_prizes` write to run last, and giving `createRolloverPot()` its own idempotency guard against creating a duplicate rollover pot on retry. **Slice 9 (notifications) done, 2026-08-06** — `LmsEngine.notifyUsers()` implemented, a one-for-one reuse of `Pick5Engine.notifyUsers()`'s architecture (same `notifications` table shape, same best-effort try/catch call-site pattern); one event type, `lms.prize_awarded`, fired per actual payout recipient from `awardPrize()` **after** its trailing `pot_prizes` write (not from inside the payout loop, unlike Pick 5 — LMS writes `pot_prizes` last, so this ordering keeps the same "money and settlement record already durable" invariant). No notification for a `roll_prize` wipeout (nobody is paid). A rollover-specific notification was considered and deliberately not built this slice. **All eight `GameEngine` methods now implemented for LMS — Milestone 5's core implementation work is complete.** Not committed — awaiting review |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
 | 8 | End-to-end testing, performance review, security review | Not started |
@@ -942,8 +996,8 @@ supabase/functions/
                                     (Slice 3), calculateScore (Slice 4), settle
                                     (Slice 5), generateStandings (Slice 6),
                                     determineWinner (Slice 7), awardPrize
-                                    (Slice 8) implemented; notifyUsers not yet
-                                    (throws GameEngineNotImplementedError)
+                                    (Slice 8), notifyUsers (Slice 9) implemented.
+                                    All eight GameEngine contract methods done.
       predictor/                   Milestone 6 — empty until then
   compute-scores/                  Milestone 4 Slice 4 — imports _shared/game-engine, drives calculateScore()
   compute-deadlines/                Milestone 4 Slice 3 — imports _shared/game-engine, drives lockEntries()

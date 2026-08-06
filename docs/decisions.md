@@ -1573,3 +1573,177 @@ season-end tie + Split Prize (both concluded and not-yet-concluded
 variants), and still-in-progress — 27 checks, all passing. All test data
 (6 pots including the auto-created rollover pot, 12 users) removed by
 exact ID, re-verified as zero rows.
+
+## LMS prize awarding: transactionality correction
+
+**Decided and fixed 2026-08-06**, before any Slice 9 code was written, in
+response to the repo owner's explicit question: "when `awardPrize()`
+creates a rollover competition, is the entire sequence — `pot_prizes`
+update, new pot creation, organiser membership creation — fully
+transactional? If not, make the smallest architectural correction
+necessary."
+
+**Verified: no, it was not.** supabase-js has no cross-table transaction —
+every multi-step write in this codebase already lives with that
+constraint (the compensating-rollback pattern `get-or-create-pick5-entry`/
+`get-or-create-lms-entry` established, reused by `createRolloverPot()`
+itself). The specific problem wasn't the absence of a transaction in
+general — it was *where* the one write that matters most was placed
+within the sequence. `awardPrize()` wrote its `pot_prizes` row **first**,
+before settling entries, before paying out, before `createRolloverPot()`
+ran — and that row's `is_settled = true` is the exact flag this method's
+own idempotency check (and, since Slice 8, `getEligibleLmsPotIds()`'s
+sequencing-gap check) trusts as "this competition has concluded, never
+touch it again."
+
+**The failure mode this created, concretely.** Any error after that first
+write — settling entries failing, a payout write failing, or
+`createRolloverPot()` failing at any point (the `pots` insert itself, not
+just the `pot_members` insert the existing compensating rollback already
+protected) — left the pot permanently marked settled and, for a
+`roll_prize` wipeout, `rollover = true`, with the rest of the work
+(entries never settled, or a rollover pot that was supposed to exist but
+doesn't) simply undone. Because `is_settled` was already `true`, every
+future call to `awardPrize()` for that pot would short-circuit at its own
+idempotency check before reaching any of the unfinished work — the
+operation could never complete, and (worst case, a `roll_prize` wipeout)
+real money would be marked as rolled over with no rollover pot ever
+successfully created and no way to fix it except manual database
+intervention.
+
+**The correction: reorder so `pot_prizes` is written last, and make the
+one non-idempotent step in between safe to repeat.** Moving the write to
+the very end of the method, after entry settlement, payout, and
+`createRolloverPot()` have already succeeded, means `is_settled` only ever
+becomes `true` once everything else has genuinely finished — a failure
+anywhere above it leaves the pot retryable from scratch on the next call,
+exactly the property that matters given supabase-js's constraint (true
+row-level atomicity isn't available; safe retryability is the substitute).
+This is sufficient on its own for the entry-settlement and payout writes,
+which are plain `UPDATE`s — re-applying the same value twice is harmless.
+It is **not** sufficient on its own for `createRolloverPot()`, which
+`INSERT`s a new row: without a further guard, a retry after
+`createRolloverPot()` had already succeeded (but a later step — the
+now-later `pot_prizes` write — then failed) would create a **second**
+rollover pot for the same wipeout. So `createRolloverPot()` gained its own
+idempotency check: before inserting, it looks up whether a pot already
+exists with `rollover_source_pot_id` equal to the source pot; if one does,
+it's reused (the method returns without creating anything), on the
+reasoning that a source pot can only ever wipe out and roll over once
+(it's settled and immutable from that point on), so a 1:1
+source-to-rollover relationship is always correct — a prior attempt having
+already finished this step is the only reason a matching pot would exist.
+
+**Why this is the smallest correction, not a redesign.** No new table, no
+new flag, no distributed-transaction library, no outbox pattern — just
+moving one write to the end of an existing method and adding one `SELECT`
+before an existing `INSERT`. The general question of whether every outcome
+branch (not just the rollover one the repo owner specifically asked
+about) benefits from this reordering was considered: yes, uniformly — the
+same `is_settled`-gates-everything risk applies identically to a plain
+single-survivor payout failing partway through, so reordering the one
+shared write fixes all outcome branches at once rather than needing a
+per-branch fix. This mirrors a pre-existing, structurally identical risk
+in `Pick5Engine.awardPrize()` (which also writes `pot_prizes` before its
+payout loop) — out of scope for this correction, since the repo owner's
+question was specifically about the LMS rollover sequence, but worth
+flagging as the same class of issue elsewhere; not touched here without
+being asked.
+
+**Verified:** 2 new unit tests via failure injection in the existing
+`awardPrize()`/`createRolloverPot()` fake — one simulating the trailing
+`pot_prizes` write itself failing (confirms entries are still
+settled/paid, `pot_prizes` stays unwritten, and a subsequent retry
+completes cleanly with no double-payment), one simulating a retry against
+a pot where a prior, since-failed attempt had already created the
+rollover pot and its membership row (confirms no duplicate pot or
+membership is created, and the retry still finishes by writing
+`pot_prizes`). 63/63 in `lms/engine.test.ts` after adding these (no
+regressions). Live, against the real database: seeded a source pot in
+exactly the "prior attempt got this far, then would have failed" state
+(rollover pot and organiser membership already existing, no `pot_prizes`
+row) and called `awardPrize()` against it directly — confirmed no
+duplicate rollover pot, no duplicate membership row, and that the call
+correctly finished sealing `pot_prizes`. 5 checks, all passing; all test
+data removed by exact ID, re-verified as zero rows.
+
+## LMS notifications
+
+**Decided 2026-08-06**, Milestone 5 Slice 9 — the last of LMS's eight
+`GameEngine` contract methods. The repo owner's instruction: review
+`Pick5Engine.notifyUsers()` first, reuse the existing notification
+architecture, don't duplicate infrastructure unless LMS genuinely needs
+different behavior.
+
+**What's genuinely shared, and reused as a one-for-one copy, not a
+redesign.** `notifyUsers()` itself — the `notifications` table shape
+(`user_id`, `pot_id`, `type`, `payload`) is [GE-4.8](./game-engine.md#ge-48-notifications)'s
+shared platform mechanic, identical for every mode; LMS's implementation
+is byte-for-byte the same insert-one-row-and-return method Pick 5's is,
+kept as a separate copy only because
+[GE-18](./game-engine.md#ge-18-dependency-boundaries) forbids `lms/`
+importing from `pick5/`. One event type was defined,
+`LmsNotificationType = 'lms.prize_awarded'`, mirroring Pick 5's own single
+`pick5.prize_awarded` — same reasoning Pick 5's own comment already
+documents: define the type actually needed now, don't invent a
+speculative catalog.
+
+**What genuinely differs: where and how often it's called, following
+directly from Slice 8's own outcome model.** Pick 5's `awardPrize()`
+writes `pot_prizes` first, then loops winners, calling `notifyUsers()`
+once per winner from inside that loop — safe because `pot_prizes` already
+exists by the time the loop runs. LMS's `awardPrize()`, after the
+transactionality correction above, writes `pot_prizes` **last** — so
+calling `notifyUsers()` from inside the payout loop would fire it before
+that row exists. Rather than reintroduce the ordering problem the
+correction above just fixed, or leave the reasoning inconsistent with what
+the code actually does, the notification loop was placed **after** the
+trailing `pot_prizes` write instead — a separate, short loop over
+`recipients`, run once everything else has already succeeded. This is
+arguably a strictly cleaner invariant than Pick 5's own: a notification
+never fires until both the money (`payout_amount`) and the record that the
+competition is settled (`pot_prizes.is_settled`) are already durably
+written, not just the money. `recipients` is empty for a `roll_prize`
+wipeout, so the loop simply runs zero times — no notification for anyone
+in that case, correctly, since nobody was actually paid.
+
+**A rollover-specific notification — e.g., telling the organiser their
+competition rolled over into a new draft pot — was considered and
+deliberately not built.** It has no Pick 5 equivalent to model (Pick 5 has
+no concept of a competition automatically spawning a successor), and
+nothing in the instruction asked for it. The organiser already becomes the
+new pot's sole member programmatically (Slice 8), so they're not
+locked out of anything without it — but they'd have no proactive signal
+that it happened without checking the app. Flagged as a genuine, likely
+future addition — same "flag, don't guess" discipline this milestone has
+applied throughout (Final Prediction, rollover-pot activation) — not
+built ahead of being explicitly asked for.
+
+**Same best-effort failure handling as Pick 5's call site, and for the
+identical reason.** Wrapped in try/catch; a notification write failing is
+logged (`console.error`) and swallowed, never propagated, never unwinds or
+blocks a payout that's already durably written. `notifyUsers()` itself
+still throws on error, like every other `GameEngine` method — the
+try/catch boundary belongs at the one call site that knows this specific
+write is allowed to fail silently, not inside `notifyUsers()` itself,
+exactly mirroring Pick 5's own comment on this point.
+
+**All eight `GameEngine` contract methods are now implemented for LMS.**
+Milestone 5's core implementation work is complete; what remains
+(Final Prediction, activating a draft rollover pot, extracting the
+`pot_prizes`/`pot_standings_snapshots` upsert workaround into a shared
+helper, a rollover notification) are all flagged, scoped, deliberately
+deferred items, not unknowns.
+
+**Verified:** 7 new unit tests (`notifyUsers()` writes correctly and
+throws on failure; `awardPrize()` fires one notification for a sole
+survivor, one per member on a wipeout split, none for a roll_prize
+wipeout, none twice on an idempotent second call, and never blocks the
+payout if the notification write itself fails) — 70/70 in
+`lms/engine.test.ts`, 142/142 across the whole `game-engine/` tree. Live,
+against the real database: `notifyUsers()` called directly (payload
+round-trips through Postgres jsonb correctly); `awardPrize()` for a single
+survivor writes exactly one notification, for the winner, with the
+correct payout amount in its payload; `awardPrize()` for a `roll_prize`
+wipeout writes none. 7 checks, all passing; all test data removed by
+exact ID, re-verified as zero rows.

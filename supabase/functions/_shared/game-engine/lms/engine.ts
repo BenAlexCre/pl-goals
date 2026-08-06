@@ -1,11 +1,9 @@
 // Milestone 5 (docs/game-engine.md § GE-5.2, GE-12): validateEntry (Slice 2),
 // lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5),
-// generateStandings (Slice 6), determineWinner (Slice 7), and awardPrize
-// (Slice 8) are implemented — only notifyUsers still throws
-// GameEngineNotImplementedError, same "half-built mode fails loudly"
-// pattern Pick5Engine used between its own Slice 2 and Slice 9 (notifyUsers
-// was Pick 5's own Slice 9 too — deliberately left for LMS's equivalent
-// next slice, not bundled into this one).
+// generateStandings (Slice 6), determineWinner (Slice 7), awardPrize
+// (Slice 8), and notifyUsers (Slice 9, called from within awardPrize() —
+// see that method's comment) are implemented. All eight GameEngine contract
+// methods are now implemented.
 //
 // lockEntries() deliberately does NOT touch game_entries.status, unlike
 // Pick5Engine's version. game_entries is season-scoped for LMS (GE-4.5) —
@@ -47,7 +45,6 @@
 // comparison).
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
-import { GameEngineNotImplementedError } from '../errors.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { LmsFinalPredictionNotImplementedError, LmsPrizePoolExceededError, LmsValidationError } from './errors.ts'
 
@@ -55,6 +52,20 @@ export interface LmsPickInput {
   gameweekId: number
   teamId: number
 }
+
+// GE-4.8: notifications.type is free text at the schema level — same
+// per-mode catalog approach Pick5NotificationType established. Only one
+// event exists for LMS so far, mirroring Pick 5's own single
+// 'pick5.prize_awarded': a real payout, for every actual recipient
+// (single_survivor, wipeout split_prize, season_end split_prize). A
+// rollover event (wipeout roll_prize — nobody is paid, a new pot is
+// created instead) was considered and deliberately NOT added this slice:
+// it has no Pick 5 equivalent to model, and the organiser already becomes
+// the new pot's sole member programmatically (Slice 8) — a genuine
+// candidate for a future notification, not built ahead of being asked
+// for, same "flag, don't guess" discipline this milestone has used
+// throughout (Final Prediction, pot activation).
+export type LmsNotificationType = 'lms.prize_awarded'
 
 // Shared between determineWinner() and awardPrize() — see classifyOutcome()
 // below for why a plain string[] isn't rich enough for awardPrize() to use
@@ -863,6 +874,23 @@ export class LmsEngine implements GameEngine {
   // status = 'settled' once a real outcome is reached — deliberately
   // deferred exactly this far, per Slice 5's own reasoning ("'settled'
   // only makes sense once the competition has actually concluded").
+  //
+  // NOT fully transactional — supabase-js has no cross-table transaction,
+  // so this is several separate writes, same constraint every other
+  // multi-step write in this codebase already lives with. The write order
+  // is deliberately chosen so a failure ANYWHERE is safely retryable: the
+  // pot_prizes row (whose is_settled=true is this method's own idempotency
+  // gate, above) is written LAST, only once every other write —
+  // settling/paying entries, and creating the rollover pot — has already
+  // succeeded. Found and fixed 2026-08-06 (Slice 8 review, before Slice 9):
+  // the original ordering wrote pot_prizes FIRST, which meant any failure
+  // in a later step (entry settlement, payout, or rollover-pot creation)
+  // left is_settled permanently true with the rest of the work undone and
+  // no way to retry — this method would short-circuit on every future call
+  // without ever finishing. Settling/paying entries are naturally
+  // idempotent updates (re-applying the same value twice is harmless), so
+  // reordering them alone is safe; createRolloverPot() is not (it INSERTs
+  // a new row), so it now has its own idempotency guard — see its comment.
   async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
     const { data: existingPrize, error: existingPrizeError } = await ctx.supabase
       .from('pot_prizes')
@@ -943,6 +971,42 @@ export class LmsEngine implements GameEngine {
       : outcome.type === 'season_end' ? outcome.aliveIds // season_end_tie_rule === 'split_prize', final_prediction already threw above
       : [] // roll_prize
 
+    const { error: settleEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'settled', settled_at: ctx.now().toISOString() })
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (settleEntriesError) {
+      throw new Error(`Failed to settle entries: ${settleEntriesError.message}`)
+    }
+
+    const perRecipientAmount = recipients.length > 0 ? floorToCents(netAmount / recipients.length) : 0
+
+    if (recipients.length > 0) {
+      for (const userId of recipients) {
+        const { error: payoutError } = await ctx.supabase
+          .from('game_entries')
+          .update({ payout_amount: perRecipientAmount })
+          .eq('pot_id', potId)
+          .eq('user_id', userId)
+
+        if (payoutError) {
+          throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+        }
+      }
+    }
+
+    if (rollover) {
+      await this.createRolloverPot(ctx, potId, potConfig, netAmount)
+    }
+
+    // Written LAST, deliberately — see this method's own comment above for
+    // why. is_settled=true here is what makes every future call (and
+    // getEligibleLmsPotIds()'s Slice-8 sequencing-gap check) treat this
+    // pot as concluded, so nothing above this line may be allowed to run
+    // again "for free" after it — everything above is either a naturally
+    // idempotent update or (createRolloverPot()) has its own guard.
     const prizeRow = {
       pot_id: potId,
       scope: 'season' as const,
@@ -975,44 +1039,46 @@ export class LmsEngine implements GameEngine {
       }
     }
 
-    const { error: settleEntriesError } = await ctx.supabase
-      .from('game_entries')
-      .update({ status: 'settled', settled_at: ctx.now().toISOString() })
-      .eq('pot_id', potId)
-      .neq('status', 'void')
-
-    if (settleEntriesError) {
-      throw new Error(`Failed to settle entries: ${settleEntriesError.message}`)
-    }
-
-    if (recipients.length > 0) {
-      const perRecipientAmount = floorToCents(netAmount / recipients.length)
-      for (const userId of recipients) {
-        const { error: payoutError } = await ctx.supabase
-          .from('game_entries')
-          .update({ payout_amount: perRecipientAmount })
-          .eq('pot_id', potId)
-          .eq('user_id', userId)
-
-        if (payoutError) {
-          throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
-        }
+    // GE-8.7/decisions.md § Notifications: called last, deliberately —
+    // after the trailing pot_prizes write above, not from inside the
+    // payout loop the way Pick5Engine's does (there, pot_prizes is written
+    // FIRST, so by the time its payout loop runs, pot_prizes already
+    // exists; here it's written LAST, so placing the notification here
+    // instead keeps the same invariant: every notification fires only
+    // once both the money AND the settlement record it describes are
+    // already durably written). Best-effort, same reasoning and shape as
+    // Pick5Engine's own call site — a failure here must never unwind or
+    // block money already paid, so it's caught and logged, not propagated.
+    for (const userId of recipients) {
+      try {
+        await this.notifyUsers(ctx, {
+          userId,
+          potId,
+          type: 'lms.prize_awarded' satisfies LmsNotificationType,
+          payload: { amount: perRecipientAmount, outcome: outcome.type },
+        })
+      } catch (notifyError) {
+        console.error(
+          `notifyUsers failed for pot ${potId}, user ${userId} (prize already awarded, not affected): ` +
+            (notifyError instanceof Error ? notifyError.message : String(notifyError))
+        )
       }
-    }
-
-    if (rollover) {
-      await this.createRolloverPot(ctx, potId, potConfig, netAmount)
     }
   }
 
   // Milestone 5 Slice 8: automatic rollover-pot creation, per the repo
   // owner's explicit "do NOT ask the organiser to create the rollover pot
   // manually" decision (2026-08-05). Only ever called from awardPrize()
-  // above, immediately after the source pot's own pot_prizes row is
-  // already durably written with rollover = true — awardPrize()'s own
-  // idempotency check (an existing, settled pot_prizes row short-circuits
-  // the whole method) is what prevents this from ever running twice for
-  // the same source pot, so this method itself doesn't re-check.
+  // above — but, since Slice 8's review before Slice 9, awardPrize() now
+  // writes its own pot_prizes row LAST (see that method's comment), this
+  // can legitimately run twice for the same source pot if a first attempt
+  // got this far and then failed on a later step (the pot_members insert
+  // below, or awardPrize()'s own trailing pot_prizes write) — the whole
+  // method is retried from the top on the next call, since is_settled
+  // never became true. Self-checks for that case: an existing pot whose
+  // rollover_source_pot_id already points at sourcePotId means a prior
+  // attempt already finished creating it, so this call reuses it instead
+  // of creating a second rollover pot for the same wipeout.
   //
   // Compensating rollback, same pattern get-or-create-pick5-entry/
   // get-or-create-lms-entry already established — supabase-js has no
@@ -1041,6 +1107,19 @@ export class LmsEngine implements GameEngine {
     },
     carryOverAmount: number
   ): Promise<void> {
+    const { data: existingRolloverPot, error: existingRolloverError } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('rollover_source_pot_id', sourcePotId)
+      .maybeSingle()
+
+    if (existingRolloverError) {
+      throw new Error(`Failed to check for an existing rollover pot: ${existingRolloverError.message}`)
+    }
+    if (existingRolloverPot) {
+      return // a prior, since-failed awardPrize() attempt already created this — do not create a second one
+    }
+
     // Strips any existing "(Rollover #N)" suffix before appending the new
     // one, so a rollover-of-a-rollover gets "Base Name (Rollover #3)", not
     // "Base Name (Rollover #2) (Rollover #3)".
@@ -1093,7 +1172,24 @@ export class LmsEngine implements GameEngine {
     }
   }
 
-  async notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {
-    throw new GameEngineNotImplementedError('last_man_standing', 'notifyUsers')
+  // GE-6: "Write to notifications." A pure domain-event emitter, identical
+  // in every respect to Pick5Engine's own — inserts one row and returns.
+  // Genuinely shared platform mechanics (the `notifications` table shape,
+  // GE-4.8), not mode-specific, so this is a one-for-one copy rather than
+  // a redesign; kept as a separate implementation rather than a shared
+  // helper only because GE-18 forbids `lms/` importing from `pick5/` (or
+  // vice versa) — the same acknowledged-duplication category as the money
+  // math and the pot_prizes/pot_standings_snapshots upsert workaround.
+  async notifyUsers(ctx: GameEngineContext, event: NotificationEvent): Promise<void> {
+    const { error } = await ctx.supabase.from('notifications').insert({
+      user_id: event.userId,
+      pot_id: event.potId,
+      type: event.type,
+      payload: event.payload ?? null,
+    })
+
+    if (error) {
+      throw new Error(`Failed to write notification: ${error.message}`)
+    }
   }
 }

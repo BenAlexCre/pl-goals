@@ -998,15 +998,19 @@ interface FakeAwardPot {
 }
 interface FakeAwardPrize { id: number; pot_id: string; scope: string; gross_amount: number; admin_fee_amount: number; charity_fee_amount: number; is_settled: boolean; rollover: boolean }
 interface FakeAwardMember { pot_id: string; user_id: string; role: string }
+interface FakeAwardNotification { user_id: string; pot_id: string | null; type: string; payload: Record<string, unknown> | null }
 
 interface FakeAwardDb {
   pots: FakeAwardPot[]
   entries: FakeAwardEntry[]
   prizes: FakeAwardPrize[]
   members: FakeAwardMember[]
+  notifications: FakeAwardNotification[]
   gameweeks: { id: number; deadline_utc: string }[]
   nextPotId: number
   failPotMembersInsert?: boolean
+  failPotPrizesWrite?: boolean
+  failNotificationsInsert?: boolean
 }
 
 function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01T00:00:00Z')): GameEngineContext {
@@ -1027,12 +1031,14 @@ function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01
           },
           update(patch: Record<string, unknown>) {
             return { eq: (_c: string, id: number) => {
+              if (db.failPotPrizesWrite) return Promise.resolve({ data: null, error: { message: 'simulated failure' } })
               const row = db.prizes.find((p) => p.id === id)
               if (row) Object.assign(row, patch)
               return Promise.resolve({ data: null, error: null })
             } }
           },
           insert(row: Record<string, unknown>) {
+            if (db.failPotPrizesWrite) return Promise.resolve({ data: null, error: { message: 'simulated failure' } })
             db.prizes.push({ id: db.prizes.length + 1, ...row } as FakeAwardPrize)
             return Promise.resolve({ data: null, error: null })
           },
@@ -1040,15 +1046,14 @@ function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01
       }
       if (table === 'pots') {
         return {
-          select(cols: string) {
-            const embedAware = cols.includes('game_entry_lms')
+          select(_cols: string) {
+            const find = (col: string, val: unknown) =>
+              db.pots.find((p) => (p as unknown as Record<string, unknown>)[col] === val) ?? null
             return {
-              eq: (_c: string, potId: string) => ({
-                single: () => Promise.resolve({ data: db.pots.find((p) => p.id === potId) ?? null, error: null }),
-                maybeSingle: () => Promise.resolve({ data: db.pots.find((p) => p.id === potId) ?? null, error: null }),
+              eq: (col: string, val: unknown) => ({
+                single: () => Promise.resolve({ data: find(col, val), error: null }),
+                maybeSingle: () => Promise.resolve({ data: find(col, val), error: null }),
               }),
-              // unused branch guard — pots.select() in this fake never needs embedAware
-              _embedAware: embedAware,
             }
           },
           insert(row: Record<string, unknown>) {
@@ -1077,6 +1082,15 @@ function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01
                 maybeSingle: () => Promise.resolve({ data: db.gameweeks.find((g) => g.id === id) ?? null, error: null }),
               }),
             }
+          },
+        }
+      }
+      if (table === 'notifications') {
+        return {
+          insert(row: Record<string, unknown>) {
+            if (db.failNotificationsInsert) return Promise.resolve({ data: null, error: { message: 'simulated failure' } })
+            db.notifications.push(row as unknown as FakeAwardNotification)
+            return Promise.resolve({ data: null, error: null })
           },
         }
       }
@@ -1167,6 +1181,7 @@ function baseAwardDb(pots: FakeAwardPot[], entries: FakeAwardEntryInput[]): Fake
     entries: entries.map((e) => ({ ...e, pot_id: potId })),
     prizes: [],
     members: [],
+    notifications: [],
     gameweeks: [],
     nextPotId: 1,
   }
@@ -1383,4 +1398,171 @@ Deno.test('awardPrize: throws LmsPrizePoolExceededError rather than clamping fee
 
   assertEquals(db.prizes.length, 0)
   assertEquals(db.entries[0].status, 'pending') // never settled — the throw happens before any write
+})
+
+// --- Transactionality: pot_prizes is written LAST, so a failure anywhere
+// above it never leaves is_settled=true with the rest of the work undone
+// (found and fixed 2026-08-06, before Slice 9 — see engine.ts's own
+// comment on awardPrize() and createRolloverPot()).
+
+Deno.test('awardPrize: if the trailing pot_prizes write fails, entries are still settled/paid and the pot remains retryable', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  db.failPotPrizesWrite = true
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+
+  // Everything before the trailing write already landed...
+  assertEquals(db.entries[0].status, 'settled')
+  assertEquals(db.entries[0].payout_amount, 20)
+  // ...but pot_prizes itself was never written, so is_settled never became
+  // true — the pot is NOT permanently stuck; a later retry can still
+  // complete it.
+  assertEquals(db.prizes.length, 0)
+
+  // Retry: same call, this time the write succeeds.
+  db.failPotPrizesWrite = false
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.prizes.length, 1)
+  assertEquals(db.prizes[0].is_settled, true)
+  assertEquals(db.entries[0].payout_amount, 20) // unchanged by the retry — still correct
+})
+
+Deno.test('awardPrize: retrying after a rollover pot was already created by a failed prior attempt does not create a duplicate', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', wipeout_resolution: 'roll_prize', rollover_generation: 0 })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  // Simulates a prior awardPrize() call that got as far as successfully
+  // creating the rollover pot (and its organiser membership) but then
+  // failed on the trailing pot_prizes write, before this reorder — so
+  // is_settled is still false and a real caller (settle(), on the next
+  // gameweek) would call awardPrize() again for the same pot.
+  db.pots.push({
+    ...baseAwardPot({ id: 'rollover-pot-1', name: 'Test LMS Pot (Rollover #1)', rollover_generation: 1 }),
+    rollover_source_pot_id: 'pot-1',
+    carry_over_amount: 10,
+  } as unknown as FakeAwardPot)
+  db.members.push({ pot_id: 'rollover-pot-1', user_id: 'organiser-1', role: 'admin' })
+
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  const rolloverPots = db.pots.filter((p) => (p as unknown as { rollover_source_pot_id?: string }).rollover_source_pot_id === 'pot-1')
+  assertEquals(rolloverPots.length, 1) // still exactly one — no duplicate created
+  assertEquals(db.members.filter((m) => m.pot_id === 'rollover-pot-1').length, 1) // still exactly one membership row
+  assertEquals(db.prizes.length, 1) // this retry finished the job — pot_prizes now written
+  assertEquals(db.prizes[0].rollover, true)
+})
+
+// --- notifyUsers() -------------------------------------------------------
+
+Deno.test('notifyUsers writes a notification row with the given type and payload', async () => {
+  const engine = new LmsEngine()
+  const db = baseAwardDb([baseAwardPot()], [])
+  const ctx = fakeAwardPrizeContext(db)
+
+  await engine.notifyUsers(ctx, { userId: 'user-a', potId: 'pot-1', type: 'lms.prize_awarded', payload: { amount: 20, outcome: 'single_survivor' } })
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0].user_id, 'user-a')
+  assertEquals(db.notifications[0].pot_id, 'pot-1')
+  assertEquals(db.notifications[0].type, 'lms.prize_awarded')
+  assertEquals(db.notifications[0].payload, { amount: 20, outcome: 'single_survivor' })
+})
+
+Deno.test('notifyUsers throws when the write fails', async () => {
+  const engine = new LmsEngine()
+  const db = baseAwardDb([baseAwardPot()], [])
+  db.failNotificationsInsert = true
+  const ctx = fakeAwardPrizeContext(db)
+
+  await assertRejects(() => engine.notifyUsers(ctx, { userId: 'user-a', potId: 'pot-1', type: 'lms.prize_awarded' }))
+})
+
+// --- awardPrize() -> notifyUsers() wiring (Slice 9) -----------------------
+
+Deno.test('awardPrize writes an lms.prize_awarded notification for the sole winner', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0].user_id, 'user-winner')
+  assertEquals(db.notifications[0].pot_id, 'pot-1')
+  assertEquals(db.notifications[0].type, 'lms.prize_awarded')
+  assertEquals(db.notifications[0].payload, { amount: 20, outcome: 'single_survivor' })
+})
+
+Deno.test('awardPrize writes one notification per member on a wipeout split_prize', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10, wipeout_resolution: 'split_prize' })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 2)
+  const notifiedUsers = db.notifications.map((n) => n.user_id).sort()
+  assertEquals(notifiedUsers, ['user-a', 'user-b'])
+  assertEquals(db.notifications[0].payload, { amount: 10, outcome: 'wipeout' })
+})
+
+Deno.test('awardPrize writes no notification for a roll_prize wipeout — nobody is actually paid', async () => {
+  const db = baseAwardDb([baseAwardPot({ wipeout_resolution: 'roll_prize' })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 0)
+})
+
+Deno.test('awardPrize does not write a duplicate notification on an idempotent second call', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1, 'the idempotent no-op path returns before ever calling notifyUsers()')
+})
+
+Deno.test('awardPrize still awards the prize and payout when the notification write fails', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  db.failNotificationsInsert = true
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  // Must not throw — a notification failure is never allowed to surface as
+  // an awardPrize() failure, let alone undo money already written.
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes.length, 1)
+  assertEquals(db.prizes[0].is_settled, true)
+  assertEquals(db.entries[0].payout_amount, 20)
+  assertEquals(db.notifications.length, 0, 'the failed write never lands in the table, but that does not block the payout above')
 })

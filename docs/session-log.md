@@ -13,6 +13,90 @@ from here.
 
 ---
 
+## 2026-08-06 (38) — Milestone 5 Slice 9: LMS notifications, plus a transactionality correction
+
+**Goal:** Slice 8 was reviewed, approved, committed, and pushed. Before
+beginning Slice 9, answer one question: when `awardPrize()` creates a
+rollover competition, is the entire sequence (`pot_prizes` update, new pot
+creation, organiser membership creation) fully transactional? If not, make
+the smallest architectural correction necessary. Then implement
+`LmsEngine.notifyUsers()`, reusing Pick 5's existing notification
+architecture, not duplicating infrastructure unless LMS genuinely
+requires different behavior.
+
+**Transactionality verification, done first, before any Slice 9 code.**
+Traced the actual write order in `awardPrize()`/`createRolloverPot()`:
+`pot_prizes` (with `is_settled = true`) was written **first**, before
+settling entries, before paying out, before `createRolloverPot()` ran. Not
+transactional — supabase-js has no cross-table transaction, and this
+specific ordering meant any failure after that first write left the pot
+permanently marked concluded with the rest of the work undone and no way
+to retry (every future `awardPrize()` call would short-circuit at its own
+idempotency check). Worst case, for a `roll_prize` wipeout: real money
+marked as rolled over with no rollover pot ever successfully created.
+
+**Fixed — smallest correction available, not a redesign.** Moved the
+`pot_prizes` write to run **last**, after entry settlement, payout, and
+`createRolloverPot()` have all already succeeded — those earlier writes
+are naturally idempotent updates, safe to repeat on a retry. Added a new
+idempotency guard inside `createRolloverPot()` itself (the one
+non-idempotent step, since it `INSERT`s a new row): before creating a
+rollover pot, check whether one already exists with `rollover_source_pot_id`
+matching the source pot, and reuse it rather than creating a duplicate.
+No new table, no new flag — one write moved, one `SELECT` added before an
+existing `INSERT`. Noted, not fixed (out of scope — the question was
+specifically about LMS's rollover sequence): `Pick5Engine.awardPrize()`
+has the identical pre-existing risk (writes `pot_prizes` before its own
+payout loop).
+
+**Implemented `LmsEngine.notifyUsers()`.** Reviewed
+`Pick5Engine.notifyUsers()` first — a pure domain-event emitter, one row
+into `notifications`, genuinely shared platform mechanics (GE-4.8), so
+LMS's is a one-for-one copy (kept separate only because GE-18 forbids
+crossing the `pick5/`/`lms/` boundary). One event type,
+`lms.prize_awarded`, mirroring Pick 5's single `pick5.prize_awarded`.
+Wired into `awardPrize()` — but, since `pot_prizes` is now written last
+(the correction above), the notification loop runs *after* that write
+rather than from inside the payout loop the way Pick 5's does, keeping the
+same "already durably written" invariant Pick 5's own placement relies on.
+Fires once per actual payout recipient; a `roll_prize` wipeout (nobody
+paid) writes no notification. Best-effort, wrapped in try/catch, never
+blocks or unwinds a payout, identical reasoning to Pick 5's call site. A
+rollover-specific notification was considered and deliberately not built
+— flagged for later, not guessed at.
+
+**All eight `GameEngine` contract methods are now implemented for LMS —
+Milestone 5's core implementation work is complete.**
+
+**Verified:** 9 new unit tests (2 transactionality via failure injection,
+7 notifications) — 70/70 in `lms/engine.test.ts`, 142/142 across the whole
+`game-engine/` tree, no regressions anywhere. Live, against the real local
+Postgres: a simulated partial-failure retry state (a rollover pot and its
+organiser membership already existing from a "prior attempt," no
+`pot_prizes` row) resolved correctly on retry with no duplicate pot or
+membership (5 checks); `notifyUsers()` verified standalone and through
+`awardPrize()` wiring for both a single-survivor payout and a `roll_prize`
+wipeout (7 checks) — 12 checks total, all passing. All test data (pots,
+entries, notifications, users) removed by exact ID, re-verified as zero
+rows across both scripts.
+
+**Documentation updated:** `game-engine.md` (GE-5.2 new "Transactionality
+correction" and "Notifications" paragraphs, GE-12, GE-17),
+`business-rules.md` (§ Last Man Standing status line — now states every
+part of the lifecycle is implemented), `decisions.md` (two new ADRs, §
+LMS prize awarding: transactionality correction and § LMS notifications),
+`project-board.md` (Slice 9 moved to Done; Ready updated — Final
+Prediction, rollover-pot activation, a rollover notification, the shared
+upsert-helper extraction, and Pick 5's own analogous transactionality risk
+all flagged as remaining, deliberately deferred items, not unknowns).
+
+**Status:** Slice 9 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Milestone 5's implementation
+work is complete — everything remaining is flagged, scoped, deliberately
+deferred cleanup/product work, not a missing `GameEngine` method.
+
+---
+
 ## 2026-08-06 (37) — Milestone 5 Slice 8: LMS prize awarding
 
 **Goal:** Slice 7 was reviewed, approved, committed, and pushed. Begin

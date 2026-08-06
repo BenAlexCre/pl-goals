@@ -313,10 +313,11 @@ whenever during the draft phase they join, pays exactly one entry fee — the
 new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
-**Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
-submission, locking, scoring, elimination, payment-void settlement,
-standings, winner determination, and prize awarding are all implemented and
-verified live, as of 2026-08-06** — see
+**Status: every part of the Last Man Standing lifecycle is now implemented
+and verified live, as of 2026-08-06 — entry creation (`ISSUE-32`'s
+entry-window rule included), pick submission, locking, scoring,
+elimination, payment-void settlement, standings, winner determination,
+prize awarding, and notifications.** See
 [current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
 [decisions.md § LMS locking](./decisions.md#lms-locking),
@@ -324,19 +325,24 @@ verified live, as of 2026-08-06** — see
 [decisions.md § LMS settlement](./decisions.md#lms-settlement),
 [decisions.md § LMS standings](./decisions.md#lms-standings),
 [decisions.md § LMS winner determination](./decisions.md#lms-winner-determination),
-and [decisions.md § LMS prize awarding](./decisions.md#lms-prize-awarding).
+[decisions.md § LMS prize awarding](./decisions.md#lms-prize-awarding),
+[decisions.md § LMS prize awarding: transactionality correction](./decisions.md#lms-prize-awarding-transactionality-correction),
+and [decisions.md § LMS notifications](./decisions.md#lms-notifications).
 Pick submission enforces the no-repeat-team rule above via a real database
 constraint, not just application logic. A single survivor is paid the full
 net prize; a Split Prize wipeout or season-end tie splits it equally among
 the group; a Roll Prize wipeout pays nobody and automatically creates the
 new draft rollover pot described above (name, config, `carry_over_amount`,
-sole organiser member — all Game-Engine-created, no manual step). **Not
-implemented, deliberately:** the Final Prediction settlement path (throws a
-specific, catchable error rather than guessing if a pot configured that way
-ever actually reaches a season-end tie — most won't) and activating a draft
-rollover pot (`status` leaving `'draft'` — nothing about a rollover pot
-starts on its own; this is a separate, not-yet-designed piece of work, not
-part of prize awarding itself).
+sole organiser member — all Game-Engine-created, no manual step). Every
+paid winner receives an in-app notification once the payout is written.
+**Not implemented, deliberately:** the Final Prediction settlement path
+(throws a specific, catchable error rather than guessing if a pot
+configured that way ever actually reaches a season-end tie — most won't);
+activating a draft rollover pot (`status` leaving `'draft'` — nothing about
+a rollover pot starts on its own; a separate, not-yet-designed piece of
+work); and a rollover-specific notification (telling the organiser their
+competition rolled over — flagged as a likely future addition, not built
+ahead of being asked for).
 
 ## Admin permissions
 
