@@ -7,7 +7,7 @@ import { assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/asser
 import type { GameEngineContext } from '../contracts.ts'
 import type { GameEntry } from '../types.ts'
 import { LmsEngine } from './engine.ts'
-import { LmsValidationError } from './errors.ts'
+import { LmsFinalPredictionNotImplementedError, LmsPrizePoolExceededError, LmsValidationError } from './errors.ts'
 
 interface FakeState {
   competitiveStatus: 'alive' | 'eliminated' | null // null = no game_entry_lms row found
@@ -341,6 +341,8 @@ interface FakePick { id: number; game_entry_id: string; gameweek_id: number; tea
 interface FakeFixture { gameweek_id: number; home_team_id: number; away_team_id: number; status: string; home_goals: number; away_goals: number }
 interface FakeEntryPayment { pot_id: string; user_id: string; is_paid: boolean; scope: string }
 
+interface FakePotPrize { pot_id: string; scope: string; is_settled: boolean }
+
 interface FakeDb {
   gameweeks: FakeGameweek[]
   pots: FakePot[]
@@ -349,6 +351,7 @@ interface FakeDb {
   lms_team_picks: FakePick[]
   fixtures: FakeFixture[]
   entry_payments: FakeEntryPayment[]
+  pot_prizes: FakePotPrize[]
 }
 
 function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
@@ -403,6 +406,7 @@ function baseDb(overrides: Partial<FakeDb> = {}): FakeDb {
     lms_team_picks: [],
     fixtures: [],
     entry_payments: [],
+    pot_prizes: [],
     ...overrides,
   }
 }
@@ -962,4 +966,421 @@ Deno.test('determineWinner: zero alive and zero resolved-eliminated entries -> [
   ])
 
   assertEquals(await engine.determineWinner(ctx, 'pot-1'), [])
+})
+
+// --- awardPrize() / createRolloverPot() ---------------------------------------
+// A fuller in-memory relational fake, purpose-built for this method's own
+// query shapes (game_entries <-> game_entry_lms embed, pot_prizes,
+// game_entries updates, pots insert + select().single(), pot_members
+// insert) — same "purpose-built fake per method" pattern as every other
+// fake in this file, just wider because awardPrize() itself is wider.
+
+interface FakeAwardEntry { id: string; pot_id: string; user_id: string; status: string; payout_amount: number; competitive_status: string; eliminated_gameweek_id: number | null }
+type FakeAwardEntryInput = Omit<FakeAwardEntry, 'pot_id'>
+interface FakeAwardPot {
+  id: string
+  name: string
+  created_by: string
+  season_id: number
+  league_id: number
+  entry_fee: number
+  end_gameweek_id: number | null
+  wipeout_resolution: string
+  season_end_tie_rule: string
+  admin_fee_type: string
+  admin_fee_amount: number | null
+  admin_fee_percentage: number | null
+  charity_fee_type: string
+  charity_fee_amount: number | null
+  charity_fee_percentage: number | null
+  carry_over_amount: number
+  rollover_generation: number
+}
+interface FakeAwardPrize { id: number; pot_id: string; scope: string; gross_amount: number; admin_fee_amount: number; charity_fee_amount: number; is_settled: boolean; rollover: boolean }
+interface FakeAwardMember { pot_id: string; user_id: string; role: string }
+
+interface FakeAwardDb {
+  pots: FakeAwardPot[]
+  entries: FakeAwardEntry[]
+  prizes: FakeAwardPrize[]
+  members: FakeAwardMember[]
+  gameweeks: { id: number; deadline_utc: string }[]
+  nextPotId: number
+  failPotMembersInsert?: boolean
+}
+
+function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01T00:00:00Z')): GameEngineContext {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'pot_prizes') {
+        return {
+          select() {
+            return {
+              eq(_c1: string, potId: string) {
+                return {
+                  eq: (_c2: string, _scope: string) => ({
+                    maybeSingle: () => Promise.resolve({ data: db.prizes.find((p) => p.pot_id === potId) ?? null, error: null }),
+                  }),
+                }
+              },
+            }
+          },
+          update(patch: Record<string, unknown>) {
+            return { eq: (_c: string, id: number) => {
+              const row = db.prizes.find((p) => p.id === id)
+              if (row) Object.assign(row, patch)
+              return Promise.resolve({ data: null, error: null })
+            } }
+          },
+          insert(row: Record<string, unknown>) {
+            db.prizes.push({ id: db.prizes.length + 1, ...row } as FakeAwardPrize)
+            return Promise.resolve({ data: null, error: null })
+          },
+        }
+      }
+      if (table === 'pots') {
+        return {
+          select(cols: string) {
+            const embedAware = cols.includes('game_entry_lms')
+            return {
+              eq: (_c: string, potId: string) => ({
+                single: () => Promise.resolve({ data: db.pots.find((p) => p.id === potId) ?? null, error: null }),
+                maybeSingle: () => Promise.resolve({ data: db.pots.find((p) => p.id === potId) ?? null, error: null }),
+              }),
+              // unused branch guard — pots.select() in this fake never needs embedAware
+              _embedAware: embedAware,
+            }
+          },
+          insert(row: Record<string, unknown>) {
+            const id = `rollover-pot-${db.nextPotId++}`
+            const newPot = { id, ...row } as unknown as FakeAwardPot
+            db.pots.push(newPot)
+            return {
+              select: () => ({
+                single: () => Promise.resolve({ data: { id }, error: null }),
+              }),
+            }
+          },
+          delete() {
+            return { eq: (_c: string, id: string) => {
+              db.pots = db.pots.filter((p) => p.id !== id)
+              return Promise.resolve({ data: null, error: null })
+            } }
+          },
+        }
+      }
+      if (table === 'gameweeks') {
+        return {
+          select(_cols: string) {
+            return {
+              eq: (_c: string, id: number) => ({
+                maybeSingle: () => Promise.resolve({ data: db.gameweeks.find((g) => g.id === id) ?? null, error: null }),
+              }),
+            }
+          },
+        }
+      }
+      if (table === 'pot_members') {
+        return {
+          insert(row: Record<string, unknown>) {
+            if (db.failPotMembersInsert) {
+              return Promise.resolve({ data: null, error: { message: 'simulated failure' } })
+            }
+            db.members.push(row as unknown as FakeAwardMember)
+            return Promise.resolve({ data: null, error: null })
+          },
+        }
+      }
+      if (table === 'game_entries') {
+        return {
+          select(cols: string) {
+            const embedAware = cols.includes('game_entry_lms')
+            let filtered = db.entries.slice()
+            const builder = {
+              eq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] === val)
+                return builder
+              },
+              neq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] !== val)
+                return builder
+              },
+              then(resolve: (v: { data: unknown; error: null }) => void) {
+                if (embedAware) {
+                  resolve({
+                    data: filtered.map((e) => ({
+                      user_id: e.user_id,
+                      game_entry_lms: { competitive_status: e.competitive_status, eliminated_gameweek_id: e.eliminated_gameweek_id },
+                    })),
+                    error: null,
+                  })
+                } else {
+                  resolve({ data: filtered.map((e) => ({ id: e.id })), error: null })
+                }
+              },
+            }
+            return builder
+          },
+          update(patch: Record<string, unknown>) {
+            let filtered = db.entries.slice()
+            const builder = {
+              eq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] === val)
+                return builder
+              },
+              neq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] !== val)
+                if (true) { /* re-evaluate on next chain call */ }
+                return builder
+              },
+              then(resolve: (v: { data: null; error: null }) => void) {
+                for (const row of filtered) Object.assign(row, patch)
+                resolve({ data: null, error: null })
+              },
+            }
+            return builder
+          },
+        }
+      }
+      throw new Error(`Unexpected table in test fake: ${table}`)
+    },
+  }
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => now }
+}
+
+function baseAwardPot(overrides: Partial<FakeAwardPot> = {}): FakeAwardPot {
+  return {
+    id: 'pot-1', name: 'Test LMS Pot', created_by: 'organiser-1', season_id: 3, league_id: 6,
+    entry_fee: 10, end_gameweek_id: null,
+    wipeout_resolution: 'split_prize', season_end_tie_rule: 'split_prize',
+    admin_fee_type: 'none', admin_fee_amount: null, admin_fee_percentage: null,
+    charity_fee_type: 'none', charity_fee_amount: null, charity_fee_percentage: null,
+    carry_over_amount: 0, rollover_generation: 0,
+    ...overrides,
+  }
+}
+
+function baseAwardDb(pots: FakeAwardPot[], entries: FakeAwardEntryInput[]): FakeAwardDb {
+  const potId = pots[0].id
+  return {
+    pots,
+    entries: entries.map((e) => ({ ...e, pot_id: potId })),
+    prizes: [],
+    members: [],
+    gameweeks: [],
+    nextPotId: 1,
+  }
+}
+
+Deno.test('awardPrize is a no-op once already settled', async () => {
+  const db = baseAwardDb([baseAwardPot()], [
+    { id: 'entry-1', user_id: 'user-1', status: 'settled', payout_amount: 5, competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+  db.prizes.push({ id: 1, pot_id: 'pot-1', scope: 'season', gross_amount: 10, admin_fee_amount: 0, charity_fee_amount: 0, is_settled: true, rollover: false })
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.entries[0].payout_amount, 5) // untouched
+})
+
+Deno.test('awardPrize is a silent no-op while the competition is still in progress', async () => {
+  const db = baseAwardDb([baseAwardPot()], [
+    { id: 'entry-1', user_id: 'user-1', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-2', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes.length, 0)
+  assertEquals(db.entries[0].status, 'pending')
+})
+
+Deno.test('awardPrize: single survivor gets the entire net prize; every non-void entry is settled', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes.length, 1)
+  assertEquals(db.prizes[0].gross_amount, 20) // 2 non-void entries x 10
+  assertEquals(db.prizes[0].is_settled, true)
+  assertEquals(db.prizes[0].rollover, false)
+  assertEquals(db.entries[0].payout_amount, 20)
+  assertEquals(db.entries[1].payout_amount, 0) // loser gets nothing
+  assertEquals(db.entries[0].status, 'settled')
+  assertEquals(db.entries[1].status, 'settled') // settled too, just no payout
+})
+
+Deno.test('awardPrize: single survivor excludes voided entries from the gross calculation', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-voided', status: 'void', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 5 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].gross_amount, 10) // only the 1 non-void entry
+  assertEquals(db.entries[1].status, 'void') // untouched — still void, not settled
+})
+
+Deno.test('awardPrize: wipeout + split_prize splits the net prize equally among the group', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10, wipeout_resolution: 'split_prize' })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].gross_amount, 20)
+  assertEquals(db.entries[0].payout_amount, 10)
+  assertEquals(db.entries[1].payout_amount, 10)
+  assertEquals(db.prizes[0].rollover, false)
+})
+
+Deno.test('awardPrize: wipeout + roll_prize pays nobody and creates a draft rollover pot', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', name: 'Premier League LMS', entry_fee: 10, wipeout_resolution: 'roll_prize', rollover_generation: 0 })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].rollover, true)
+  assertEquals(db.entries[0].payout_amount, 0)
+  assertEquals(db.entries[1].payout_amount, 0)
+  assertEquals(db.entries[0].status, 'settled') // still settled, even with no payout
+
+  assertEquals(db.pots.length, 2)
+  const newPot = db.pots[1]
+  assertEquals(newPot.name, 'Premier League LMS (Rollover #1)')
+  assertEquals((newPot as unknown as { rollover_source_pot_id: string }).rollover_source_pot_id, 'pot-1')
+  assertEquals((newPot as unknown as { carry_over_amount: number }).carry_over_amount, 20) // the full net prize
+  assertEquals(newPot.rollover_generation, 1)
+  assertEquals((newPot as unknown as { status: string }).status, 'draft')
+  assertEquals((newPot as unknown as { start_gameweek_id: unknown }).start_gameweek_id, undefined) // never set
+
+  assertEquals(db.members.length, 1)
+  assertEquals(db.members[0].pot_id, newPot.id)
+  assertEquals(db.members[0].user_id, 'organiser-1')
+  assertEquals(db.members[0].role, 'admin')
+})
+
+Deno.test('awardPrize: rollover default naming strips an existing "(Rollover #N)" suffix before appending the new one', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', name: 'Premier League LMS (Rollover #1)', wipeout_resolution: 'roll_prize', rollover_generation: 1 })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 20 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.pots[1].name, 'Premier League LMS (Rollover #2)')
+  assertEquals(db.pots[1].rollover_generation, 2)
+})
+
+Deno.test('awardPrize: rollover carry_over_amount includes the source pot\'s own prior carry-over', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', entry_fee: 10, carry_over_amount: 50, wipeout_resolution: 'roll_prize' })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].gross_amount, 60) // 1 entry x 10 + 50 already-carried-over
+  assertEquals((db.pots[1] as unknown as { carry_over_amount: number }).carry_over_amount, 60)
+})
+
+Deno.test('awardPrize: rollover pot creation rolls back if adding the organiser as a member fails', async () => {
+  const sourcePot = baseAwardPot({ wipeout_resolution: 'roll_prize' })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  db.failPotMembersInsert = true
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+
+  assertEquals(db.pots.length, 1) // the new pot was rolled back, not left orphaned
+})
+
+Deno.test('awardPrize: season-end tie + split_prize splits equally among every alive entry', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10, season_end_tie_rule: 'split_prize', end_gameweek_id: 38 })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+  db.gameweeks.push({ id: 38, deadline_utc: '2026-01-01T00:00:00Z' })
+  const ctx = fakeAwardPrizeContext(db, new Date('2026-06-01T00:00:00Z')) // well after gw38's deadline
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes.length, 1)
+  assertEquals(db.prizes[0].gross_amount, 20)
+  assertEquals(db.prizes[0].rollover, false)
+  assertEquals(db.entries[0].payout_amount, 10)
+  assertEquals(db.entries[1].payout_amount, 10)
+  assertEquals(db.entries[0].status, 'settled')
+  assertEquals(db.entries[1].status, 'settled')
+})
+
+Deno.test('awardPrize: season-end tie is NOT a season-end outcome until the final gameweek deadline has actually passed', async () => {
+  const db = baseAwardDb([baseAwardPot({ season_end_tie_rule: 'split_prize', end_gameweek_id: 38 })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+  db.gameweeks.push({ id: 38, deadline_utc: '2026-12-31T00:00:00Z' }) // still in the future
+  const ctx = fakeAwardPrizeContext(db, new Date('2026-06-01T00:00:00Z'))
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes.length, 0) // still in_progress — competition hasn't concluded
+})
+
+Deno.test('awardPrize: season-end tie + final_prediction throws rather than guessing a resolution', async () => {
+  const db = baseAwardDb([baseAwardPot({ season_end_tie_rule: 'final_prediction', end_gameweek_id: 38 })], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+  db.gameweeks.push({ id: 38, deadline_utc: '2026-01-01T00:00:00Z' })
+  const ctx = fakeAwardPrizeContext(db, new Date('2026-06-01T00:00:00Z'))
+  const engine = new LmsEngine()
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), LmsFinalPredictionNotImplementedError)
+
+  assertEquals(db.prizes.length, 0) // never wrote a prize row before throwing
+  assertEquals(db.entries[0].status, 'pending') // never settled entries either
+})
+
+Deno.test('awardPrize: throws LmsPrizePoolExceededError rather than clamping fees that exceed the gross pool', async () => {
+  const db = baseAwardDb([baseAwardPot({ entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 100 })], [
+    { id: 'entry-1', user_id: 'user-winner', status: 'pending', payout_amount: 0, competitive_status: 'alive', eliminated_gameweek_id: null },
+    { id: 'entry-2', user_id: 'user-loser', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), LmsPrizePoolExceededError)
+
+  assertEquals(db.prizes.length, 0)
+  assertEquals(db.entries[0].status, 'pending') // never settled — the throw happens before any write
 })

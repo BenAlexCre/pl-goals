@@ -192,9 +192,10 @@ and [game-engine.md § GE-5.2](./game-engine.md#ge-52-last-man-standing) for
 the implementation-level detail these rules are drawn from. Supersedes an
 earlier same-session version of this section that proposed cumulative
 per-gameweek backfill billing for late entry — that proposal has been
-withdrawn; see the linked decision for why. **Not yet built** — these are
-the authoritative rules the remaining Milestone 5 slices implement against,
-not a description of shipped behavior.
+withdrawn; see the linked decision for why. These rules are now largely
+shipped — see the **Status** paragraph at the end of this section for
+exactly what's implemented and what (Final Prediction, pot activation)
+remains deliberately unbuilt.
 
 **Payment.** One entry fee per competition, paid once — never a recurring
 weekly charge. This applies to every LMS pot, rollover or not. (Pick 5's
@@ -273,11 +274,13 @@ exactly one survivor over several gameweeks).
   prize pool, it is never a substitute for anyone paying in. Example: a
   finished pot rolls over €300; the new pot collects €220 in entry fees;
   that new pot's prize pool is €520. The new pot gets a sensible default
-  name derived from the old one (e.g. "Premier League LMS (Rollover)" or
-  "Premier League LMS - Season 2") and starts inactive (draft) — see "Late
-  entry" below for what the organiser does before opening it. The old pot
-  is never reopened or modified further — an immutable historical record
-  from the moment it settles.
+  name derived from the old one — e.g. "Premier League LMS" becomes
+  "Premier League LMS (Rollover #1)"; rolling that pot over again becomes
+  "Premier League LMS (Rollover #2)", never a stacked "(Rollover #1)
+  (Rollover #2)" — and starts inactive (draft) — see "Late entry" below for
+  what the organiser does before opening it. The old pot is never reopened
+  or modified further — an immutable historical record from the moment it
+  settles.
 
 **Season-end tie.** A separate case from a wipeout: multiple entrants are
 still alive when the season's actual final gameweek finishes (nobody was
@@ -312,25 +315,28 @@ pot.
 
 **Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
 submission, locking, scoring, elimination, payment-void settlement,
-standings, and winner determination are all implemented and verified live,
-as of 2026-08-06** — see
+standings, winner determination, and prize awarding are all implemented and
+verified live, as of 2026-08-06** — see
 [current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
 [decisions.md § LMS locking](./decisions.md#lms-locking),
 [decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination),
 [decisions.md § LMS settlement](./decisions.md#lms-settlement),
-[decisions.md § LMS standings](./decisions.md#lms-standings), and
-[decisions.md § LMS winner determination](./decisions.md#lms-winner-determination).
+[decisions.md § LMS standings](./decisions.md#lms-standings),
+[decisions.md § LMS winner determination](./decisions.md#lms-winner-determination),
+and [decisions.md § LMS prize awarding](./decisions.md#lms-prize-awarding).
 Pick submission enforces the no-repeat-team rule above via a real database
-constraint, not just application logic. `LmsEngine.determineWinner()` can
-now correctly tell a single survivor, a wipeout, a season-end tie, and a
-still-in-progress competition apart — but it only *identifies* which one
-occurred, purely by reading state; **actually paying out is still not
-implemented**. Wipeout Resolution and Season End Resolution themselves
-(splitting or rolling the prize) remain unbuilt, along with automatic
-rollover-pot creation and the Final Prediction settlement path — all
-identified but not yet designed at the implementation level. Real work for
-later Milestone 5 slices, not invented ahead of time.
+constraint, not just application logic. A single survivor is paid the full
+net prize; a Split Prize wipeout or season-end tie splits it equally among
+the group; a Roll Prize wipeout pays nobody and automatically creates the
+new draft rollover pot described above (name, config, `carry_over_amount`,
+sole organiser member — all Game-Engine-created, no manual step). **Not
+implemented, deliberately:** the Final Prediction settlement path (throws a
+specific, catchable error rather than guessing if a pot configured that way
+ever actually reaches a season-end tie — most won't) and activating a draft
+rollover pot (`status` leaving `'draft'` — nothing about a rollover pot
+starts on its own; this is a separate, not-yet-designed piece of work, not
+part of prize awarding itself).
 
 ## Admin permissions
 

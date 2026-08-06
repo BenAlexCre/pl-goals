@@ -1,13 +1,11 @@
 // Milestone 5 (docs/game-engine.md § GE-5.2, GE-12): validateEntry (Slice 2),
 // lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5),
-// generateStandings (Slice 6), and determineWinner (Slice 7) are
-// implemented — awardPrize/notifyUsers still throw
+// generateStandings (Slice 6), determineWinner (Slice 7), and awardPrize
+// (Slice 8) are implemented — only notifyUsers still throws
 // GameEngineNotImplementedError, same "half-built mode fails loudly"
-// pattern Pick5Engine used between its own Slice 2 and Slice 9.
-// determineWinner() is deliberately not wired into settle() (or anywhere
-// else) this slice — it exists standalone, read-only, exactly like
-// Pick5Engine's own determineWinner() did between its Slice 7 and Slice 8
-// (when awardPrize() first called it).
+// pattern Pick5Engine used between its own Slice 2 and Slice 9 (notifyUsers
+// was Pick 5's own Slice 9 too — deliberately left for LMS's equivalent
+// next slice, not bundled into this one).
 //
 // lockEntries() deliberately does NOT touch game_entries.status, unlike
 // Pick5Engine's version. game_entries is season-scoped for LMS (GE-4.5) —
@@ -28,43 +26,76 @@
 // (GE-8.4) — so there's no need to defer it to a later slice. See
 // docs/decisions.md § LMS scoring and elimination.
 //
-// settle() therefore has much less left to do than Pick5Engine's version,
-// per the repo owner's explicit 2026-08-06 instruction not to duplicate
-// calculateScore()'s work: it does the payment-void check ONLY (genuinely
-// settlement's job, untouched by calculateScore()) and nothing else. Two
-// things Pick5Engine's settle() does are deliberately NOT done here:
-//   - It never transitions game_entries.status to 'settled'. That status
-//     must stay 'pending' across the whole competition (same reasoning as
-//     lockEntries() never touching it) — 'settled' only makes sense once
-//     the competition has actually concluded, which isn't every gameweek's
-//     settle() call the way a Pick 5 gameweek concludes weekly.
-//   - It never calls determineWinner()/awardPrize(). Pick 5 calls them
-//     every gameweek because a new payable instance concludes every
-//     gameweek (GE-8.4). LMS's competition only concludes once (a
-//     wipeout, or one survivor) — calling award-adjacent methods on every
-//     ordinary gameweek's settle() would be structurally wrong, not just
-//     premature. Detecting "has this competition just concluded" is real,
-//     unstarted design work (wipeout detection), correctly left for a
-//     later slice rather than guessed at here.
+// settle() therefore starts with much less to do than Pick5Engine's
+// version — the payment-void check only (genuinely settlement's job,
+// untouched by calculateScore()) — but as of Slice 8 it DOES call
+// generateStandings() and awardPrize() per eligible pot, same as
+// Pick5Engine.settle() does, once both those methods existed to call.
+// game_entries.status still never becomes 'settled' *inside* settle()
+// itself, though — that transition happens inside awardPrize(), only once
+// a real outcome (not "still in progress") is reached, per Slice 5's own
+// reasoning that 'settled' only makes sense once the competition has
+// actually concluded.
 //
-// generateStandings() (Slice 6) IS called from settle(), though — Slice
-// 5's own reasoning grouped it with determineWinner()/awardPrize(), but on
-// reflection that was imprecise: standings are a harmless, idempotent
-// snapshot, not a competition-concluding action, so refreshing them every
-// gameweek has real value (same as Pick5Engine.settle() already does) —
-// see docs/decisions.md § LMS standings for the full reasoning, including
-// why the standings *shape* itself is not modeled on Pick 5's at all
-// (no points exist for LMS; ranking is alive-tied-at-1 then eliminated-by-
-// recency, not a score comparison).
+// generateStandings() (Slice 6) and awardPrize() (Slice 8) are both called
+// unconditionally, every gameweek, from settle() — unlike Pick 5, most of
+// those calls correctly do nothing (competition still in progress) and
+// return silently; see docs/decisions.md § LMS standings and § LMS prize
+// awarding for the full reasoning behind each, including why the standings
+// *shape* itself is not modeled on Pick 5's at all (no points exist for
+// LMS; ranking is alive-tied-at-1 then eliminated-by-recency, not a score
+// comparison).
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import { GameEngineNotImplementedError } from '../errors.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
-import { LmsValidationError } from './errors.ts'
+import { LmsFinalPredictionNotImplementedError, LmsPrizePoolExceededError, LmsValidationError } from './errors.ts'
 
 export interface LmsPickInput {
   gameweekId: number
   teamId: number
+}
+
+// Shared between determineWinner() and awardPrize() — see classifyOutcome()
+// below for why a plain string[] isn't rich enough for awardPrize() to use
+// directly.
+type LmsOutcome =
+  | { type: 'in_progress' }
+  | { type: 'single_survivor'; winnerId: string }
+  | { type: 'wipeout'; gameweekId: number; memberIds: string[] }
+  | { type: 'season_end'; aliveIds: string[] }
+
+// Money helpers — same rounding rules as Pick5Engine's own (docs/decisions.md
+// § Prize pool deductions): roundToCents (standard round-half-up) for the
+// gross/fee/net calculation itself; floorToCents (always down) when
+// splitting the net pool across multiple recipients, so no tied recipient
+// is ever favored by rounding. Genuinely shared-platform money math, not
+// LMS-specific — reimplemented privately here rather than imported from
+// pick5/engine.ts (GE-18 forbids cross-mode imports), same acknowledged-
+// duplication category as the pot_standings_snapshots upsert workaround
+// (see generateStandings()'s own comment) — a future extraction into a
+// shared _shared/game-engine/ helper would cover both.
+function roundToCents(amount: number): number {
+  return Math.round(amount * 100) / 100
+}
+
+function floorToCents(amount: number): number {
+  return Math.floor(amount * 100) / 100
+}
+
+function calculateLmsFeeAmount(
+  type: 'none' | 'fixed' | 'percentage',
+  fixedAmount: number | null,
+  percentage: number | null,
+  grossAmount: number
+): number {
+  if (type === 'fixed') {
+    return fixedAmount ?? 0
+  }
+  if (type === 'percentage') {
+    return roundToCents((grossAmount * (percentage ?? 0)) / 100)
+  }
+  return 0
 }
 
 function parsePick(picks: unknown): LmsPickInput {
@@ -191,6 +222,17 @@ export class LmsEngine implements GameEngine {
   // whose competition hasn't reached gameweekId yet (a draft rollover pot
   // with a future start_gameweek_id, for instance) must never have their
   // entries touched by a gameweek they haven't started.
+  //
+  // Milestone 5 Slice 8: also excludes any pot whose competition has
+  // already concluded (a settled, scope='season' pot_prizes row exists) —
+  // this is what closes the Slice 7 sequencing gap. Before this, nothing
+  // stopped calculateScore() from continuing to process a pot after its
+  // sole survivor had effectively already won, since it had no awareness
+  // of "has awardPrize() already run for this pot." Reusing
+  // pot_prizes.is_settled (the same signal awardPrize() itself uses for
+  // its own idempotency, below) rather than inventing a second "is this
+  // pot done" flag — one source of truth for "has this competition
+  // concluded," read by calculateScore(), settle(), and awardPrize() alike.
   private async getEligibleLmsPotIds(ctx: GameEngineContext, gameweekId: number): Promise<string[]> {
     const { data: pots, error } = await ctx.supabase
       .from('pots')
@@ -202,7 +244,24 @@ export class LmsEngine implements GameEngine {
       throw new Error(`Failed to look up LMS pots: ${error.message}`)
     }
 
-    return (pots ?? []).map((p: { id: string }) => p.id)
+    const candidateIds = (pots ?? []).map((p: { id: string }) => p.id)
+    if (candidateIds.length === 0) {
+      return []
+    }
+
+    const { data: concludedPrizes, error: concludedError } = await ctx.supabase
+      .from('pot_prizes')
+      .select('pot_id')
+      .eq('scope', 'season')
+      .eq('is_settled', true)
+      .in('pot_id', candidateIds)
+
+    if (concludedError) {
+      throw new Error(`Failed to look up concluded pots: ${concludedError.message}`)
+    }
+
+    const concludedPotIds = new Set((concludedPrizes ?? []).map((p: { pot_id: string }) => p.pot_id))
+    return candidateIds.filter((id) => !concludedPotIds.has(id))
   }
 
   // GE-6: "Resolve picks against real fixture data." Two things happen for
@@ -445,13 +504,18 @@ export class LmsEngine implements GameEngine {
     }
 
     // Same per-pot failure isolation as Pick5Engine.settle() (production
-    // hardening sprint, 2026-08-05) — one pot's standings failure must
-    // never block another's, or the payment-void work above (already
-    // durably written) for unrelated pots.
+    // hardening sprint, 2026-08-05) — one pot's standings/award failure
+    // must never block another's, or the payment-void work above (already
+    // durably written) for unrelated pots. awardPrize() wired in here as
+    // of Slice 8 (mirrors Pick5Engine.settle() calling generateStandings()
+    // then awardPrize() per pot) — most calls will find the competition
+    // still in progress and no-op silently, exactly like generateStandings()
+    // being idempotent/harmless on an ordinary gameweek.
     const potErrors: { potId: string; message: string }[] = []
     for (const potId of potIds) {
       try {
         await this.generateStandings(ctx, potId)
+        await this.awardPrize(ctx, potId)
       } catch (err) {
         potErrors.push({ potId, message: err instanceof Error ? err.message : String(err) })
       }
@@ -459,7 +523,7 @@ export class LmsEngine implements GameEngine {
 
     if (potErrors.length > 0) {
       throw new Error(
-        `settle() finalized entries for gameweek ${gameweekId}, but standings processing failed for ${potErrors.length} pot(s): ` +
+        `settle() finalized entries for gameweek ${gameweekId}, but standings/prize processing failed for ${potErrors.length} pot(s): ` +
           potErrors.map((e) => `${e.potId}: ${e.message}`).join('; ')
       )
     }
@@ -624,44 +688,36 @@ export class LmsEngine implements GameEngine {
     }
   }
 
-  // GE-6: "Identify the winner(s)." Not modeled on Pick5Engine's version at
-  // all — that one is a one-line "rank 1 of the most recently settled
-  // gameweek" lookup because for Pick 5, every settled gameweek genuinely
-  // is a concluded, payable instance (a weekly jackpot). LMS's competition
-  // concludes exactly once, so "no outcome yet, still in progress" has to
-  // be a real, first-class return value here, with no Pick 5 equivalent to
-  // borrow from.
+  // Private, shared by determineWinner() and awardPrize() (Milestone 5
+  // Slice 8 extracted this out of determineWinner()'s own Slice 7 body —
+  // same "internal reuse within one mode" pattern as
+  // getMostRecentGameweekWithStandings() in Pick5Engine, extracted for the
+  // identical reason: awardPrize() needs the exact same classification
+  // determineWinner() already computes, and re-deriving it from a plain
+  // string[] would be ambiguous — a wipeout group of size 1 (a real,
+  // if unintended, edge case; see the sequencing-gap note below) is
+  // indistinguishable from a single survivor by array length alone, so
+  // awardPrize() needs the richer, typed outcome, not just the ids.
   //
   // Four outcomes, decided 2026-08-06 by reasoning through the approved
   // rules (docs/decisions.md § LMS winner determination has the full
-  // design, including what's still unresolved):
-  //   - exactly one alive entry -> that entry wins immediately, [userId].
-  //   - zero alive entries -> a wipeout. Returns every entry eliminated in
-  //     the most recent (max) eliminated_gameweek_id among them — "all
-  //     remaining players eliminated in the same gameweek." What to DO
-  //     with that group (split vs. roll) is Wipeout Resolution's job
-  //     (awardPrize(), not built yet) — this method only identifies who's
-  //     in the group, never reads pots.wipeout_resolution itself.
+  // design):
+  //   - exactly one alive entry -> that entry wins immediately.
+  //   - zero alive entries -> a wipeout. The group is every entry
+  //     eliminated in the most recent (max) eliminated_gameweek_id among
+  //     them — "all remaining players eliminated in the same gameweek."
   //   - more than one alive entry, AND the pot's designated final gameweek
   //     (pots.end_gameweek_id) has already passed its deadline -> a
-  //     season-end tie. Returns every still-alive entry. Season End
-  //     Resolution (split vs. Final Prediction) is equally out of scope
-  //     here, deliberately — this is a genuinely separate concept from
-  //     Wipeout Resolution and must not be resolved by the same code path
-  //     (explicit repo owner instruction) — the caller distinguishes this
-  //     case from a wipeout by checking competitive_status on the returned
-  //     ids (all 'alive' here; all 'eliminated' for a wipeout) rather than
-  //     this method returning two different shapes for a fixed-by-GE-6
-  //     string[] contract.
+  //     season-end tie, every still-alive entry.
   //   - more than one alive entry, and the final gameweek hasn't concluded
-  //     (or pots.end_gameweek_id isn't set at all) -> still in progress,
-  //     []. Same meaning as Pick5Engine's own "nothing to report yet" [].
+  //     (or pots.end_gameweek_id isn't set at all) -> still in progress.
   //
-  // No writes of any kind happen here — no elimination (calculateScore()'s
-  // job already), no pot_prizes, no rollover pot creation. Purely a read
-  // and a classification, per the repo owner's explicit "only determine
-  // the outcome" instruction.
-  async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+  // Never reads pots.wipeout_resolution/season_end_tie_rule — deciding
+  // what to DO with a wipeout/season-end group is awardPrize()'s job
+  // (below), kept deliberately separate per the repo owner's explicit
+  // instruction not to mix Wipeout Resolution and Season End Resolution
+  // into the same code path.
+  private async classifyOutcome(ctx: GameEngineContext, potId: string): Promise<LmsOutcome> {
     const { data: entries, error: entriesError } = await ctx.supabase
       .from('game_entries')
       .select('user_id, game_entry_lms(competitive_status, eliminated_gameweek_id)')
@@ -671,7 +727,7 @@ export class LmsEngine implements GameEngine {
       throw new Error(`Failed to look up entries: ${entriesError.message}`)
     }
     if (!entries?.length) {
-      return []
+      return { type: 'in_progress' }
     }
 
     type LmsEmbed = { competitive_status: string; eliminated_gameweek_id: number | null }
@@ -693,15 +749,16 @@ export class LmsEngine implements GameEngine {
     }
 
     if (alive.length === 1) {
-      return [alive[0].userId]
+      return { type: 'single_survivor', winnerId: alive[0].userId }
     }
 
     if (alive.length === 0) {
       if (eliminated.length === 0) {
-        return [] // no entries resolved at all yet — nothing to determine
+        return { type: 'in_progress' } // no entries resolved at all yet
       }
       const mostRecentGameweek = Math.max(...eliminated.map((e) => e.eliminatedGameweekId))
-      return eliminated.filter((e) => e.eliminatedGameweekId === mostRecentGameweek).map((e) => e.userId)
+      const memberIds = eliminated.filter((e) => e.eliminatedGameweekId === mostRecentGameweek).map((e) => e.userId)
+      return { type: 'wipeout', gameweekId: mostRecentGameweek, memberIds }
     }
 
     // alive.length > 1 — only a season-end tie if the pot's own designated
@@ -716,7 +773,7 @@ export class LmsEngine implements GameEngine {
       throw new Error(`Failed to look up pot: ${potError.message}`)
     }
     if (!pot?.end_gameweek_id) {
-      return []
+      return { type: 'in_progress' }
     }
 
     const { data: endGameweek, error: gameweekError } = await ctx.supabase
@@ -729,14 +786,311 @@ export class LmsEngine implements GameEngine {
       throw new Error(`Failed to look up the pot's final gameweek: ${gameweekError.message}`)
     }
     if (!endGameweek?.deadline_utc || ctx.now() < new Date(endGameweek.deadline_utc)) {
-      return []
+      return { type: 'in_progress' }
     }
 
-    return alive.map((a) => a.userId)
+    return { type: 'season_end', aliveIds: alive.map((a) => a.userId) }
   }
 
-  async awardPrize(_ctx: GameEngineContext, _potId: string): Promise<void> {
-    throw new GameEngineNotImplementedError('last_man_standing', 'awardPrize')
+  // GE-6: "Identify the winner(s)." Not modeled on Pick5Engine's version at
+  // all — that one is a one-line "rank 1 of the most recently settled
+  // gameweek" lookup because for Pick 5, every settled gameweek genuinely
+  // is a concluded, payable instance (a weekly jackpot). LMS's competition
+  // concludes exactly once, so "no outcome yet, still in progress" has to
+  // be a real, first-class return value here, with no Pick 5 equivalent to
+  // borrow from. Thin wrapper over classifyOutcome() (Slice 8) — flattens
+  // the rich outcome into GE-6's fixed Promise<string[]> shape. A caller
+  // distinguishes a wipeout from a season-end tie by checking
+  // competitive_status on the returned ids (all 'eliminated' for a
+  // wipeout; all 'alive' for a season-end tie), not from this return value
+  // alone.
+  //
+  // No writes of any kind happen here — no elimination (calculateScore()'s
+  // job already), no pot_prizes, no rollover pot creation. Purely a read
+  // and a classification, per the repo owner's explicit "only determine
+  // the outcome" instruction.
+  async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+    const outcome = await this.classifyOutcome(ctx, potId)
+    switch (outcome.type) {
+      case 'in_progress':
+        return []
+      case 'single_survivor':
+        return [outcome.winnerId]
+      case 'wipeout':
+        return outcome.memberIds
+      case 'season_end':
+        return outcome.aliveIds
+    }
+  }
+
+  // GE-6: "Split net prize pool equally." / GE-8.4: awardPrize() internally
+  // calls determineWinner() (here, classifyOutcome() directly, to reuse the
+  // richer typed result rather than re-deriving it from a flattened
+  // string[] — see classifyOutcome()'s own comment for why that ambiguity
+  // matters). Designed from the approved LMS outcome model, not
+  // Pick5Engine's version — reused where the underlying mechanics are
+  // genuinely shared (money math, the pot_prizes partial-index upsert
+  // workaround, floor-not-round-so-no-one-is-favored splitting), diverged
+  // everywhere the outcome model itself differs:
+  //   - single_survivor: the net prize goes entirely to that one entry.
+  //   - wipeout, wipeout_resolution = 'split_prize': split equally among
+  //     the wipeout group (same multi-winner split Pick 5 already uses).
+  //   - wipeout, wipeout_resolution = 'roll_prize': nobody is paid; this
+  //     pot's pot_prizes row is marked rollover = true and the net amount
+  //     becomes the new pot's carry_over_amount — see createRolloverPot().
+  //   - season_end, season_end_tie_rule = 'split_prize': identical split
+  //     logic to a Split Prize wipeout, just a different source group
+  //     (every still-alive entry, not an eliminated one).
+  //   - season_end, season_end_tie_rule = 'final_prediction': not
+  //     implemented — throws LmsFinalPredictionNotImplementedError rather
+  //     than guessing, per the repo owner's explicit instruction.
+  //   - in_progress: a no-op, silently. Unlike Pick5Engine's version (which
+  //     throws Pick5NoEligibleWinnersError when winners.length === 0
+  //     despite settled entries existing — genuinely anomalous there),
+  //     "not concluded yet" is LMS's normal, expected, most common state:
+  //     awardPrize() is called from settle() every gameweek (see below),
+  //     so most calls correctly finding nothing to do yet must be silent,
+  //     not an error.
+  //
+  // Idempotent the same way Pick5Engine's version is: an existing, settled
+  // pot_prizes row (scope='season') short-circuits the whole method before
+  // any classification or writes happen — this is also the exact signal
+  // getEligibleLmsPotIds() now checks to close the Slice 7 sequencing gap,
+  // so a concluded pot's calculateScore()/settle() calls stop reaching this
+  // method's own entries at all, not just this method itself no-oping.
+  //
+  // Every entry in the pot (not just the winner(s)) is transitioned to
+  // status = 'settled' once a real outcome is reached — deliberately
+  // deferred exactly this far, per Slice 5's own reasoning ("'settled'
+  // only makes sense once the competition has actually concluded").
+  async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
+    const { data: existingPrize, error: existingPrizeError } = await ctx.supabase
+      .from('pot_prizes')
+      .select('id, is_settled')
+      .eq('pot_id', potId)
+      .eq('scope', 'season')
+      .maybeSingle()
+
+    if (existingPrizeError) {
+      throw new Error(`Failed to look up existing prize: ${existingPrizeError.message}`)
+    }
+    if ((existingPrize as { id: number; is_settled: boolean } | null)?.is_settled) {
+      return
+    }
+
+    const outcome = await this.classifyOutcome(ctx, potId)
+    if (outcome.type === 'in_progress') {
+      return
+    }
+
+    const { data: pot, error: potError } = await ctx.supabase
+      .from('pots')
+      .select('name, created_by, season_id, league_id, entry_fee, end_gameweek_id, wipeout_resolution, season_end_tie_rule, admin_fee_type, admin_fee_amount, admin_fee_percentage, charity_fee_type, charity_fee_amount, charity_fee_percentage, carry_over_amount, rollover_generation')
+      .eq('id', potId)
+      .single()
+
+    if (potError) {
+      throw new Error(`Failed to look up pot: ${potError.message}`)
+    }
+
+    type PotConfig = {
+      name: string
+      created_by: string
+      season_id: number
+      league_id: number
+      entry_fee: number
+      end_gameweek_id: number | null
+      wipeout_resolution: 'split_prize' | 'roll_prize'
+      season_end_tie_rule: 'split_prize' | 'final_prediction'
+      admin_fee_type: 'none' | 'fixed' | 'percentage'
+      admin_fee_amount: number | null
+      admin_fee_percentage: number | null
+      charity_fee_type: 'none' | 'fixed' | 'percentage'
+      charity_fee_amount: number | null
+      charity_fee_percentage: number | null
+      carry_over_amount: number
+      rollover_generation: number
+    }
+    const potConfig = pot as PotConfig
+
+    if (outcome.type === 'season_end' && potConfig.season_end_tie_rule === 'final_prediction') {
+      throw new LmsFinalPredictionNotImplementedError(potId)
+    }
+
+    const { data: nonVoidEntries, error: nonVoidError } = await ctx.supabase
+      .from('game_entries')
+      .select('id')
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (nonVoidError) {
+      throw new Error(`Failed to count paid entries: ${nonVoidError.message}`)
+    }
+
+    const grossAmount = roundToCents(potConfig.entry_fee * (nonVoidEntries?.length ?? 0) + potConfig.carry_over_amount)
+    const adminFeeAmount = calculateLmsFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, grossAmount)
+    const charityFeeAmount = calculateLmsFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, grossAmount)
+    const netAmount = roundToCents(grossAmount - adminFeeAmount - charityFeeAmount)
+
+    if (netAmount < 0) {
+      throw new LmsPrizePoolExceededError(potId, grossAmount, adminFeeAmount, charityFeeAmount)
+    }
+
+    const rollover = outcome.type === 'wipeout' && potConfig.wipeout_resolution === 'roll_prize'
+    const recipients: string[] =
+      outcome.type === 'single_survivor' ? [outcome.winnerId]
+      : outcome.type === 'wipeout' && potConfig.wipeout_resolution === 'split_prize' ? outcome.memberIds
+      : outcome.type === 'season_end' ? outcome.aliveIds // season_end_tie_rule === 'split_prize', final_prediction already threw above
+      : [] // roll_prize
+
+    const prizeRow = {
+      pot_id: potId,
+      scope: 'season' as const,
+      gameweek_id: null,
+      gross_amount: grossAmount,
+      admin_fee_amount: adminFeeAmount,
+      charity_fee_amount: charityFeeAmount,
+      is_settled: true,
+      settled_at: ctx.now().toISOString(),
+      rollover,
+    }
+
+    // Same get-or-create-then-write-by-id workaround pot_standings_snapshots
+    // needed (GE-4.6) — pot_prizes has the identical partial-unique-index
+    // shape (pot_prizes_season_key on (pot_id) where scope='season').
+    if (existingPrize) {
+      const { error: updateError } = await ctx.supabase
+        .from('pot_prizes')
+        .update(prizeRow)
+        .eq('id', (existingPrize as { id: number }).id)
+
+      if (updateError) {
+        throw new Error(`Failed to update prize: ${updateError.message}`)
+      }
+    } else {
+      const { error: insertError } = await ctx.supabase.from('pot_prizes').insert(prizeRow)
+
+      if (insertError) {
+        throw new Error(`Failed to insert prize: ${insertError.message}`)
+      }
+    }
+
+    const { error: settleEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'settled', settled_at: ctx.now().toISOString() })
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (settleEntriesError) {
+      throw new Error(`Failed to settle entries: ${settleEntriesError.message}`)
+    }
+
+    if (recipients.length > 0) {
+      const perRecipientAmount = floorToCents(netAmount / recipients.length)
+      for (const userId of recipients) {
+        const { error: payoutError } = await ctx.supabase
+          .from('game_entries')
+          .update({ payout_amount: perRecipientAmount })
+          .eq('pot_id', potId)
+          .eq('user_id', userId)
+
+        if (payoutError) {
+          throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+        }
+      }
+    }
+
+    if (rollover) {
+      await this.createRolloverPot(ctx, potId, potConfig, netAmount)
+    }
+  }
+
+  // Milestone 5 Slice 8: automatic rollover-pot creation, per the repo
+  // owner's explicit "do NOT ask the organiser to create the rollover pot
+  // manually" decision (2026-08-05). Only ever called from awardPrize()
+  // above, immediately after the source pot's own pot_prizes row is
+  // already durably written with rollover = true — awardPrize()'s own
+  // idempotency check (an existing, settled pot_prizes row short-circuits
+  // the whole method) is what prevents this from ever running twice for
+  // the same source pot, so this method itself doesn't re-check.
+  //
+  // Compensating rollback, same pattern get-or-create-pick5-entry/
+  // get-or-create-lms-entry already established — supabase-js has no
+  // cross-table transaction, so if the pot_members insert fails after the
+  // pots insert succeeds, the just-created pot is deleted rather than left
+  // as an orphaned rollover pot with no organiser member.
+  private async createRolloverPot(
+    ctx: GameEngineContext,
+    sourcePotId: string,
+    sourcePot: {
+      name: string
+      created_by: string
+      season_id: number
+      league_id: number
+      entry_fee: number
+      end_gameweek_id: number | null
+      wipeout_resolution: 'split_prize' | 'roll_prize'
+      season_end_tie_rule: 'split_prize' | 'final_prediction'
+      admin_fee_type: 'none' | 'fixed' | 'percentage'
+      admin_fee_amount: number | null
+      admin_fee_percentage: number | null
+      charity_fee_type: 'none' | 'fixed' | 'percentage'
+      charity_fee_amount: number | null
+      charity_fee_percentage: number | null
+      rollover_generation: number
+    },
+    carryOverAmount: number
+  ): Promise<void> {
+    // Strips any existing "(Rollover #N)" suffix before appending the new
+    // one, so a rollover-of-a-rollover gets "Base Name (Rollover #3)", not
+    // "Base Name (Rollover #2) (Rollover #3)".
+    const baseName = sourcePot.name.replace(/\s*\(Rollover #\d+\)\s*$/, '')
+    const newGeneration = sourcePot.rollover_generation + 1
+    const newName = `${baseName} (Rollover #${newGeneration})`
+
+    const { data: newPot, error: potInsertError } = await ctx.supabase
+      .from('pots')
+      .insert({
+        name: newName,
+        season_id: sourcePot.season_id,
+        league_id: sourcePot.league_id,
+        created_by: sourcePot.created_by,
+        game_type: 'last_man_standing',
+        status: 'draft',
+        entry_fee: sourcePot.entry_fee,
+        end_gameweek_id: sourcePot.end_gameweek_id,
+        wipeout_resolution: sourcePot.wipeout_resolution,
+        season_end_tie_rule: sourcePot.season_end_tie_rule,
+        admin_fee_type: sourcePot.admin_fee_type,
+        admin_fee_amount: sourcePot.admin_fee_amount,
+        admin_fee_percentage: sourcePot.admin_fee_percentage,
+        charity_fee_type: sourcePot.charity_fee_type,
+        charity_fee_amount: sourcePot.charity_fee_amount,
+        charity_fee_percentage: sourcePot.charity_fee_percentage,
+        rollover_source_pot_id: sourcePotId,
+        carry_over_amount: carryOverAmount,
+        rollover_generation: newGeneration,
+        // start_gameweek_id deliberately left null — the organiser chooses
+        // it during this draft pot's own pre-launch workflow (GE-5.2), not
+        // at automatic-creation time.
+      })
+      .select('id')
+      .single()
+
+    if (potInsertError) {
+      throw new Error(`Failed to create rollover pot: ${potInsertError.message}`)
+    }
+
+    const { error: memberError } = await ctx.supabase.from('pot_members').insert({
+      pot_id: newPot.id,
+      user_id: sourcePot.created_by,
+      role: 'admin',
+    })
+
+    if (memberError) {
+      await ctx.supabase.from('pots').delete().eq('id', newPot.id)
+      throw new Error(`Failed to add organiser to rollover pot: ${memberError.message}`)
+    }
   }
 
   async notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {

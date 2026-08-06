@@ -13,6 +13,97 @@ from here.
 
 ---
 
+## 2026-08-06 (37) — Milestone 5 Slice 8: LMS prize awarding
+
+**Goal:** Slice 7 was reviewed, approved, committed, and pushed. Begin
+Slice 8 — review Pick 5's `awardPrize()` first, do not assume it's reusable
+unchanged, design LMS prize awarding around the approved outcome model:
+single survivor gets the net prize; wipeout respects Wipeout Resolution
+(Split Prize splits equally, Roll Prize marks the pot rolled over and
+automatically creates the new rollover pot — config copied,
+`rollover_generation` incremented, `rollover_source_pot_id`/
+`carry_over_amount` set, a sensible default name, the organiser as sole
+member, left in Draft, never activated); document the season-end tie path
+without necessarily implementing Final Prediction; and close the Slice 7
+sequencing gap — once a competition has concluded, `calculateScore()` must
+never process it again.
+
+**Review, before writing code:** `Pick5Engine.awardPrize()` read in full.
+Genuinely shared and reused (reimplemented privately per GE-18, not
+imported): the money math (`roundToCents`/`floorToCents`/fee calculation)
+and the `pot_prizes` partial-unique-index get-or-create-by-id workaround.
+Genuinely different: Pick 5 treats zero winners as
+`Pick5NoEligibleWinnersError` (a real anomaly there); LMS's equivalent
+("not concluded yet") is the normal, common case once `awardPrize()` is
+called every gameweek from `settle()`, so it's a silent no-op instead.
+Everything about wipeout/season-end/rollover has no Pick 5 equivalent at
+all.
+
+**Implemented:** `LmsEngine.awardPrize()` and a new private
+`createRolloverPot()`. Extracted `classifyOutcome()` out of Slice 7's
+`determineWinner()` body (a deliberate, behavior-preserving refactor,
+confirmed by re-running `determineWinner()`'s own unchanged tests) so both
+methods share one typed outcome (`LmsOutcome`) instead of `awardPrize()`
+re-deriving it from a flattened `string[]` — needed because a wipeout
+group of size one is otherwise indistinguishable from a genuine single
+survivor. Per outcome: single survivor → full net prize; wipeout +
+`split_prize` → equal split among the group; wipeout + `roll_prize` → no
+payout, `pot_prizes.rollover = true`, `createRolloverPot()` creates the new
+draft pot automatically (name derived by stripping any existing
+`"(Rollover #N)"` suffix and appending the next generation's, so a
+rollover-of-a-rollover never stacks suffixes; compensating rollback if the
+`pot_members` insert fails); season-end tie + `split_prize` → equal split
+among still-alive entries; season-end tie + `final_prediction` → throws a
+new `LmsFinalPredictionNotImplementedError` rather than guessing, per the
+explicit instruction not to build it this slice; still in progress →
+silent no-op. Every non-void entry (not just winners) transitions to
+`status = 'settled'` once a real outcome is reached. Idempotent via an
+existing, settled `pot_prizes` row short-circuiting the method.
+
+**Sequencing gap closed:** the private `getEligibleLmsPotIds()` (shared by
+`calculateScore()`/`settle()`) now excludes any pot with a settled
+`scope = 'season'` `pot_prizes` row — reusing `awardPrize()`'s own
+idempotency signal rather than inventing a second "is this pot done" flag.
+`settle()` now calls `generateStandings()` then `awardPrize()`
+unconditionally per eligible pot, same per-pot failure isolation Pick 5's
+`settle()` already established. **No schema change** — every column used
+already existed from `013_lms_wipeout_and_rollover.sql`.
+
+**Verified:** 13 new unit tests via a purpose-built fake modeling
+`pots`/`game_entries`/`game_entry_lms`/`pot_prizes`/`pot_members`
+(61/61 in `lms/engine.test.ts`, 133/133 across the whole `game-engine/`
+tree — confirmed no regressions anywhere, including Pick 5's own suite).
+Live, through the real module against the real local Postgres (no HTTP
+endpoint calls `awardPrize()` directly outside `settle-gameweek`, and
+orchestrating real gameweek-deadline timing through HTTP for five distinct
+scenarios was unnecessary given the engine's injectable `now()`): single
+survivor (plus idempotency and the sequencing-gap check via a second
+`settle()` call), wipeout + Split Prize, wipeout + Roll Prize (rollover
+pot's `rollover_source_pot_id`/`carry_over_amount`/`rollover_generation`/
+name/`status = 'draft'`/sole organiser membership all confirmed), season-end
+tie + Split Prize (both concluded and not-yet-concluded variants), and
+still-in-progress — 27 checks, all passing. All test data (6 pots including
+the auto-created rollover pot, 12 users) removed by exact ID, re-verified
+as zero rows by direct query.
+
+**Documentation updated:** `game-engine.md` (GE-5.2 new "Prize awarding"
+paragraph plus revisions to the now-stale "not yet designed"/"flagged, not
+built" language in the Wipeout Resolution and Season-end tie paragraphs,
+GE-12, GE-17), `business-rules.md` (§ Last Man Standing — fixed a stale
+top-of-section "Not yet built" blanket statement that had drifted out of
+sync with the section's own bottom status line across several prior
+slices, and updated the status line and rollover-naming example for
+Slice 8), `decisions.md` (new ADR, § LMS prize awarding), `project-board.md`
+(Slice 8 moved to Done; Ready updated — Slice 9/notifications now the next
+item, the `final_prediction`/rollover-activation/shared-helper-extraction
+items revised to reflect what Slice 8 actually built).
+
+**Status:** Slice 8 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Slice 9 (`notifyUsers`) is
+next — the only remaining unimplemented `GameEngine` method for LMS.
+
+---
+
 ## 2026-08-06 (36) — Milestone 5 Slice 7: LMS winner determination
 
 **Goal:** Slice 6 was reviewed, approved, committed, and pushed. Begin

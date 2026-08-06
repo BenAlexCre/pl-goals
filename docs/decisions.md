@@ -1429,3 +1429,147 @@ showed the real cause — `handle_new_user()`'s trigger deriving
 `profiles_display_name_check` (max 60 characters) because a test label was
 too descriptive. Fixed by shortening the label, not by retrying blindly.
 All test data removed by exact ID, re-verified as zero rows.
+
+## LMS prize awarding
+
+**Decided 2026-08-06**, Milestone 5 Slice 8. The repo owner's instruction
+was explicit and specific per outcome: review Pick 5's `awardPrize()`
+first, don't assume it's reusable unchanged; single survivor gets the net
+prize; a wipeout respects `wipeout_resolution` (Split Prize pays the group
+equally, Roll Prize marks the pot rolled over and *automatically* creates
+the new rollover pot — config copied, `rollover_generation` incremented,
+`rollover_source_pot_id`/`carry_over_amount` set, a sensible default name,
+the organiser as sole member, left in Draft, never activated); a season-end
+tie is documented but Final Prediction is explicitly not built this slice
+unless genuinely required; and the Slice 7 sequencing gap must be closed —
+once a competition has concluded, `calculateScore()` must never process it
+again.
+
+**What actually carried over from Pick 5's `awardPrize()`, and what
+didn't.** Read in full before writing anything. What's genuinely shared
+platform mechanics, reused (reimplemented privately per
+[GE-18](./game-engine.md#ge-18-dependency-boundaries), not imported — the
+`pick5/`/`lms/` boundary is never crossed): the money math
+(`roundToCents`/`floorToCents`/fee calculation — identical rounding rules,
+identical reasoning for flooring a multi-way split so no tied recipient is
+ever favored) and the `pot_prizes` partial-unique-index get-or-create-by-id
+workaround (same shape [GE-4.6](./game-engine.md#ge-46-pot_standings_snapshots)'s
+`pot_standings_snapshots` upsert needed). What's genuinely different: Pick
+5's version calls `determineWinner()` and treats an empty result as
+`Pick5NoEligibleWinnersError` — a real anomaly, since every Pick 5
+`awardPrize()` call is expected to find a winner. For LMS, "not concluded
+yet" is normal and common (see below), so the equivalent case is a silent
+no-op, not an error. Everything about wipeout/season-end/rollover has no
+Pick 5 equivalent whatsoever — designed from the approved outcome model,
+not adapted from anything.
+
+**`classifyOutcome()` — a deliberate, behavior-preserving refactor of
+already-shipped Slice 7 code, done as part of this slice, not scope
+creep.** `determineWinner()`'s `Promise<string[]>` return can't distinguish
+a genuine single survivor from a wipeout group that happens to have exactly
+one member (a real, if unintended, possibility given Slice 7's own
+identified sequencing gap — see below and
+[decisions.md § LMS winner determination](#lms-winner-determination)).
+`awardPrize()` needs to tell these apart to award correctly. Rather than
+have `awardPrize()` re-derive a richer classification from the flattened
+array (fragile — it would have to re-read `competitive_status` on every
+returned id and reconstruct the same logic `determineWinner()` already
+computed), the classification itself was extracted into a private
+`classifyOutcome()` returning a typed union
+(`LmsOutcome = in_progress | single_survivor | wipeout | season_end`), with
+`determineWinner()` rewritten as a thin wrapper that flattens it for GE-6's
+fixed contract shape. `determineWinner()`'s own tests were re-run
+unchanged after the refactor (48/48 passing before this slice's new tests
+were added) to confirm the extraction changed nothing observable.
+
+**Per outcome, exactly as instructed:**
+- **Single survivor** — the entire net prize (`gross_amount` minus admin
+  and charity fees, same calculation Pick 5 uses) goes to that one entry.
+- **Wipeout, `split_prize`** — every entry eliminated in the wipeout
+  gameweek is a joint winner, splitting `net_amount` equally via the
+  existing multi-winner path.
+- **Wipeout, `roll_prize`** — nobody is paid. This pot's `pot_prizes` row
+  is written with `rollover = true` and its `net_amount` is never
+  distributed to anyone here — it becomes the new pot's
+  `carry_over_amount` instead, via `createRolloverPot()`. That method:
+  copies the LMS-relevant config (`entry_fee`, `wipeout_resolution`,
+  `season_end_tie_rule`, `end_gameweek_id`, all four fee columns) as the
+  new pot's starting values; sets `rollover_source_pot_id` to the source
+  pot; sets `rollover_generation = source.rollover_generation + 1`; strips
+  any existing `"(Rollover #N)"` suffix from the source name via regex
+  before appending the new generation's own, so a rollover-of-a-rollover
+  reads "Base Name (Rollover #3)," never a stacked
+  "Base Name (Rollover #2) (Rollover #3)"; sets `status = 'draft'` (never
+  activated automatically — that remains a separate, not-yet-designed
+  organiser action); and inserts exactly one `pot_members` row, the source
+  pot's organiser as admin. `start_gameweek_id` is deliberately left null —
+  the organiser picks it during the draft pot's own pre-launch workflow,
+  not at automatic-creation time. A compensating rollback (delete the new
+  pot) runs if the `pot_members` insert fails, since supabase-js has no
+  cross-table transaction — the same pattern already established by
+  `get-or-create-pick5-entry`/`get-or-create-lms-entry`.
+- **Season-end tie, `split_prize`** — identical split logic to a Split
+  Prize wipeout, just sourced from every still-`alive` entry rather than an
+  eliminated group.
+- **Season-end tie, `final_prediction`** — genuinely not implemented this
+  slice, per the explicit instruction. Rather than silently doing nothing
+  (which would be indistinguishable from a normal "not concluded yet"
+  no-op and could leave real money unaccounted for) or guessing at a
+  resolution, `awardPrize()` throws a new, specific
+  `LmsFinalPredictionNotImplementedError` — same "fail loudly, don't
+  invent a default" standard `Pick5NoEligibleWinnersError` already set.
+  This path needs its own pick table and scoring logic
+  (`lms_final_predictions`-shaped, not yet designed) — real work for a
+  later slice, only reachable by a pot explicitly configured this way that
+  actually reaches a season-end tie, which most competitions never will.
+- **In progress** — a silent no-op. Not an error, unlike Pick 5's
+  `Pick5NoEligibleWinnersError`: `awardPrize()` is now called
+  unconditionally every gameweek from `settle()` (mirroring
+  `generateStandings()`'s own Slice 6 wiring), so "nothing to do yet" is
+  the normal, most common outcome of most calls, not an anomaly.
+
+**Idempotency, and every entry transitioning to `settled`.** An existing,
+settled `pot_prizes` row (`scope = 'season'`) short-circuits the whole
+method before any classification or writes happen, identical in shape to
+Pick 5's own idempotency check. Every non-void entry in the pot — not just
+the winner(s) — transitions to `status = 'settled'` once a real outcome is
+reached, which is exactly the point Slice 5's "`'settled'` only makes sense
+once the competition has actually concluded" reasoning was always deferring
+to; a wipeout's losing members and a Roll Prize wipeout's unpaid members are
+just as settled as an outright winner, they simply have `payout_amount = 0`.
+
+**The Slice 7 sequencing gap, closed.** Slice 7 identified but explicitly
+did not fix: nothing stopped `calculateScore()`/`settle()` from continuing
+to process a pot after its competition had effectively concluded, since
+neither method had any awareness of "has `awardPrize()` already run for
+this pot." Rather than invent a second "is this pot done" flag, the private
+`getEligibleLmsPotIds()` helper (already shared by `calculateScore()` and
+`settle()`) now excludes any pot with an existing, settled `pot_prizes` row
+(`scope = 'season'`) — the exact same signal `awardPrize()`'s own
+idempotency check already relies on. One source of truth for "has this
+competition concluded," read by all three methods. This also retroactively
+resolves the theoretical "wipeout group of size one" ambiguity Slice 7
+flagged: a concluded pot's entries can no longer be reprocessed at all, so
+a lone survivor can never be re-scored into an accidental one-member
+wipeout after having already won.
+
+**No schema change.** Every column `awardPrize()`/`createRolloverPot()`
+writes to (`pot_prizes.rollover`, `pots.rollover_source_pot_id`/
+`carry_over_amount`/`rollover_generation`) already existed from
+`013_lms_wipeout_and_rollover.sql`, applied ahead of Slice 2.
+
+**Verified:** 13 new unit tests (61/61 in `lms/engine.test.ts`, 133/133
+across the whole `game-engine/` tree) via a purpose-built fake modeling
+`pots`/`game_entries`/`game_entry_lms`/`pot_prizes`/`pot_members`. Live,
+through the real module against the real local Postgres (no HTTP endpoint
+calls `awardPrize()` directly yet outside `settle-gameweek`, and
+orchestrating real gameweek-deadline timing through HTTP for five distinct
+scenarios was unnecessary given the engine's injectable `now()`): single
+survivor (plus idempotency and the sequencing-gap check via a second
+`settle()` call), wipeout + Split Prize, wipeout + Roll Prize (confirming
+the new pot's `rollover_source_pot_id`/`carry_over_amount`/
+`rollover_generation`/name/`status = 'draft'`/sole organiser membership),
+season-end tie + Split Prize (both concluded and not-yet-concluded
+variants), and still-in-progress — 27 checks, all passing. All test data
+(6 pots including the auto-created rollover pot, 12 users) removed by
+exact ID, re-verified as zero rows.
