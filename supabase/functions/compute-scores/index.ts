@@ -1,11 +1,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
-import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
-import { UnknownGameTypeError } from '../_shared/game-engine/errors.ts'
+import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
-// Side-effecting import — registers 'pick5' with the dispatcher (GE-7/GE-18).
-// Same pattern as compute-deadlines/index.ts (Milestone 4 Slice 3).
+// Side-effecting imports — register each mode with the dispatcher (GE-7/
+// GE-18). Same pattern as compute-deadlines/index.ts.
 import '../_shared/game-engine/pick5/index.ts'
+import '../_shared/game-engine/lms/index.ts'
 
 // Milestone 4, Slice 4 — docs/game-engine.md § GE-6 (calculateScore) / GE-8.3
 // (Scoring flow). The loop below and everything reading/writing
@@ -15,6 +15,16 @@ import '../_shared/game-engine/pick5/index.ts'
 // it, is entirely independent: separate tables (game_entries/pick5_picks),
 // separate write path, no shared state with the old logic beyond the
 // gameweek id and its already-computed isLive flag.
+//
+// Revised, Milestone 5 Slice 4 (docs/decisions.md § LMS scoring and
+// elimination): this had the exact same bug compute-deadlines had before
+// its own Slice 3 fix — the dispatch discovery step queried
+// game_entries.gameweek_id = <this gameweek>, which can never match an LMS
+// row (always null, GE-4.5), so calculateScore() could never have been
+// reached for LMS. Replaced with the same fix: call every registered
+// mode's calculateScore() unconditionally, per gameweek.
+const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predictor']
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
@@ -49,33 +59,14 @@ Deno.serve(async (req) => {
 
       const isLive = (liveFixture?.length ?? 0) > 0
 
-      // Game Engine dispatch (new, GE-7/GE-8.3): discover which game types
-      // have locked entries for this gameweek — data-driven, no hardcoded
-      // 'pick5' — and call each one's calculateScore(). Only pick5 has any
-      // gameweek-scoped entries today (GE-4.5), so this is a no-op for
-      // lms/predictor until Milestones 5/6 register them, exactly like the
-      // equivalent block in compute-deadlines.
-      const { data: lockedEntries } = await sb
-        .from('game_entries')
-        .select('pots(game_type)')
-        .eq('gameweek_id', gw.id)
-        .eq('status', 'locked')
-
-      type PotsEmbed = { game_type: GameType } | { game_type: GameType }[] | null
-      const gameTypes = new Set<GameType>()
-      for (const entry of (lockedEntries ?? []) as Array<{ pots: PotsEmbed }>) {
-        const gameType = Array.isArray(entry.pots) ? entry.pots[0]?.game_type : entry.pots?.game_type
-        if (gameType) gameTypes.add(gameType)
-      }
-
-      for (const gameType of gameTypes) {
-        try {
-          await resolveEngine(gameType).calculateScore(ctx, gw.id)
-          gameEngineDispatches++
-        } catch (err) {
-          if (err instanceof UnknownGameTypeError) continue
-          throw err
-        }
+      // Game Engine dispatch (GE-7/GE-8.3): call every registered mode's
+      // calculateScore() unconditionally — see the header comment for why
+      // this replaced a per-gameweek "discover which game types have
+      // locked entries" pre-filter that only ever worked for Pick 5.
+      for (const gameType of ALL_GAME_TYPES) {
+        if (!isRegistered(gameType)) continue
+        await resolveEngine(gameType).calculateScore(ctx, gw.id)
+        gameEngineDispatches++
       }
 
       const { data: entries } = await sb

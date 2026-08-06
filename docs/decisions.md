@@ -1110,3 +1110,81 @@ disturbing live Premier League fixture data, and incidentally re-confirmed
 gameweek's `earliest_kickoff_utc` to `null` because it briefly had no
 fixtures of its own) — worked around by giving that gameweek a fixture too,
 not by touching the trigger, since fixing `ISSUE-24` is out of scope here.
+
+## LMS scoring and elimination
+
+**Decided 2026-08-06**, ahead of Milestone 5 Slice 4. The repo owner
+supplied the product rule Slice 3's report had flagged as blocking: a
+missed pick eliminates identically to a losing pick, no grace period, no
+automatic pick, no admin intervention — applying equally when every
+remaining entry misses the same gameweek at once (still a wipeout,
+`wipeout_resolution` unchanged). Reviewed Pick5Engine's `calculateScore()`
+first, per the repo owner's explicit instruction, before writing anything.
+
+**Reusable, unchanged:** the `calculateScore(ctx, gameweekId): Promise<void>`
+contract signature; the live/finished interim-vs-final labeling pattern
+(`'winning'`/`'losing'` while a fixture is live, non-consequential; final
+once finished); the general "resolve picks against real fixture data" shape.
+
+**Genuinely different, and why:**
+
+1. **Elimination happens inside `calculateScore()` itself, not deferred to
+   a later `settle()`-equivalent slice.** Pick 5's `calculateScore()` never
+   takes a consequential action — every status change waits for `settle()`,
+   which itself waits for the *whole gameweek's* fixtures to finish
+   (GE-8.4). LMS doesn't need that wait: an entry's fate depends on exactly
+   one fixture (its own pick's), and the repo owner's own wording —
+   "immediately eliminated... no grace period" — points at acting the
+   moment that one fixture resolves, not waiting on unrelated fixtures
+   elsewhere in the same gameweek. Still correctly deferred until that
+   *specific* fixture is `finished`, not `live` — a live scoreline can
+   still change, so no elimination (or final result label) happens before
+   then, mirroring Pick 5's own live/finished distinction exactly.
+2. **`pick_result` has no `'drew'` value — reused `'lost'` for both an
+   actual loss and a draw.** Both eliminate identically per the rule ("a
+   loss or draw eliminates you," GE-1's original vision line), so the only
+   distinction the schema needs to preserve is "won" vs. "did not win" —
+   adding a fourth enum value to draw a linguistic distinction the game
+   logic itself never checks would be exactly the unnecessary-abstraction
+   CLAUDE.md warns against.
+3. **A missed pick eliminates via a *second*, independent pass — never a
+   fabricated pick row.** For entries with an existing pick, elimination
+   falls out of resolving that pick against its fixture (point 1). For
+   entries with no pick row at all for the gameweek, there's nothing to
+   resolve — `calculateScore()` separately finds every still-`alive` entry
+   in an *eligible* LMS pot (`start_gameweek_id <= this gameweek` — a pot
+   whose competition hasn't reached this gameweek yet, e.g. a still-draft
+   rollover pot, must never be touched) with no `lms_team_picks` row for
+   this `gameweek_id`, and eliminates them directly. No placeholder pick is
+   ever inserted, per the explicit "no automatic pick" instruction.
+4. **A second instance of the same `compute-scores`/`compute-deadlines`
+   discovery bug, found by reading the code first, not by a live
+   failure.** `compute-scores` had the identical `game_entries.gameweek_id`
+   pre-filter Slice 3 already fixed in `compute-deadlines` — same root
+   cause (LMS's `game_entries.gameweek_id` is always null, GE-4.5), same
+   fix (call every `isRegistered()` mode's `calculateScore()`
+   unconditionally, trusting each mode's own no-op efficiency).
+
+**No schema change.** Every column this slice needed already existed:
+`game_entry_lms.competitive_status`/`eliminated_gameweek_id` (Milestone 2),
+`lms_team_picks.result` (Slice 2, reusing `pick_result`), `pots.start_gameweek_id`
+(Slice 1's architecture round). A clean example of the shared/prior schema
+already being general enough — nothing needed inventing.
+
+**A real bug caught before it shipped, not live.** The first draft of the
+pick-result upsert only included `{id, result}` — `pick5_picks`'s own
+`calculateScore()` (and its own comment explaining why) already documents
+that `upsert(..., {onConflict: 'id'})` requires every NOT NULL, no-default
+column in each row, not just the one actually changing, because Postgres
+validates the candidate row before it knows the ON CONFLICT branch will
+fire. Caught by re-reading that exact comment before running anything, not
+by a failed test.
+
+**Verified live**, through the real `compute-scores` function (not a direct
+engine call), with four entries in one pot: a pick whose team won (stayed
+alive, result `'won'`); a pick whose team lost (eliminated, result
+`'lost'`); a pick whose team drew (eliminated, result `'lost'` — same
+value, same consequence); an entry that submitted no pick at all
+(eliminated, confirmed no pick row was ever created). Dedicated test
+gameweeks/fixtures/users used throughout, all removed by exact ID
+afterward and re-verified as zero rows.

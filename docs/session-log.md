@@ -13,6 +13,61 @@ from here.
 
 ---
 
+## 2026-08-06 (33) — Milestone 5 Slice 4: LMS scoring and elimination
+
+**Goal:** Slice 3 was reviewed, approved, committed, and pushed. The repo
+owner supplied the product decision Slice 3's report had flagged as
+blocking: a missed pick eliminates identically to a losing pick (no grace
+period, no automatic pick, no admin intervention; applies even to a
+full-wipeout-by-missed-picks, `wipeout_resolution` unchanged). Begin
+Slice 4 — same vertical-slice approach, review Pick 5's `calculateScore()`
+first, reuse what's reusable, implement only the genuine LMS differences.
+
+**Review, before writing code:** Pick5Engine.calculateScore() only ever
+labels picks (never a consequential status change — that's `settle()`'s
+job, gated on the whole gameweek's fixtures being finished). Reasoned that
+LMS doesn't need that same wait: an entry's elimination depends on exactly
+one fixture (its own pick's), not the whole gameweek, and the repo owner's
+"immediately eliminated" wording pointed at acting as soon as that one
+fixture resolves. Also found, by reading `compute-scores` before writing
+anything, the exact same discovery bug Slice 3 had already fixed in
+`compute-deadlines` — same root cause, same fix.
+
+**Implemented:** `LmsEngine.calculateScore()` resolves each pick against
+its team's own fixture — `'winning'`/`'losing'` while live (non-
+consequential), `'won'`/`'lost'` once finished (`pick_result` has no
+`'drew'` value; a draw reuses `'lost'`, accurate for the one thing that
+value is ever checked against) — and eliminates the entry once finished and
+not won. A second, independent pass eliminates every still-alive entry in
+an eligible LMS pot (`start_gameweek_id <= this gameweek`, so a
+not-yet-started draft rollover pot is never touched) with no pick row at
+all for the gameweek — never fabricating one. Fixed `compute-scores`'
+discovery bug identically to `compute-deadlines`'. **No schema change** —
+every column needed already existed. Caught one real bug before running
+anything: the first draft of the pick-result upsert omitted the NOT NULL
+columns `onConflict: 'id'` needs in every row, the exact gotcha
+`pick5_picks`' own `calculateScore()` already documents — fixed by
+re-reading that comment, not by a failed test. Full reasoning:
+[decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination).
+
+**Verified:** 10 new unit tests (150/150 total pass) via a small in-memory
+relational fake spanning six tables. Live, through the real `compute-scores`
+function, four entries in one dedicated test pot: won (alive), lost
+(eliminated), drew (eliminated, same as lost), missed the pick entirely
+(eliminated, confirmed no pick row was ever created). All test data removed
+by exact ID, re-verified as zero rows afterward.
+
+**Documentation updated:** `game-engine.md` (GE-5.2, GE-8.3, GE-9, GE-12,
+GE-17), `business-rules.md` (§ Last Man Standing), `decisions.md` (new ADR,
+§ LMS scoring and elimination), `project-board.md`.
+
+**Status:** Slice 4 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Slice 5 (settlement) is next;
+wipeout detection (`determineWinner()`) remains a real, unstarted design
+task.
+
+---
+
 ## 2026-08-06 (32) — Milestone 5 Slice 3: LMS locking
 
 **Goal:** Slice 2 was reviewed, approved, committed, and pushed. Begin

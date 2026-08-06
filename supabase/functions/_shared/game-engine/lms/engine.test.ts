@@ -235,11 +235,10 @@ Deno.test('accepts a pick when the deadline has not been computed yet (deadline_
   // No throw = pass.
 })
 
-Deno.test('calculateScore/settle/generateStandings/determineWinner/awardPrize/notifyUsers are not implemented yet', async () => {
+Deno.test('settle/generateStandings/determineWinner/awardPrize/notifyUsers are not implemented yet', async () => {
   const engine = new LmsEngine()
   const ctx = fakeContext(ALIVE_WITH_FIXTURE_NO_PRIOR)
 
-  await assertRejects(() => engine.calculateScore(ctx, 13))
   await assertRejects(() => engine.settle(ctx, 13))
   await assertRejects(() => engine.generateStandings(ctx, 'pot-1'))
   await assertRejects(() => engine.determineWinner(ctx, 'pot-1'))
@@ -325,4 +324,220 @@ Deno.test('lockEntries returns 0 when there are no picks at all for the gameweek
   const count = await engine.lockEntries(ctx, 13)
 
   assertEquals(count, 0)
+})
+
+// --- calculateScore() --------------------------------------------------------
+// A small in-memory relational fake, since calculateScore() reads across
+// gameweeks/pots/game_entries/game_entry_lms/lms_team_picks/fixtures. Same
+// approach in spirit as the other fakes in this file (mutate real rows so a
+// test proves the method's own filtering, not just that a query fired) —
+// generalized here because bespoke per-shape builders would be too verbose
+// for six tables.
+
+interface FakeGameweek { id: number; deadline_utc: string | null }
+interface FakePot { id: string; game_type: string; start_gameweek_id: number | null }
+interface FakeGameEntry { id: string; pot_id: string }
+interface FakeGameEntryLms { game_entry_id: string; competitive_status: string; eliminated_gameweek_id: number | null }
+interface FakePick { id: number; game_entry_id: string; gameweek_id: number; team_id: number; result: string }
+interface FakeFixture { gameweek_id: number; home_team_id: number; away_team_id: number; status: string; home_goals: number; away_goals: number }
+
+interface FakeDb {
+  gameweeks: FakeGameweek[]
+  pots: FakePot[]
+  game_entries: FakeGameEntry[]
+  game_entry_lms: FakeGameEntryLms[]
+  lms_team_picks: FakePick[]
+  fixtures: FakeFixture[]
+}
+
+function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
+  function selectBuilder(rows: Record<string, unknown>[]) {
+    let filtered = rows
+    // deno-lint-ignore no-explicit-any
+    const builder: any = {
+      eq(col: string, val: unknown) { filtered = filtered.filter((r) => r[col] === val); return builder },
+      in(col: string, vals: unknown[]) { const set = new Set(vals); filtered = filtered.filter((r) => set.has(r[col])); return builder },
+      lte(col: string, val: unknown) { filtered = filtered.filter((r) => r[col] !== null && (r[col] as number) <= (val as number)); return builder },
+      maybeSingle: () => Promise.resolve({ data: filtered[0] ?? null, error: null }),
+      then: (resolve: (v: { data: unknown; error: null }) => void) => resolve({ data: filtered, error: null }),
+    }
+    return builder
+  }
+
+  const fakeSupabase = {
+    from(table: keyof FakeDb) {
+      return {
+        select: () => selectBuilder(db[table] as unknown as Record<string, unknown>[]),
+        update(patch: Record<string, unknown>) {
+          return {
+            in: (col: string, vals: unknown[]) => {
+              const set = new Set(vals)
+              for (const row of db[table] as unknown as Record<string, unknown>[]) {
+                if (set.has(row[col])) Object.assign(row, patch)
+              }
+              return Promise.resolve({ data: null, error: null })
+            },
+          }
+        },
+        upsert(rows: { id: number }[]) {
+          for (const row of rows) {
+            const idx = (db[table] as unknown as { id: number }[]).findIndex((r) => r.id === row.id)
+            if (idx >= 0) Object.assign((db[table] as unknown as Record<string, unknown>[])[idx], row)
+          }
+          return Promise.resolve({ data: rows, error: null })
+        },
+      }
+    },
+  }
+
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => now }
+}
+
+function baseDb(overrides: Partial<FakeDb> = {}): FakeDb {
+  return {
+    gameweeks: [{ id: 13, deadline_utc: '2026-01-01T00:00:00Z' }],
+    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 1 }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1' }],
+    game_entry_lms: [{ game_entry_id: 'entry-1', competitive_status: 'alive', eliminated_gameweek_id: null }],
+    lms_team_picks: [],
+    fixtures: [],
+    ...overrides,
+  }
+}
+
+const AFTER_DEADLINE = new Date('2026-01-01T00:00:01Z')
+const BEFORE_DEADLINE = new Date('2025-12-31T00:00:00Z')
+
+Deno.test('calculateScore does nothing before the gameweek deadline', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'pending' }],
+  })
+  const ctx = fakeCalculateScoreContext(db, BEFORE_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'pending')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
+})
+
+Deno.test('calculateScore skips pots whose competition has not reached this gameweek yet', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 20 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
+})
+
+Deno.test('calculateScore labels a live, currently-winning pick "winning" without eliminating', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'pending' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'live', home_goals: 1, away_goals: 0 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'winning')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
+})
+
+Deno.test('calculateScore labels a live, currently-losing pick "losing" without eliminating yet', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'pending' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'live', home_goals: 0, away_goals: 1 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'losing')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
+})
+
+Deno.test('calculateScore resolves a finished, won fixture to "won" and does not eliminate', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'winning' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'finished', home_goals: 2, away_goals: 1 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'won')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
+})
+
+Deno.test('calculateScore resolves a finished, lost fixture to "lost" and eliminates the entry', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'losing' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'finished', home_goals: 0, away_goals: 1 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'lost')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'eliminated')
+  assertEquals(db.game_entry_lms[0].eliminated_gameweek_id, 13)
+})
+
+Deno.test('calculateScore treats a draw the same as a loss — reuses "lost", eliminates the entry', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'pending' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'finished', home_goals: 1, away_goals: 1 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'lost')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'eliminated')
+})
+
+Deno.test('calculateScore eliminates an alive entry with no pick at all for this gameweek — no automatic pick created', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb() // no picks at all
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.game_entry_lms[0].competitive_status, 'eliminated')
+  assertEquals(db.game_entry_lms[0].eliminated_gameweek_id, 13)
+  assertEquals(db.lms_team_picks.length, 0) // still no pick row — never fabricated one
+})
+
+Deno.test('calculateScore never touches an already-eliminated entry', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    game_entry_lms: [{ game_entry_id: 'entry-1', competitive_status: 'eliminated', eliminated_gameweek_id: 10 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.game_entry_lms[0].eliminated_gameweek_id, 10) // unchanged, not overwritten to 13
+})
+
+Deno.test('calculateScore leaves a pick pending when its team has no fixture data yet', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'pending' }],
+    fixtures: [], // no fixture data synced yet
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'pending')
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
 })

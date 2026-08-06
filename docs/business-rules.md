@@ -221,6 +221,15 @@ Pick 5, where locking an entry locks the entry as a whole: an LMS entry
 lasts the whole competition, so only the individual pick can lock, never
 the entry itself.
 
+**Missing a pick eliminates you, exactly like a losing pick — decided
+2026-08-06.** If an alive entry has not submitted a pick before its
+gameweek's deadline, that entry is eliminated immediately. There is no
+grace period, no automatically-assigned pick, and no admin override. This
+applies even if every remaining entry misses the same gameweek at once —
+that's still a wipeout, and **Wipeout Resolution** (below) decides the
+outcome exactly as it would for a gameweek where everyone's picked team
+lost or drew.
+
 **Wipeout and Wipeout Resolution.** Every LMS pot has a required,
 immutable-once-entries-exist setting, **Wipeout Resolution** — `Split Prize`
 or `Roll Prize` — chosen when the pot is created. It only matters for a
@@ -283,16 +292,20 @@ new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
 **Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
-submission, and locking are implemented and verified live, as of
-2026-08-06** — see [current-state.md § Resolved issues](./current-state.md#resolved-issues),
+submission, locking, scoring, and elimination are all implemented and
+verified live, as of 2026-08-06** — see
+[current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
-and [decisions.md § LMS locking](./decisions.md#lms-locking). Pick
-submission enforces the no-repeat-team rule above via a real database
-constraint, not just application logic. Elimination itself (turning a loss
-into `competitive_status = eliminated`), wipeout resolution, season-end
-resolution, and — most visibly — automatic rollover-pot creation and the
-Final Prediction settlement path are all still ahead, identified but not
-yet designed at the implementation level. Real work for later Milestone 5
+[decisions.md § LMS locking](./decisions.md#lms-locking), and
+[decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination).
+Pick submission enforces the no-repeat-team rule above via a real database
+constraint, not just application logic. Wipeout resolution and season-end
+resolution themselves (splitting or rolling the prize once the competition
+actually concludes) are not yet implemented — `LmsEngine.determineWinner()`
+still needs to detect a wipeout specifically, and neither method exists
+yet. Automatic rollover-pot creation and the Final Prediction settlement
+path are also still ahead, identified but not yet designed at the
+implementation level. Real work for later Milestone 5
 slices, not invented ahead of time.
 
 ## Admin permissions

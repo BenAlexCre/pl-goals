@@ -467,6 +467,26 @@ no row to lock — **what happens to a non-picker is a genuinely open
 product question, not answered here** (flagged, not guessed at; see
 [decisions.md § LMS locking](./decisions.md#lms-locking)).
 
+**Scoring and elimination — implemented, Milestone 5 Slice 4, 2026-08-06,
+answering the question above.** Decided by the repo owner: a missed pick
+is treated exactly the same as a losing pick — immediate elimination, no
+grace period, no automatic pick, no admin intervention, and this applies
+even if every remaining entry misses the same gameweek (`wipeout_resolution`
+still decides the outcome, unchanged — [GE-5.2](#ge-52-last-man-standing)
+above). `LmsEngine.calculateScore()` implements this per gameweek, gated on
+that gameweek's `deadline_utc` having passed (no consequential action
+before then, same live-check pattern `validateEntry()` established):
+resolves each existing pick against its team's own fixture (`'winning'`/
+`'losing'` while that one fixture is still live — a non-consequential
+label, mirroring Pick 5's own interim labeling — finalized to `'won'`/
+`'lost'` once finished; `pick_result` has no `'drew'` value, and a draw
+eliminates identically to a loss, so `'lost'` is reused for both, accurately,
+for the one thing that value is ever checked against), then separately
+eliminates every still-alive entry in an eligible pot with no pick row at
+all for that gameweek — never fabricating one. "Eligible pot" excludes any
+LMS pot whose `start_gameweek_id` is still in the future relative to this
+gameweek (a draft rollover pot, for instance) — those entries must never be
+touched by a gameweek their competition hasn't reached yet.
 ### GE-5.3 Score Predictor
 
 One fixture predicted per gameweek (`unique(game_entry_id, gameweek_id)` on `predictor_picks`,
@@ -543,8 +563,15 @@ gameweek's pick, since `game_entries` is season-scoped and must stay `pending` f
 the whole competition — see [GE-5.2](#ge-52-last-man-standing)).
 
 ### GE-8.3 Scoring flow
-`pg_cron` (`compute-scores` cadence) → Edge Function → dispatcher → `calculateScore()` for
-every live/in-progress gameweek with entries in that mode.
+`pg_cron` (`compute-scores` cadence) → Edge Function → dispatcher → every registered
+mode's `calculateScore()`, for every live/in-progress gameweek. **Revised, Milestone 5
+Slice 4**: same fix as [GE-8.2](#ge-82-locking-flow) — `compute-scores` had the identical
+`game_entries.gameweek_id`-based discovery bug, which could never have found LMS's
+season-scoped entries either. What `calculateScore()` *does* also diverges by mode:
+Pick 5's stays purely a scoring step (defers every consequential status change to
+`settle()`, GE-8.4); LMS's eliminates entries directly, since a wipeout-triggering
+elimination only ever depends on one fixture being finished, not the whole gameweek —
+see [GE-5.2](#ge-52-last-man-standing).
 
 ### GE-8.4 Settlement flow
 `pg_cron` (`settle-gameweek` cadence) → Edge Function → dispatcher → `settle()` →
@@ -587,7 +614,7 @@ reverse the user-facing outcome (e.g. a prize award) that triggered it.
 |---|---|
 | `sync-fixtures`, `sync-live-events` (per `ISSUE-4`) | Unchanged — feeds all three modes identically |
 | `compute-deadlines` | **Milestone 4 Slice 3**: now drives locking via the dispatcher. Deadline computation itself is unchanged. Now also writes a `sync_runs` row per invocation (previously didn't). **Revised, Milestone 5 Slice 3**: once a gameweek's `deadline_utc` has passed, calls `lockEntries()` for every mode `isRegistered()` reports true, unconditionally — replaces the original "discover game types via a `game_entries.gameweek_id` query" step, which only ever matched Pick 5 (see [GE-8.2](#ge-82-locking-flow)). Now imports `lms/index.ts` alongside `pick5/index.ts` |
-| `compute-scores` | **Milestone 4 Slice 4**: now drives scoring via the dispatcher. Old logic (reading/writing `user_entries`/`user_entry_picks`) is unchanged; the new block discovers game types with `locked` entries for each gameweek and calls each one's `calculateScore()`. Response body now also reports `gameEngineDispatches` alongside the pre-existing `processed` count |
+| `compute-scores` | **Milestone 4 Slice 4**: now drives scoring via the dispatcher. Old logic (reading/writing `user_entries`/`user_entry_picks`) is unchanged. Response body reports `gameEngineDispatches` alongside the pre-existing `processed` count. **Revised, Milestone 5 Slice 4**: replaced the same broken `game_entries.gameweek_id` discovery pre-filter `compute-deadlines` had (never matched LMS) with an unconditional "call every registered mode" loop — see [GE-8.3](#ge-83-scoring-flow). Now imports `lms/index.ts` alongside `pick5/index.ts` |
 | `settle-gameweek` | **Milestone 4 Slice 5**: now drives `settle()` via the dispatcher, once its existing "all fixtures finished" check passes. Old logic (`user_entries`/`leaderboard_snapshots`) is unchanged. No `sync_runs` write added — GE-19's Settlement diagram doesn't call for one, unlike Locking. **Milestone 4 Slice 8**: `settle()` now also calls `awardPrize()` (which internally calls `determineWinner()`) for every distinct pot settled, so a single `settle-gameweek` invocation now settles, ranks, and pays out in one pass. **Milestone 4 Slice 9**: `awardPrize()` now also calls `notifyUsers()` per winner, so the same invocation now also writes the user-facing `notifications` row — no `settle-gameweek` code change was needed for either Slice 8 or Slice 9, since both are internal to the Game Engine |
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
@@ -633,7 +660,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
 | 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`), and Slice 9 (`notifyUsers()`, domain-event notifications, wired into `awardPrize()`) done — all eight `GameEngine` contract methods now implemented for Pick 5 |
-| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed. Architecture revised three times 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions; `013_lms_wipeout_and_rollover.sql` applied. `ISSUE-32` (entry-window gate) fixed and verified live. **Slice 2 (pick submission, `submit-lms-pick` + `lms_team_picks` + `LmsEngine.validateEntry()`) done and committed** — unblocked by the repo owner's decision to remove LMS cycles entirely (`current_cycle` dropped, `014_lms_remove_cycle.sql`); a team may never be picked twice across the whole competition, enforced by a real unique constraint, not just application logic. **Slice 3 (locking) done, 2026-08-06** — `LmsEngine.lockEntries()` implemented (`lms_team_picks.locked_at`, not `game_entries.status` — a genuine, necessary divergence from Pick 5, see [GE-5.2](#ge-52-last-man-standing)); found and fixed a real gap in the shared `compute-deadlines` function, which had silently never been able to discover LMS's season-scoped entries as needing locking at all. Six of eight `GameEngine` methods still throw `GameEngineNotImplementedError` (`calculateScore`/`settle`/`generateStandings`/`determineWinner`/`awardPrize`/`notifyUsers`). Not committed — awaiting review |
+| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed. Architecture revised three times 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions; `013_lms_wipeout_and_rollover.sql` applied. `ISSUE-32` (entry-window gate) fixed and verified live. **Slice 2 (pick submission, `submit-lms-pick` + `lms_team_picks` + `LmsEngine.validateEntry()`) done and committed** — unblocked by the repo owner's decision to remove LMS cycles entirely (`current_cycle` dropped, `014_lms_remove_cycle.sql`); a team may never be picked twice across the whole competition, enforced by a real unique constraint, not just application logic. **Slice 3 (locking) done and committed** — `LmsEngine.lockEntries()` implemented (`lms_team_picks.locked_at`, not `game_entries.status` — a genuine, necessary divergence from Pick 5, see [GE-5.2](#ge-52-last-man-standing)); found and fixed a real gap in the shared `compute-deadlines` function, which had silently never been able to discover LMS's season-scoped entries as needing locking at all. **Slice 4 (scoring) done, 2026-08-06** — `LmsEngine.calculateScore()` implemented, answering the repo owner's product decision that a missed pick eliminates identically to a losing pick; also fixed the identical discovery bug in `compute-scores`. No schema change — reused `game_entry_lms.competitive_status`/`eliminated_gameweek_id`, `lms_team_picks.result`, and `pots.start_gameweek_id`, all already existing. Five of eight `GameEngine` methods still throw `GameEngineNotImplementedError` (`settle`/`generateStandings`/`determineWinner`/`awardPrize`/`notifyUsers`). Not committed — awaiting review |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
 | 8 | End-to-end testing, performance review, security review | Not started |
@@ -733,9 +760,10 @@ supabase/functions/
                                     (Slice 8), and notifyUsers (Slice 9) implemented.
                                     All eight GameEngine contract methods done.
       lms/                         Milestone 5 — validateEntry (Slice 2), lockEntries
-                                    (Slice 3) implemented; calculateScore/settle/
-                                    generateStandings/determineWinner/awardPrize/
-                                    notifyUsers not yet (throw GameEngineNotImplementedError)
+                                    (Slice 3), calculateScore (Slice 4) implemented;
+                                    settle/generateStandings/determineWinner/
+                                    awardPrize/notifyUsers not yet (throw
+                                    GameEngineNotImplementedError)
       predictor/                   Milestone 6 — empty until then
   compute-scores/                  Milestone 4 Slice 4 — imports _shared/game-engine, drives calculateScore()
   compute-deadlines/                Milestone 4 Slice 3 — imports _shared/game-engine, drives lockEntries()
