@@ -13,6 +13,172 @@ from here.
 
 ---
 
+## 2026-08-06 (31) — LMS cycles removed; Slice 2 (pick submission) implemented
+
+**Goal:** Slice 1, migration 013, and `ISSUE-32` were reviewed and approved.
+Before Slice 2: remove the LMS "cycle" concept entirely (an LMS competition
+is one continuous sequence, a team may never be picked twice, ever; a
+rollover is a new competition, so the team pool resets naturally as a side
+effect of being a new pot) and remove `current_cycle` (plus any related
+dead architecture) rather than leaving it dormant. Then implement Slice 2,
+full unit tests, live E2E verification, exact-ID cleanup, docs.
+
+**`current_cycle` removed** — confirmed by grep first that nothing read or
+wrote it anywhere in the codebase (genuinely dead, not a working feature).
+Dropped via a new migration, `014_lms_remove_cycle.sql` (`004` is already
+applied/historical and was not edited — "never rewrite migrations after
+deployment"). Applied cleanly. `predictor_cycle_mode` is untouched — a
+real, unrelated Score Predictor concept despite the similar name.
+
+**Slice 2 implemented**: `submit-lms-pick` + `LmsEngine.validateEntry()`
+(`_shared/game-engine/lms/`, the first real LMS `GameEngine` method — the
+other seven throw `GameEngineNotImplementedError`, same pattern Pick 5 used
+between its own Slice 2 and Slice 9) + `lms_team_picks`
+(`015_lms_picks.sql`). Checks, in order: entry is `pending`; entry's
+`competitive_status` is `alive`; the picked team actually has a fixture in
+the target gameweek (a real join, not a trusted client fact); the team has
+never been picked in any *other* gameweek by this entry (the no-cycles
+rule) — also enforced as a real `unique (game_entry_id, team_id)`
+constraint on the table itself, not just in application code.
+
+**A second retired-prototype naming collision found and fixed, live, not
+theoretical**: `015_lms_picks.sql`'s first run failed —
+`lms_picks` already exists, owned by `supabase_admin`, part of the
+prototype's deliberately-untouched object set (`ISSUE-20`). Renamed to
+`lms_team_picks`, re-applied cleanly. Flagged for Milestone 6:
+`predictor_picks` will hit the identical collision.
+
+**Verified**: 17 new unit tests (133/133 total pass — 9 `LmsEngine`
+validation cases via a fake Supabase client, 8 `submit-lms-pick`
+request-shape cases). Live, through the real Edge Function, after a full
+`supabase stop`/`start` (new function directory): a valid pick; changing
+that same gameweek's pick to a different team (confirmed exactly one row
+exists afterward, not two); the changed-away team correctly rejected when
+picked again later; a team with no fixture in the gameweek rejected; an
+eliminated entry rejected; `get-or-create-lms-entry` re-confirmed still
+working after migrations 013–015. All test data removed by exact ID, in
+dependency order (picks → `game_entry_lms` → `game_entries` → `pot_members`
+→ pot → user), and the zero-rows result re-verified directly rather than
+trusted from the cleanup script's own log line — the lesson from the prior
+session's `ISSUE-32` cleanup bug applied proactively this time, not
+re-learned.
+
+**Documentation updated:** `game-engine.md` (GE-1, GE-4.5, GE-5.2, GE-9,
+GE-12, GE-15, GE-17), `business-rules.md` (§ Last Man Standing), `decisions.md`
+(new ADR, § LMS: no cycles), `project-board.md`. Full detail:
+[decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented).
+
+**Status:** migrations 014/015 applied to the local database; Slice 2
+implemented and fully verified. Nothing committed, per explicit
+instruction.
+
+---
+
+## 2026-08-05 (30) — Migration 013 applied; ISSUE-32 fixed and verified live
+
+**Goal:** migration 013 was reviewed and approved. Before applying: a final
+multi-generation rollover review (A → B → C → ... eventually won), plus
+adding `rollover_generation`. Then: apply, fix `ISSUE-32`, begin Slice 2.
+
+**Multi-generation review: lineage/immutability/cycle-safety all confirmed
+sound, no redesign needed.** One real gap found and fixed: `pots_insert_authenticated`
+was never column-restrictive, so once `rollover_source_pot_id`/`carry_over_amount`
+existed, any authenticated user's own pot-creation request could fabricate a
+fake rollover claim against a real pot, inventing any carry-over figure —
+money that would later be paid out as real prize by `awardPrize()`. Fixed
+with a column-level `revoke`/`grant insert (...)` on `pots`, same pattern as
+`game_entries`/`notifications` UPDATE narrowing. Added `rollover_generation`
+(0 = original, N = Nth rollover), consistency-checked against
+`rollover_source_pot_id`, same trust boundary. Full reasoning:
+[decisions.md § LMS: multi-generation rollover review](./decisions.md#lms-multi-generation-rollover-review-found-a-real-gap-added-rollover_generation).
+
+**Migration applied**: `supabase migration up --local`, zero errors.
+Verified live via `\d public.pots`, `pg_constraint`, and
+`information_schema.column_privileges` — all six new `pots` columns, all
+four new constraints, and the narrowed `authenticated` INSERT column list
+(confirmed `rollover_source_pot_id`/`carry_over_amount`/`rollover_generation`
+excluded) present exactly as designed.
+
+**`ISSUE-32` fixed**: `checkEntryWindow()` (`get-or-create-lms-entry/validate.ts`),
+called before the membership check. 6 new unit tests (116/116 total pass).
+Live verification hit two real bugs, neither in the shipped fix itself:
+1. A **Kong routing issue**, not a code bug — restarting only
+   `supabase_edge_runtime_pl-goals` (to pick up the edited function) gave
+   that container a new Docker-internal IP; Kong kept routing to the old
+   one, returning 502 for *every* function, not just the edited one, until
+   Kong was also restarted. New infrastructure note alongside entry 26's
+   "new function needs `supabase stop`/`start`" — this one's "an edited
+   function needs Kong restarted too," different mechanism, same category.
+2. A bug in the **verification script's own cleanup**, not the product:
+   deleted parent pots before the rollover pots referencing them via
+   `on delete restrict`, and didn't check delete errors, silently leaving 10
+   test pots and 3 test users behind. Fixed the cleanup ordering (children,
+   including their `game_entries` rows, before sources) and re-verified
+   zero rows remained.
+
+All 5 live scenarios then passed (normal pot past/future start gameweek,
+normal pot with no start gameweek configured, rollover pot in draft,
+rollover pot activated). Full detail:
+[current-state.md § Resolved issues, ISSUE-32](./current-state.md#resolved-issues).
+
+**Slice 2 not started — blocked on a real open product question, not
+schema.** GE-1's own vision table says "team reuse restricted per cycle"
+but never defines what an LMS cycle actually is, and `game_entry_lms.current_cycle`
+exists with nothing incrementing it. Flagged rather than guessed, same
+discipline as the wipeout/tiebreak questions earlier this session.
+
+**Files modified:** `supabase/migrations/013_lms_wipeout_and_rollover.sql`
+(revised, applied), `supabase/functions/get-or-create-lms-entry/validate.ts`
+(`checkEntryWindow`), `validate.test.ts` (+6 tests), `index.ts` (wired in),
+`docs/decisions.md`, `docs/game-engine.md`, `docs/business-rules.md`,
+`docs/current-state.md`, `docs/project-board.md`.
+
+**Status:** migration applied to the local database; `ISSUE-32` fixed and
+verified; nothing committed, per explicit instruction. Slice 2 blocked on
+the cycle-definition question above.
+
+---
+
+## 2026-08-05 (29) — LMS architecture confirmed; migration 013 formally reviewed
+
+**Goal:** entries 27/28's work (`0c12947`) was committed and pushed by the
+repo owner. A final, more precise round of the same LMS product decisions
+was then supplied, explicitly superseding entry 28's — checked point by
+point against what's already designed.
+
+**Outcome: no schema change.** Payment model, Wipeout Resolution
+naming/scope, Split/Roll Prize, automatic rollover creation, the draft
+lifecycle, and Season End Resolution all matched entry 28's design exactly.
+`013_lms_wipeout_and_rollover.sql` stands as drafted. Two additive
+clarifications, both already implicitly true of the schema, now stated
+explicitly: the carry-over amount belongs to the new pot only (the old pot
+is an immutable historical record, full stop); the organiser may rename the
+auto-created pot before activation, and the Game Engine should generate a
+sensible default name for it (`pots.name` was never in the immutability
+trigger's guarded set, so this already "just works" schema-wise — pure
+Game Engine string logic, not a schema concern).
+
+**Migration formally reviewed**, as explicitly requested, against
+correctness, replay safety, rollback, and shared-platform consistency —
+findings written directly into `013_lms_wipeout_and_rollover.sql`'s header
+comment so they travel with the file rather than living only in
+`decisions.md`. All four passed; the one genuinely new thing produced by
+this review is a documented manual rollback procedure (this project has no
+down-migration convention, so none was added as a separate file).
+
+**Documentation updated:** `business-rules.md` (§ Last Man Standing — rename
+capability, default naming, "immutable historical record" framing),
+`game-engine.md` (GE-5.2, same additions), `decisions.md` (a confirmation
+postscript appended to the existing ADR, not a third near-duplicate
+section, since almost nothing changed), `project-board.md`.
+
+**Status:** documentation and migration-header-comment changes only — no
+application code, no schema applied. Still awaiting: migration 013 approval
+→ apply → fix `ISSUE-32` → begin Slice 2, in that order, per the repo
+owner's explicit sequencing.
+
+---
+
 ## 2026-08-05 (28) — LMS architecture revised: Wipeout Resolution, automatic rollover, fixed entry fee
 
 **Goal:** entry 27's architecture update was reviewed and approved for Slice

@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
-import { validateEntryRequest } from './validate.ts'
+import { checkEntryWindow, validateEntryRequest } from './validate.ts'
 
 // Milestone 5, Slice 1 (entry creation) — docs/game-engine.md § GE-5.2.
 // Mirrors get-or-create-pick5-entry/index.ts exactly, with one structural
@@ -63,7 +63,7 @@ Deno.serve(async (req) => {
 
   const { data: pot, error: potError } = await adminClient
     .from('pots')
-    .select('id, game_type')
+    .select('id, game_type, status, rollover_source_pot_id, start_gameweek_id')
     .eq('id', pot_id)
     .maybeSingle()
 
@@ -77,6 +77,36 @@ Deno.serve(async (req) => {
   if (pot.game_type !== 'last_man_standing') {
     return new Response(JSON.stringify({ error: `This pot is a ${pot.game_type} pot, not last_man_standing` }), {
       status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
+  // ISSUE-32 / GE-5.2: entry window. A normal pot closes forever once its
+  // start_gameweek's first fixture kicks off; a rollover pot's window is
+  // simply "still in draft." Checked before membership so a closed window
+  // rejects consistently regardless of whether the caller already belongs
+  // to the pot.
+  let startGameweekKickoffUtc: string | null = null
+  if (pot.start_gameweek_id !== null) {
+    const { data: startGameweek } = await adminClient
+      .from('gameweeks')
+      .select('earliest_kickoff_utc')
+      .eq('id', pot.start_gameweek_id)
+      .maybeSingle()
+    startGameweekKickoffUtc = startGameweek?.earliest_kickoff_utc ?? null
+  }
+
+  const windowCheck = checkEntryWindow({
+    rolloverSourcePotId: pot.rollover_source_pot_id,
+    potStatus: pot.status,
+    startGameweekId: pot.start_gameweek_id,
+    startGameweekKickoffUtc,
+    now: new Date(),
+  })
+
+  if (!windowCheck.ok) {
+    return new Response(JSON.stringify({ error: windowCheck.error }), {
+      status: 403,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

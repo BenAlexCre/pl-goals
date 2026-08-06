@@ -205,6 +205,14 @@ is no tiebreak pick during the competition itself; a **wipeout** is resolved
 by the pot's **Wipeout Resolution** setting, and a **season-end tie** by its
 own, separate **Season-End Tie Rule** setting — both below.
 
+**No repeat teams, ever — decided 2026-08-05, no cycles.** An entrant may
+never pick the same team twice across the whole competition — one
+continuous sequence from the opening gameweek to the end, with no resets,
+no half-season cycles, and no configurable cycle mode of any kind. A
+rollover competition is a brand-new pot with brand-new entries (see
+"Roll Prize" below), so every entrant's available-team pool starts fresh
+there naturally, not because anything reset mid-competition.
+
 **Wipeout and Wipeout Resolution.** Every LMS pot has a required,
 immutable-once-entries-exist setting, **Wipeout Resolution** — `Split Prize`
 or `Roll Prize` — chosen when the pot is created. It only matters for a
@@ -216,16 +224,24 @@ exactly one survivor over several gameweeks).
   ends there.
 - **Roll Prize** — nobody wins, and the competition's net prize becomes a
   **carry-over amount**. **A new LMS pot is created automatically** —
-  organisers are never asked to create it by hand. Only the organiser is a
-  member of it initially; everyone else must explicitly rejoin, and every
-  joiner (including the organiser, if they want a paid entry themselves)
-  pays that new competition's own entry fee — the carry-over amount is
-  added on top of collected entry fees to form the new prize pool, it is
-  never a substitute for anyone paying in. Example: a finished pot rolls
-  over €300; the new pot collects €220 in entry fees; that new pot's prize
-  pool is €520. The new pot starts inactive (draft) — see "Late entry"
-  below for what the organiser does before opening it. The old pot is never
-  reopened.
+  organisers are never asked to create it by hand. The carry-over amount
+  belongs entirely to the **new** pot, stored on it explicitly — the old
+  pot only ever records that it ended via rollover, it doesn't hold or
+  track the amount going forward. This means the new pot's prize-pool
+  breakdown (carry-over + new entry fees = total pool) reads directly off
+  its own row, with no need to look up the pot it came from. Only the
+  organiser is a member of it initially; everyone else must explicitly
+  rejoin, and every joiner (including the organiser, if they want a paid
+  entry themselves) pays that new competition's own entry fee — the
+  carry-over amount is added on top of collected entry fees to form the new
+  prize pool, it is never a substitute for anyone paying in. Example: a
+  finished pot rolls over €300; the new pot collects €220 in entry fees;
+  that new pot's prize pool is €520. The new pot gets a sensible default
+  name derived from the old one (e.g. "Premier League LMS (Rollover)" or
+  "Premier League LMS - Season 2") and starts inactive (draft) — see "Late
+  entry" below for what the organiser does before opening it. The old pot
+  is never reopened or modified further — an immutable historical record
+  from the moment it settles.
 
 **Season-end tie.** A separate case from a wipeout: multiple entrants are
 still alive when the season's actual final gameweek finishes (nobody was
@@ -243,11 +259,14 @@ eliminated that gameweek — they simply ran out of season to play).
 **Late entry.** Joining an LMS pot after it has started is **not allowed**,
 with one exception: a **rollover pot** — one the Game Engine created
 automatically after a Roll Prize wipeout, above. While that pot is still in
-its draft (pre-launch) phase, the organiser may invite players, verify
+its draft (pre-launch) phase, the organiser may rename it (the
+auto-generated default is just a starting point), invite players, verify
 their payments, and choose the competition's starting gameweek — the next
 gameweek, any future gameweek, or even the following season's first
 gameweek, so a nearly-finished season doesn't force an awkward immediate
-restart. Anyone may join during this draft phase. **Once the organiser
+restart. Nothing starts automatically — the organiser must explicitly
+activate the pot once ready. Anyone may join during this draft phase. **Once
+the organiser
 opens (activates) the pot, normal LMS entry rules apply — no further
 joining, ever, same as any other pot.** There is no cumulative billing and
 no catch-up payment at any point: everyone entering a rollover competition,
@@ -255,13 +274,17 @@ whenever during the draft phase they join, pays exactly one entry fee — the
 new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
-**Status: none of this is implemented yet.** Milestone 5 Slice 1
-(`get-or-create-lms-entry`) shipped before any of these rules existed and
-currently has no entry-window check of any kind — see
-[current-state.md ISSUE-32](./current-state.md#issue-32--get-or-create-lms-entry-has-no-entry-window-gate).
-Automatic rollover-pot creation and the Final Prediction settlement path are
-both identified but not yet designed at the implementation level — real work
-for later Milestone 5 slices, not invented ahead of time.
+**Status: entry creation (`ISSUE-32`'s entry-window rule included) and pick
+submission are implemented and verified live, 2026-08-05** — see
+[current-state.md § Resolved issues](./current-state.md#resolved-issues)
+and [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented).
+Pick submission enforces the no-repeat-team rule above via a real database
+constraint, not just application logic. Elimination itself (turning a loss
+into `competitive_status = eliminated`), wipeout resolution, season-end
+resolution, and — most visibly — automatic rollover-pot creation and the
+Final Prediction settlement path are all still ahead, identified but not
+yet designed at the implementation level. Real work for later Milestone 5
+slices, not invented ahead of time.
 
 ## Admin permissions
 

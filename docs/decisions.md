@@ -857,3 +857,174 @@ it, and how the compensating-rollback pattern already used in
 multi-table pot+pot_members insert), the pot activation action that moves a
 draft rollover pot to active, and the `final_prediction` pick table and
 scoring logic. All real, all flagged, none guessed at.
+
+**Confirmed 2026-08-05, one more round, ahead of the same Slice 2.** The
+repo owner supplied a final, more precise version of this same decision set,
+explicitly superseding it. Comparing point by point: the payment model,
+Wipeout Resolution naming and scope, Split/Roll Prize behavior, automatic
+rollover creation, the draft lifecycle, and Season End Resolution
+(`split_prize`/`final_prediction`) all matched what's recorded above
+exactly — **no schema change resulted**, `013_lms_wipeout_and_rollover.sql`
+stands as drafted. Two genuinely new details, both additive, neither
+requiring a schema change:
+- **The carry-over amount belongs to the new pot only, explicitly stated as
+  a constraint on the design, not just an implementation detail** — already
+  true of the drafted schema (`pots.carry_over_amount` on the new pot,
+  `pot_prizes.rollover` a bare flag on the old one, no amount stored there)
+  but now recorded as a deliberate rule so it can't drift later: the old pot
+  is an **immutable historical record** from the moment it settles, full
+  stop.
+- **The organiser may rename the auto-created pot before activation, and
+  the Game Engine should generate a sensible default name** (e.g. "Premier
+  League LMS (Rollover)") when creating it. `pots.name` was never in
+  `prevent_pot_contract_change()`'s guarded set, at any point in this
+  design's history — this "just works" already, and default-name generation
+  is pure Game Engine string logic, not a schema concern.
+
+**Migration reviewed against the four dimensions explicitly requested**
+(correctness, replay safety, rollback, shared-platform consistency) —
+findings recorded directly in `013_lms_wipeout_and_rollover.sql`'s own
+header comment so they travel with the file. Summary: correct as drafted;
+replay-safe (every touched object predates it in migration order); no
+rollback script exists anywhere in this project by convention, so a manual
+rollback procedure was documented in the migration's header instead of
+added as a second file; fully consistent with GE-3 (config on shared
+tables, same placement as `predictor_cycle_mode`, zero impact on Pick 5 or
+Score Predictor code paths). No changes to the migration's actual DDL
+resulted from this review — it was already correct.
+
+## LMS: multi-generation rollover review (found a real gap, added `rollover_generation`)
+
+**Decided 2026-08-05**, ahead of applying migration 013. The repo owner
+asked for an explicit review of unlimited rollover chains (A → B → C → ...,
+eventually won) before approving the migration, plus a new required field,
+`rollover_generation`. Findings:
+
+**Lineage, immutability, and cycle-safety all confirmed sound as designed —
+no redesign needed.** `rollover_source_pot_id` forms a correct linked list
+(each pot points only to its immediate predecessor); `carry_over_amount`
+already belonged to the new pot alone, never the source; historical pots
+were already immutable by construction (unconditional + entries-gated
+guards cover every relevant column). **A cycle is structurally
+impossible**, not just discouraged: `rollover_source_pot_id` can only ever
+reference a row that already existed at INSERT time (FK requirement) and is
+never editable afterward (unconditional immutability) — a pot cannot be
+made to point backward at a pot created after it, so no sequence of inserts
+can ever close a loop. This didn't need a recursive CHECK or trigger to
+enforce; it falls out of the existing design.
+
+**One real gap found: nothing stopped a client from fabricating a rollover
+lineage.** `pots_insert_authenticated`'s RLS (`002_rls_policies.sql`) only
+checks `created_by = auth.uid()` — it has never been column-restrictive,
+because nothing insertable before this migration needed it to be. Once
+`rollover_source_pot_id`/`carry_over_amount` exist, any authenticated user's
+own normal pot-creation request could set them to arbitrary values —
+pointing at a real pot they don't administer, inventing any carry-over
+figure — and that fabricated amount would later be paid out as real prize
+money by `awardPrize()`. Row-level RLS can't express "this column may never
+be set"; column-level privilege can, and this codebase already has the
+precedent (`game_entries`/`notifications` UPDATE narrowing,
+`005_game_engine_shared_platform_rls.sql`). Fixed the same way: `revoke
+insert on public.pots from authenticated`, then an explicit `grant insert
+(...)` naming every column a legitimate client insert needs, excluding the
+three Game-Engine-only fields. Confirmed live post-apply via
+`information_schema.column_privileges` that `authenticated` can no longer
+insert `rollover_source_pot_id`/`carry_over_amount`/`rollover_generation`
+(GE-9 lists the exact resulting column set). Worth noting: pot creation
+isn't wired into any frontend or Edge Function code yet (`ISSUE-8`'s
+territory) — so nothing in the live app could have exploited this today —
+but a raw PostgREST call with a valid anon-derived session already could
+have, independent of what the UI happens to call, which is the same
+reasoning `ISSUE-30`/`ISSUE-31` were fixed under during the hardening
+sprint. This is a proactive fix, not a response to a live incident.
+
+**`rollover_generation`, added as requested.** `pots.rollover_generation
+int not null default 0`, with a consistency CHECK tying it to
+`rollover_source_pot_id` (`generation = 0` iff no source; `generation > 0`
+iff a source exists) — same explicit-not-inferred approach as every other
+LMS addition. Set automatically by the Game Engine as
+`source.rollover_generation + 1` at automatic-creation time, same trust
+boundary (and same INSERT-privilege exclusion) as
+`rollover_source_pot_id`/`carry_over_amount`. A platform fact, not a display
+string — the auto-generated pot name ("Rollover #2") is derived from this
+value, never the reverse.
+
+**Net effect: one migration revision, applied.** `013_lms_wipeout_and_rollover.sql`
+gained `rollover_generation` + its consistency check, and the `pots` INSERT
+column-privilege narrowing — both additive, no prior column or constraint
+changed shape. Reviewed a second time against the original four dimensions
+(correctness, replay safety, rollback, shared-platform consistency) plus
+three more the repo owner asked for this round (trigger compatibility, RLS
+compatibility, Pick 5/Predictor compatibility) — all pass; findings live in
+the migration's own header. Applied via `supabase migration up --local`;
+confirmed live via direct schema inspection (`\d public.pots`, `pg_constraint`,
+`information_schema.column_privileges`).
+
+## LMS: no cycles (`current_cycle` removed), Slice 2 implemented
+
+**Decided 2026-08-05.** Before Slice 2, the repo owner removed the LMS
+"cycle" concept entirely: an LMS competition is one continuous sequence
+from its opening gameweek to its end; a team may never be picked twice
+within that competition — no resets, no half-season cycles, no
+configurable cycle mode. A rollover is a new competition (a new pot, per
+the automatic-rollover design above), so every entrant's available-team
+pool resets naturally as a side effect of being a different pot with
+different entries, never because a cycle mechanism reset mid-competition.
+This resolved the exact question blocking Slice 2 in the prior session
+entry — not by answering "what is a cycle," but by removing the need for
+an answer.
+
+**Removed, not left dormant, per explicit instruction:**
+`game_entry_lms.current_cycle` (`004_game_engine_shared_platform.sql`) —
+confirmed by grep, before drafting the removal, that nothing anywhere in
+the codebase read or wrote it. It was planned-but-never-implemented
+scaffolding for a cycle mode this product never actually got. Dropped via
+a **new** migration (`014_lms_remove_cycle.sql`) rather than editing `004`
+directly — `004` is already applied/historical, and this project's own
+rule is "never rewrite migrations after deployment." Dropping the column
+also dropped its own CHECK constraint automatically; no separate statement
+needed. `predictor_cycle_mode` is untouched — that's a real, still-planned
+Score Predictor concept (`two_halves`/`single_cycle`), unrelated to LMS
+despite the similar name, and GE-3's mode boundary means this LMS-only
+decision has zero business touching it.
+
+**Slice 2 implemented once the blocker was gone**: `submit-lms-pick` +
+`LmsEngine.validateEntry()` (`_shared/game-engine/lms/`) + `lms_team_picks`
+(`015_lms_picks.sql`). `validateEntry()` checks, in order: the entry is
+`pending`; the entry's `game_entry_lms.competitive_status` is `alive` (a
+new check Pick 5 has no equivalent of — LMS entries can be eliminated
+mid-competition, Pick 5 entries can't); the picked team actually has a
+fixture in the target gameweek (a real join against `fixtures`, not a
+trusted client-supplied fact); and the team has never been picked before by
+this entry, in *any* gameweek other than the one being resubmitted (a plain
+`neq('gameweek_id', ...)` — the same upsert-on-conflict shape
+`submit-pick5-picks` already established makes "changing this gameweek's
+pick" and "reusing an old gameweek's team" trivially distinguishable). The
+no-repeat rule is also a real `unique (game_entry_id, team_id)` constraint
+on `lms_team_picks` itself — enforced twice, deliberately, same
+"constraint not just convention" standard the rest of this schema holds to.
+
+**A second, unrelated prototype-name collision was found and worked
+around, the same category as `pots_insert_authenticated`'s gap but purely
+a naming issue, not a security one.** The obvious table name, `lms_picks`,
+already exists — owned by `supabase_admin`, part of the retired
+prototype's deliberately-untouched object set (`ISSUE-20`). Confirmed live
+the moment `015_lms_picks.sql` was first run (`relation "lms_picks"
+already exists`), not found by inspection first. Renamed to
+`lms_team_picks` before re-running. Flagged in `game-engine.md § GE-15` for
+Milestone 6: `predictor_picks` will hit the identical collision, and should
+be named around it before that migration is drafted, not after failing the
+same way again.
+
+**Verified live**: 17 new unit tests (9 `LmsEngine.validateEntry()` cases
+via a fake Supabase client, 8 `submit-lms-pick` request-shape cases; 133/133
+total pass). Live, through the real Edge Function: a valid pick; changing
+that same gameweek's pick to a different team (upsert, not flagged as
+reuse — confirmed exactly one row exists afterward, not two); the changed-
+away team correctly rejected when picked again in a later gameweek; a team
+with no fixture in the target gameweek rejected; an eliminated entry
+rejected. All test data (picks, `game_entry_lms`, `game_entries`,
+`pot_members`, the pot, one auth user) removed by exact ID, in dependency
+order, and re-verified as zero rows afterward — the ordering lesson from
+the `ISSUE-32` verification session was applied here from the start, not
+re-learned.

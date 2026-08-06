@@ -57,7 +57,7 @@ Three game modes launch together, all production-quality, none an "extra":
 | Mode | One-line rule |
 |---|---|
 | **Pick 5** | Pick 5 players before the gameweek deadline; a pick wins if the player's goals meet the pick's threshold. |
-| **Last Man Standing** | Pick one team to win each gameweek; a loss or draw eliminates you; team reuse restricted per cycle; last survivor(s) split the pot. |
+| **Last Man Standing** | Pick one team to win each gameweek; a loss or draw eliminates you; a team may never be picked twice across the whole competition (no cycles — decided 2026-08-05, see [GE-5.2](#ge-52-last-man-standing)); last survivor(s) split the pot. |
 | **Score Predictor** | Predict one fixture per gameweek — exact score, winner, goalscorer; cumulative points across the season; top scorer(s) split the pot at season end. |
 
 ## GE-2. Pot model
@@ -114,11 +114,12 @@ GE-3 — the calculated per-instance outcome lives on `pot_prizes` (GE-4.4). Joi
 `entry_fee` in `trg_pots_contract_immutable`'s guarded set once the pot has entries.
 Full reasoning: [decisions.md § Prize pool deductions](./decisions.md#prize-pool-deductions-admin-fee-and-charity-fee).
 
-**Revised 2026-08-05, designed — not yet applied** (`013_lms_wipeout_and_rollover.sql`,
-ahead of Milestone 5 Slice 2; supersedes an earlier same-purpose draft whose
+**Applied 2026-08-05** (`013_lms_wipeout_and_rollover.sql`, ahead of
+Milestone 5 Slice 2; supersedes an earlier same-purpose draft whose
 payment-model assumption was overturned — see
-[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee))
-— four LMS-specific additions: `wipeout_resolution` (`lms_wipeout_resolution`:
+[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee)
+and [decisions.md § LMS: multi-generation rollover review](./decisions.md#lms-multi-generation-rollover-review-found-a-real-gap-added-rollover_generation))
+— five LMS-specific additions: `wipeout_resolution` (`lms_wipeout_resolution`:
 `split_prize` | `roll_prize`, required for LMS pots, applies only when every
 remaining player is eliminated in the same gameweek), `season_end_tie_rule`
 (`lms_season_end_tie_rule`: `split_prize` | `final_prediction`, independent
@@ -127,9 +128,13 @@ the season's actual final gameweek), `start_gameweek_id` (the gameweek this
 competition's picks begin — the explicit, never-inferred-from-dates basis
 for a normal pot's one-time entry-window cutoff, or an organiser's explicit
 choice for a rollover pot's draft phase), and `rollover_source_pot_id` +
-`carry_over_amount` (set only by the Game Engine itself, automatically, when
-a wipeout resolves as `roll_prize` — never by an organiser; unconditionally
-immutable, like `game_type`, rather than only "once the pot has entries").
+`carry_over_amount` + `rollover_generation` (set only by the Game Engine
+itself, automatically, when a wipeout resolves as `roll_prize` — never by an
+organiser; unconditionally immutable, like `game_type`, rather than only
+"once the pot has entries"; also excluded entirely from `authenticated`'s
+`pots` INSERT column privileges, so a client-authored pot-creation request
+can never set them regardless of RLS — see the multi-generation review for
+why this was necessary, not just defensive).
 
 ### GE-4.2 `pot_members`
 
@@ -203,7 +208,7 @@ generated `net_amount` column (`gross_amount − admin_fee_amount − charity_fe
 must never split `gross_amount`. `Pick5Engine.awardPrize()` implements this as of
 Slice 8.
 
-**Revised 2026-08-05, designed — not yet applied** (`013_lms_wipeout_and_rollover.sql`)
+**Applied 2026-08-05** (`013_lms_wipeout_and_rollover.sql`)
 — a `rollover boolean not null default false` column. True only for a settled
 LMS `pot_prizes` row where `pots.wipeout_resolution = roll_prize` produced no
 winner (every remaining player eliminated in the same gameweek); `net_amount`
@@ -238,9 +243,16 @@ Three thin extension tables, 1:1 via `game_entry_id`:
 ```
 game_entries
   ├── game_entry_pick5      (game_entry_id, picks_won, picks_total)
-  ├── game_entry_lms        (game_entry_id, competitive_status, eliminated_gameweek_id, current_cycle)
+  ├── game_entry_lms        (game_entry_id, competitive_status, eliminated_gameweek_id)
   └── game_entry_predictor  (game_entry_id, total_points, exact_score_count, correct_scorer_count)
 ```
+
+**`game_entry_lms.current_cycle` removed, 2026-08-05** (`014_lms_remove_cycle.sql`)
+— planned-but-never-implemented scaffolding for an LMS cycle mode the product
+never actually got; nothing read or wrote it. See
+[decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented)
+for the full removal (also drops the corresponding `lms_tiebreak_picks`-adjacent
+cycle language from GE-1's vision table, above).
 
 **Milestone 4, Slice 2** added `pick5_picks` (`007_pick5_picks.sql`): one row per
 `(game_entry_id, pick_position)`, `player_id`, `goal_threshold`/`goals_scored`/`result`
@@ -252,8 +264,20 @@ policy at all**, same as `game_entry_pick5` — every write goes through
 `submit-pick5-picks`, which calls `Pick5Engine.validateEntry()` first. See
 [GE-8.1](#ge-81-submission-flow)'s revised text for why.
 
+**Milestone 5, Slice 2** added `lms_team_picks` (`015_lms_picks.sql`, applied
+2026-08-05): one row per `(game_entry_id, gameweek_id)`, `team_id`, `result`
+(reuses the existing `pick_result` enum rather than inventing a parallel
+one). **Named `lms_team_picks`, not the more obvious `lms_picks`** — that
+name collides with the retired prototype's own `supabase_admin`-owned
+`lms_picks` table (`ISSUE-20`'s "isolate, don't delete yet" list), confirmed
+live the moment this migration was first attempted, not theoretical. Same
+`unique (game_entry_id, team_id)` constraint (no gameweek/cycle scoping at
+all) enforces "no cycles, a team is used at most once, ever" at the database
+level, not just in `LmsEngine.validateEntry()`. No client-insert policy,
+same reasoning as `pick5_picks`.
+
 Each carries a `check` constraint guarding against a provably-invalid state discovered
-during the review (`picks_won <= picks_total`; `current_cycle >= 1`; `competitive_status =
+during the review (`picks_won <= picks_total`; `competitive_status =
 'eliminated'` iff `eliminated_gameweek_id is not null`; every count `>= 0`).
 
 ### GE-4.6 `pot_standings_snapshots`
@@ -316,8 +340,21 @@ the weekly jackpot via `pot_prizes`, and a real tie-break rule (`ISSUE-17`).
 winner is represented as "still `alive`, `payout_amount > 0`, `status = 'settled'`" on the
 parent `game_entries` row — no third status value, deliberately (the retired prototype's
 actual bug was trying to set a `'winner'` value that was never added to its enum; this
-design doesn't need that state to exist at all). `current_cycle`, maintained by a trigger on
-`lms_picks` mirroring the existing `recompute_goal_thresholds()` pattern (Milestone 5).
+design doesn't need that state to exist at all).
+
+**No cycles, decided 2026-08-05 — `current_cycle` removed.** An LMS
+competition is one continuous sequence from its opening gameweek until it
+ends; a team may never be picked twice within that competition, full stop —
+no resets, no half-season cycles, no configurable cycle mode. A rollover is
+a **new competition** (a new pot, [GE-5.2](#ge-52-last-man-standing) below),
+so every player's available-team pool resets naturally as a side effect of
+being a different pot with different entries, not because any cycle
+mechanism reset it. `game_entry_lms.current_cycle` was planned-but-never-
+implemented scaffolding for a cycle mode LMS never actually got — nothing
+in the codebase read or wrote it (confirmed by grep before removal), unlike
+`predictor_cycle_mode`, which Score Predictor genuinely uses and this
+change doesn't touch. Dropped via `014_lms_remove_cycle.sql`. Full
+reasoning: [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented).
 
 **`lms_tiebreak_picks` — decided 2026-08-05: will not be built.** The prototype
 referenced it but never created it; this specification originally left the door
@@ -329,8 +366,8 @@ but that's a settlement-time resolution mechanism, not a recurring pick
 players make throughout the competition the way the prototype's table implied.)
 
 **Wipeout Resolution — revised 2026-08-05** (renamed from an earlier
-same-session draft's "Tie Outcome"; schema in `013_lms_wipeout_and_rollover.sql`,
-not yet applied; full reasoning in
+same-session draft's "Tie Outcome"; schema applied in
+`013_lms_wipeout_and_rollover.sql`; full reasoning in
 [decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee)):
 a **wipeout** is when every currently-`alive` entry in a pot is eliminated by
 the same gameweek's results, going from N > 1 alive to 0 alive in one step —
@@ -346,26 +383,32 @@ check as "0 entries are alive." On a wipeout:
   among them via the existing multi-winner path (same mechanism Pick 5
   already uses for a standings tie, GE-4.6). The competition ends there.
 - `wipeout_resolution = roll_prize` — nobody wins. This pot's `pot_prizes`
-  row for the instance is written with `rollover = true`. **The Game Engine
-  then automatically creates a new LMS pot** — copying the configurable LMS
-  settings (`entry_fee`, `wipeout_resolution`, `season_end_tie_rule`,
-  `admin_fee_*`/`charity_fee_*`) from the old pot as starting defaults (still
-  organiser-editable pre-launch, via the existing "immutable only once
-  entries exist" rule — no special-casing needed), setting
-  `rollover_source_pot_id` to the old pot's id and `carry_over_amount` to the
-  old pot's unclaimed `net_amount`, `status = 'draft'` (reusing
-  `pot_status`'s existing, previously-unused `'draft'` value — no enum
-  change), and inserting exactly one `pot_members` row: the old pot's
-  organiser, as admin. **No other participant is carried over** — everyone
-  else must explicitly rejoin. The organiser then, before activating it
-  (still `status = 'draft'`): invites players (existing `invite_code`/
-  `redeem_invite()`, `ISSUE-8`), verifies payments as they come in
-  (unchanged Payment Verification, per the GE-4.3 confirmation above), and
-  chooses `start_gameweek_id` — the next gameweek, any future gameweek, or
-  the following season's first, letting them wait out a nearly-finished
-  season rather than force an awkward immediate restart. Activating the pot
-  (`status` leaving `'draft'`) is a not-yet-designed admin action — flagged,
-  not built.
+  row for the instance is written with `rollover = true` — this old pot is
+  now an **immutable historical record**; it never holds or tracks the
+  carry-over amount itself, only the fact that it rolled over. **The Game
+  Engine then automatically creates a new LMS pot** — copying the
+  configurable LMS settings (`entry_fee`, `wipeout_resolution`,
+  `season_end_tie_rule`, `admin_fee_*`/`charity_fee_*`) from the old pot as
+  starting defaults (still organiser-editable pre-launch, via the existing
+  "immutable only once entries exist" rule — no special-casing needed,
+  `name` included, since it was never in any immutable set), setting
+  `rollover_source_pot_id` to the old pot's id and `carry_over_amount`
+  (belongs to the *new* pot alone) to the old pot's unclaimed `net_amount`,
+  a generated default `name` derived from the old pot's (e.g. "Premier
+  League LMS (Rollover)"), `status = 'draft'` (reusing `pot_status`'s
+  existing, previously-unused `'draft'` value — no enum change), and
+  inserting exactly one `pot_members` row: the old pot's organiser, as
+  admin. **No other participant is carried over** — everyone else must
+  explicitly rejoin. The organiser then, before activating it (still
+  `status = 'draft'`, and nothing about it starts on its own): may rename
+  it, invites players (existing `invite_code`/`redeem_invite()`, `ISSUE-8`),
+  verifies payments as they come in (unchanged Payment Verification, per
+  the GE-4.3 confirmation above), and chooses `start_gameweek_id` — the
+  next gameweek, any future gameweek, or the following season's first,
+  letting them wait out a nearly-finished season rather than force an
+  awkward immediate restart. Activating the pot (`status` leaving `'draft'`)
+  and generating the default name are both not-yet-designed Game Engine
+  work — flagged, not built.
 - Required for LMS pots (`pots.wipeout_resolution`, not-null with a default —
   enforcing "required" is an application/API-layer concern at pot creation,
   same pattern `predictor_cycle_mode`/`predictor_scorer_scope` already use
@@ -400,11 +443,15 @@ organiser's pre-launch workflow, above); once activated, normal LMS entry
 rules apply — the same one-time, `start_gameweek_id`-anchored cutoff as any
 other pot. Every joiner, at any point during the draft phase, pays exactly
 the new competition's one flat `entry_fee` — never a backfilled multiple of
-it. This is enforced by `get-or-create-lms-entry` (GE-9) — **flagged as a
-real, currently-unfixed gap**: Milestone 5 Slice 1 shipped before any
-entry-window rule existed and has no such check at all today (see
-[current-state.md ISSUE-32](./current-state.md#issue-32--get-or-create-lms-entry-has-no-entry-window-gate)).
-Full user-facing rule text: [business-rules.md § Last Man Standing](./business-rules.md#last-man-standing).
+it. **Enforced, 2026-08-05** — `get-or-create-lms-entry` (GE-9) now checks
+this before checking pot membership, via a pure `checkEntryWindow()`
+function (`validate.ts`) fed the pot's `rollover_source_pot_id`/`status`/
+`start_gameweek_id` and its start gameweek's `earliest_kickoff_utc`. Closes
+`ISSUE-32` (Milestone 5 Slice 1 shipped before any entry-window rule
+existed and had no such check at all) — see
+[current-state.md § Resolved issues](./current-state.md#resolved-issues)
+for verification detail. Full user-facing rule text:
+[business-rules.md § Last Man Standing](./business-rules.md#last-man-standing).
 
 ### GE-5.3 Score Predictor
 
@@ -519,7 +566,8 @@ reverse the user-facing outcome (e.g. a prize award) that triggered it.
 | `admin-actions` | Unchanged in shape; operates on the now-generalized shared tables |
 | `get-or-create-pick5-entry` (new, Milestone 4 Slice 1) | Not one of the eight Game Engine lifecycle methods — creating the `game_entries`/`game_entry_pick5` row pair is persistence orchestration, not scoring/validation/settlement/payout logic, so it's a plain Edge Function rather than a dispatcher call. If LMS/Predictor need equivalent creation logic in Milestones 5/6, revisit whether this should generalize into shared, mode-branching logic |
 | `submit-pick5-picks` (new, Milestone 4 Slice 2) | First Edge Function to call a real dispatcher-resolved Game Engine method — `resolveEngine('pick5').validateEntry(ctx, entry, picks)`. Writes `pick5_picks` via upsert on `(game_entry_id, pick_position)` only after validation passes |
-| `get-or-create-lms-entry` (new, Milestone 5 Slice 1) | Same reasoning as `get-or-create-pick5-entry` — not a dispatcher call. **Needs a correction, not yet applied**: per the 2026-08-05 Wipeout Resolution/rollover/late-entry decisions, this function must reject entry creation once the pot's entry window has closed (`ISSUE-32`) — currently it has no such check |
+| `get-or-create-lms-entry` (new, Milestone 5 Slice 1) | Same reasoning as `get-or-create-pick5-entry` — not a dispatcher call. **Corrected 2026-08-05** (`ISSUE-32`, resolved): now checks the pot's entry window (normal pot: one-time cutoff at `start_gameweek_id`'s kickoff; rollover pot: `status = 'draft'`) before checking membership |
+| `submit-lms-pick` (new, Milestone 5 Slice 2) | First Edge Function to call `LmsEngine` for real — `resolveEngine('last_man_standing').validateEntry(ctx, entry, { gameweekId, teamId })`. A season-scoped entry has no `gameweek_id` of its own (GE-4.5), so `gameweek_id` is a request parameter here, unlike `submit-pick5-picks`. Writes `lms_team_picks` via upsert on `(game_entry_id, gameweek_id)` only after validation passes |
 | Prototype SQL functions (`settle_gameweek`, `settle_lms_gameweek`, `settle_predictor_gameweek`, `settle_predictor_season`, `compute_live_scores`) | Retired, not ported |
 
 **Milestone 3 note:** the framework module exists standalone and is not yet imported by any
@@ -559,7 +607,7 @@ until Milestone 4+ adds a real user-editable column; `read_at` only on `notifica
 | 2 | Shared schema, RLS, payments, entries — reviewed against greenfield standard, Critical/Required findings applied | **Done** — see [schema-review.md](./schema-review.md) |
 | 3 | Shared Game Engine framework: folder structure, interfaces, dispatcher, shared types, DI, contracts. No mode logic, no scoring, no settlement | **Done** |
 | 4 | Pick 5 implementation | **In progress** — Slice 1 (entry creation), Slice 2 (pick submission), Slice 3 (locking), Slice 4 (scoring), Slice 5 (settlement), Slice 6 (standings, resolving `ISSUE-15`/`ISSUE-17`), Slice 7 (`determineWinner()`, standalone), Slice 8 (`awardPrize()`, gross/net prize pool deductions, wired into `settle()`), and Slice 9 (`notifyUsers()`, domain-event notifications, wired into `awardPrize()`) done — all eight `GameEngine` contract methods now implemented for Pick 5 |
-| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed, mirroring Pick 5 Slice 1 exactly (season-scoped entry, no schema change needed — `game_entries`/`game_entry_lms` already existed from Milestone 2), **but needs a correction before Slice 2** (`ISSUE-32`, entry-window gate missing). Architecture updated twice 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions, the second time revising the payment model and rollover-creation flow (schema designed in `013_lms_wipeout_and_rollover.sql`, not yet applied — see [GE-5.2](#ge-52-last-man-standing)); Slice 2 (pick submission, `lms_picks`) not started, blocked on `013` being reviewed and applied |
+| 5 | Last Man Standing implementation | **In progress** — Slice 1 (entry creation, `get-or-create-lms-entry`) done and committed. Architecture revised three times 2026-08-05 for the Wipeout Resolution/rollover/late-entry product decisions; `013_lms_wipeout_and_rollover.sql` applied. `ISSUE-32` (entry-window gate) fixed and verified live. **Slice 2 (pick submission, `submit-lms-pick` + `lms_team_picks` + `LmsEngine.validateEntry()`) done, 2026-08-05** — unblocked by the repo owner's decision to remove LMS cycles entirely (`current_cycle` dropped, `014_lms_remove_cycle.sql`); a team may never be picked twice across the whole competition, enforced by a real unique constraint, not just application logic. `LmsEngine` is the first real LMS `GameEngine` implementation (`validateEntry()` only — the other seven methods throw `GameEngineNotImplementedError`, same pattern Pick 5 used between its own Slice 2 and Slice 9). Not committed — awaiting review |
 | 6 | Score Predictor implementation | Not started |
 | 7 | Shared dashboards, admin, notification delivery design, `redeem_invite()`'s deferred checks | Not started |
 | 8 | End-to-end testing, performance review, security review | Not started |
@@ -590,6 +638,13 @@ never reused.
 
 - **`half_cycle` boundary computation** ([GE-5.3](#ge-53-score-predictor)) — needs resolving
   before Milestone 6.
+- **Milestone 6's pick table will hit the same prototype-name collision `lms_team_picks`
+  did.** The retired prototype's `predictor_picks` table (`supabase_admin`-owned,
+  `ISSUE-20`) occupies the obvious name, exactly like `lms_picks` did for
+  Milestone 5 Slice 2 — confirmed live, not theoretical, when
+  `015_lms_picks.sql` first failed with "relation lms_picks already
+  exists." Plan the real name (e.g. `predictor_fixture_picks`) before
+  drafting that migration, not after hitting the same error again.
 - **Notification delivery mechanism** — in-app only vs. email/push; needs its own addendum
   before Milestone 7.
 - **`redeem_invite()`'s `max_members`/`status` checks** — identified in
@@ -651,7 +706,10 @@ supabase/functions/
                                     determineWinner (Slice 7), awardPrize
                                     (Slice 8), and notifyUsers (Slice 9) implemented.
                                     All eight GameEngine contract methods done.
-      lms/                         Milestone 5 — empty until then
+      lms/                         Milestone 5 — validateEntry (Slice 2) implemented;
+                                    lockEntries/calculateScore/settle/generateStandings/
+                                    determineWinner/awardPrize/notifyUsers not yet
+                                    (throw GameEngineNotImplementedError)
       predictor/                   Milestone 6 — empty until then
   compute-scores/                  Milestone 4 Slice 4 — imports _shared/game-engine, drives calculateScore()
   compute-deadlines/                Milestone 4 Slice 3 — imports _shared/game-engine, drives lockEntries()
@@ -665,6 +723,8 @@ supabase/functions/
                                     exactly (not a dispatcher call); the one structural
                                     difference is a season-scoped entry (no gameweek_id in
                                     the request), per GE-4.5
+  submit-lms-pick/                 NEW — Milestone 5 Slice 2, first real LMS dispatcher call
+                                    (resolveEngine('last_man_standing').validateEntry())
 ```
 
 Each mode's future subdirectory (`pick5/`, `lms/`, `predictor/`) will contain exactly one

@@ -1,0 +1,26 @@
+-- Milestone 5 — docs/game-engine.md § GE-5.2. Removes the "cycle" concept
+-- from LMS entirely, per the repo owner's explicit 2026-08-05 decision:
+-- an LMS competition is one continuous sequence from its opening gameweek
+-- until it ends; a team may never be picked twice within that competition,
+-- full stop — no resets, no half-season cycles, no configurable cycle mode.
+-- A rollover is a NEW competition (a new pot, per 013_lms_wipeout_and_rollover.sql),
+-- so every player's available-team pool resets naturally as a side effect of
+-- being a different pot with different entries — not because any cycle
+-- mechanism reset it.
+--
+-- game_entry_lms.current_cycle (004_game_engine_shared_platform.sql) was
+-- planned-but-never-implemented scaffolding for a cycle mode LMS never
+-- actually got (unlike predictor_cycle_mode, which Score Predictor
+-- genuinely uses — untouched by this migration, GE-3 boundary respected).
+-- Nothing reads or writes current_cycle anywhere in the codebase (confirmed
+-- by grep before drafting this) — dead architecture, not a working feature
+-- being removed. Per the repo owner's explicit instruction: "do not
+-- preserve dead design simply because it already exists."
+--
+-- 004 is an already-applied, historical migration and is not edited here —
+-- this is a new migration, per this project's "never rewrite migrations
+-- after deployment" rule. Dropping the column also drops its own
+-- column-level CHECK (current_cycle >= 1) automatically; no separate
+-- statement needed.
+
+alter table public.game_entry_lms drop column current_cycle;

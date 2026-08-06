@@ -361,33 +361,6 @@ deliberately removed/replaced by the manual scraper workflow. Plan:
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-32 — `get-or-create-lms-entry` has no entry-window gate
-**Discovered 2026-08-05**, while updating the LMS architecture for the
-Wipeout Resolution/rollover/late-entry product rules — revised once already
-this same session, see
-[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee).
-`supabase/functions/get-or-create-lms-entry/index.ts` (Milestone 5 Slice 1,
-committed 2026-08-05, `2db86b4`) checks pot membership and `game_type`
-only — it will happily create an LMS entry at any time, for any pot, with no
-regard to whether the competition has already started. That was a reasonable
-reading of the spec when Slice 1 was built (nothing had yet defined an
-entry-window rule for LMS), but the now-final rule is explicit: late entry
-is not generally allowed, and the one exception — a Game-Engine-created
-rollover pot, joinable only while `status = 'draft'` — has a condition this
-function doesn't check either. **Status: confirmed, not fixed.** Not
-low-risk to fix inline right now — the columns the check depends on
-(`pots.start_gameweek_id`, `pots.rollover_source_pot_id`) exist only in a
-drafted, not-yet-applied migration (`013_lms_wipeout_and_rollover.sql`). No
-production/real-user impact today (Milestone 5 hasn't shipped past Slice 1),
-but this must be fixed before Slice 2 (pick submission) builds on top of
-entry creation, since picks presuppose a validly-created entry. Plan: apply
-`013` once reviewed, then add the gate as a small, targeted correction — for
-a normal pot, reject once `now() >= start_gameweek.earliest_kickoff_utc`;
-for a rollover pot (`rollover_source_pot_id is not null`), reject unless
-`pots.status = 'draft'`. See
-[game-engine.md § GE-5.2](./game-engine.md#ge-52-last-man-standing) for the
-exact rule.
-
 #### ISSUE-7 — Two pick-building flows enforce different eligibility rules
 `PicksPage` (`/pot/:potId/picks`, via `components/picks/PickSelector.jsx`) allows
 goalkeepers to be picked. `PotDetail.jsx`'s inline picker (`/pot/:potId`) explicitly
@@ -580,6 +553,42 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-32 — `get-or-create-lms-entry` has no entry-window gate
+**Discovered and resolved 2026-08-05.** `supabase/functions/get-or-create-lms-entry/index.ts`
+(Milestone 5 Slice 1, committed `2db86b4`) checked pot membership and
+`game_type` only — it would create an LMS entry at any time, for any pot,
+regardless of whether the competition had started. Reasonable when Slice 1
+was built (no entry-window rule existed yet for LMS); invalid once the
+Wipeout Resolution/rollover/late-entry decisions landed — see
+[decisions.md § LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition entry fee](./decisions.md#lms-wipeout-resolution-automatic-rollover-and-a-fixed-per-competition-entry-fee).
+**Fixed**: a new pure `checkEntryWindow()` (`validate.ts`) checked before pot
+membership — a normal pot rejects once `now() >= start_gameweek's
+earliest_kickoff_utc` (one-time cutoff, boundary exclusive); a rollover pot
+(`rollover_source_pot_id` set) is allowed only while `status = 'draft'`,
+regardless of gameweek timing; a normal pot with no `start_gameweek_id`
+configured is rejected rather than silently allowed. 6 new unit tests.
+**Verified live** through the real Edge Function (not a DB-only check): 5
+scenarios covering both pot types and the boundary/misconfiguration cases,
+all passing, using real gameweeks (`id=1`, kickoff 2026-06-11, past; `id=28`,
+kickoff 2026-08-21, future). All test data (pots, pot_members, game_entries,
+one auth user) removed by exact ID — caught and fixed a real bug in the
+*verification script itself* along the way: cleanup initially deleted
+parent pots before the rollover pots referencing them via
+`rollover_source_pot_id ... on delete restrict`, so several deletes failed
+silently (no error check on the cleanup calls) and left 10 test pots + 3
+test users behind; corrected by deleting dependents (rollover pots, and
+their `game_entries` rows) before their sources, then re-verified zero rows
+remained matching the test's naming pattern. Also surfaced a **local-dev
+infrastructure issue, not a product bug**: `docker restart
+supabase_edge_runtime_pl-goals` gives that container a new internal Docker
+IP, but Kong caches the old one and returns 502 ("Host is unreachable") for
+every function call — not just the newly-edited one — until Kong itself is
+also restarted. Different symptom from the earlier-documented "new function
+directory needs a full `supabase stop`/`start`" note (session-log entry 26)
+but same category: restarting only the edge runtime container is not
+sufficient after any change, a Kong restart is also needed. Worth
+remembering for the next slice that edits an existing function.
 
 #### ISSUE-6 — Payment Verification has no UI or bulk import; `compute-scores`/`settle` will void every entry
 **Resolved 2026-08-05.** A pot admin (or app admin) can now verify payments, both
