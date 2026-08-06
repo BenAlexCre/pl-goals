@@ -138,7 +138,11 @@ voided** — all of its picks are marked `void` and it's excluded from the leade
 entirely, regardless of how well its picks would have scored. Settlement depends
 **only** on `entry_payments.is_paid` — never on any external payment gateway's status,
 by design. This rule is implemented in `Pick5Engine.settle()` (Milestone 4 Slice 5)
-and, for the retired prototype schema, in `compute-scores`.
+and, for the retired prototype schema, in `compute-scores`. **For Last Man Standing**
+(`LmsEngine.settle()`, Milestone 5 Slice 5), the same rule reads
+`entry_payments.scope = 'season'` instead of `'gameweek'` — LMS charges one flat fee
+for the whole competition, not a weekly one — so voiding an entry voids **every** one
+of its picks, across every gameweek it's played, not just the current one.
 
 **Implemented, 2026-08-05**: a pot admin (or app admin) can now actually verify
 payments, both ways, through `/admin/payments` — `pages/AdminPayments.jsx`. Single
@@ -292,12 +296,13 @@ new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
 **Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
-submission, locking, scoring, and elimination are all implemented and
-verified live, as of 2026-08-06** — see
+submission, locking, scoring, elimination, and payment-void settlement are
+all implemented and verified live, as of 2026-08-06** — see
 [current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
-[decisions.md § LMS locking](./decisions.md#lms-locking), and
-[decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination).
+[decisions.md § LMS locking](./decisions.md#lms-locking),
+[decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination),
+and [decisions.md § LMS settlement](./decisions.md#lms-settlement).
 Pick submission enforces the no-repeat-team rule above via a real database
 constraint, not just application logic. Wipeout resolution and season-end
 resolution themselves (splitting or rolling the prize once the competition

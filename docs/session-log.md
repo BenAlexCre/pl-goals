@@ -13,6 +13,56 @@ from here.
 
 ---
 
+## 2026-08-06 (34) — Milestone 5 Slice 5: LMS settlement
+
+**Goal:** Slice 4 was reviewed, approved, committed, and pushed. Begin
+Slice 5 — same vertical-slice approach, review Pick 5's `settle()` first,
+reuse what's reusable, implement only the genuine LMS differences. The
+repo owner was explicit this time: LMS entries are already eliminated
+during `calculateScore()`; settlement should only do work that genuinely
+belongs in settlement; don't duplicate `calculateScore()`'s work.
+
+**Review, before writing code:** Pick5Engine.settle() does three things —
+payment-void, `game_entries.status → 'settled'`, and calling
+`generateStandings()`/`determineWinner()`/`awardPrize()` every gameweek.
+Reasoned through each against LMS's shape: payment-void is genuinely
+reusable (untouched by `calculateScore()`). The other two are not — LMS's
+`game_entries.status` must stay `'pending'` across the whole competition
+(same reasoning as `lockEntries()`), and LMS's competition doesn't conclude
+weekly the way a Pick 5 jackpot does, so calling award-adjacent methods on
+every ordinary gameweek would be structurally wrong, not just early. Also
+found, by reading `settle-gameweek` before writing anything, the same
+discovery bug Slices 3/4 had already fixed elsewhere.
+
+**Implemented:** `LmsEngine.settle()` does the payment-void check only —
+reads `entry_payments` with `scope = 'season'` (LMS's flat one-time fee,
+not `'gameweek'`), voids unpaid entries and **every** one of their picks
+across every gameweek (not just the current one, since the whole
+competition's participation is what's unpaid). Fixed `settle-gameweek`'s
+discovery bug identically to the other two functions. **No schema
+change** — `entry_payments`, `game_entries.status`, `lms_team_picks.result`
+all already supported this.
+
+**Verified:** 6 new unit tests (156/156 total pass) via the same in-memory
+relational fake `calculateScore()`'s tests already established, extended
+with `entry_payments`. Live, through the real `settle-gameweek` function,
+two entries in one dedicated test pot: a verified season-scoped payment
+(stayed pending, pick untouched), no `entry_payments` row at all (voided,
+pick marked void — confirms a missing row is treated as unpaid, matching
+the unit tests exactly). Also confirmed the gameweek itself still gets
+marked `'completed'` by the function's pre-existing shared logic. All test
+data removed by exact ID, re-verified as zero rows.
+
+**Documentation updated:** `game-engine.md` (GE-5.2, GE-8.4, GE-9, GE-12,
+GE-17), `business-rules.md` (§ Payment verification rules, § Last Man
+Standing), `decisions.md` (new ADR, § LMS settlement), `project-board.md`.
+
+**Status:** Slice 5 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Wipeout detection
+(`determineWinner()`) is the natural next slice, still unstarted.
+
+---
+
 ## 2026-08-06 (33) — Milestone 5 Slice 4: LMS scoring and elimination
 
 **Goal:** Slice 3 was reviewed, approved, committed, and pushed. The repo

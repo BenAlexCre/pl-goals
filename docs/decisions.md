@@ -1188,3 +1188,62 @@ value, same consequence); an entry that submitted no pick at all
 (eliminated, confirmed no pick row was ever created). Dedicated test
 gameweeks/fixtures/users used throughout, all removed by exact ID
 afterward and re-verified as zero rows.
+
+## LMS settlement
+
+**Decided 2026-08-06**, ahead of Milestone 5 Slice 5. The repo owner's
+instruction was explicit and narrower than the previous two slices: LMS
+entries are already eliminated during `calculateScore()`; settlement should
+only perform work that genuinely belongs in settlement; don't duplicate
+`calculateScore()`'s work. Reviewed Pick5Engine's `settle()` first, per the
+same "review before writing code" discipline as Slices 3/4.
+
+**What's reusable, unchanged:** the `settle(ctx, gameweekId): Promise<void>`
+contract signature; the payment-void business rule itself (an unpaid entry
+by settlement time is voided, its picks marked `void`, excluded from the
+leaderboard); the general pattern of reading `entry_payments`, splitting
+entries into paid/unpaid sets, and writing accordingly.
+
+**What's deliberately NOT reused — the two things Pick5Engine's `settle()`
+does that LMS's must not:**
+
+1. **Never transitions `game_entries.status` to `'settled'`.** Pick 5's
+   `settle()` does this because a gameweek-scoped entry's life ends with
+   that gameweek. LMS's `game_entries` is season-scoped (GE-4.5) and must
+   stay `'pending'` across the *whole* competition — exactly the same
+   constraint that shaped `lockEntries()`'s design in Slice 3. `'settled'`
+   only becomes meaningful once the competition itself concludes, not on
+   any ordinary gameweek's `settle()` call.
+2. **Never calls `generateStandings()`/`determineWinner()`/`awardPrize()`.**
+   Pick 5 calls these every gameweek because a new payable instance
+   concludes weekly (a fresh jackpot, GE-8.4). LMS's competition doesn't
+   conclude weekly — it concludes exactly once, at a wipeout or down to one
+   survivor. Calling award-adjacent methods on every ordinary gameweek
+   would be structurally wrong, not merely early: there's no "instance" to
+   award yet on most gameweeks. Detecting "has this competition just
+   concluded" is wipeout detection (`determineWinner()`), already flagged
+   as real, unstarted design work since the Milestone 5 architecture round
+   — still not designed here either, correctly, since this slice's own
+   scope is narrower than that.
+
+**The one genuine LMS-specific difference in the reused logic:**
+`entry_payments.scope = 'season'`, not `'gameweek'` — LMS charges one flat
+fee for the whole competition (decided 2026-08-05, § LMS: Wipeout
+Resolution, automatic rollover, and a fixed per-competition entry fee), so
+the payment check reads one row per `(pot_id, user_id)`, not per gameweek.
+Voiding an unpaid entry therefore voids **every** `lms_team_picks` row that
+entry has, across every gameweek it's played, not just the gameweek
+`settle()` was called for — the entry's whole-competition participation is
+what's unpaid, not one week of it.
+
+**No schema change.** `entry_payments`, `game_entries.status`, and
+`lms_team_picks.result` all already supported everything this slice needed.
+
+**Verified live**, through the real `settle-gameweek` function (not a
+direct engine call), with two entries in one pot: one with a verified
+`scope='season'` payment (stayed `pending`, pick untouched), one with no
+`entry_payments` row at all (voided, its pick marked `void`) — confirming
+settle() correctly treats a missing row as unpaid, same as the unit tests.
+Also confirmed `settle-gameweek`'s own shared logic (marking the gameweek
+`'completed'`) still runs correctly for an LMS-only gameweek. All test data
+removed by exact ID, re-verified as zero rows.

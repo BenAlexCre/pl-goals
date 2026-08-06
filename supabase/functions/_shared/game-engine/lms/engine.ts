@@ -22,6 +22,26 @@
 // the whole gameweek being finished the way Pick 5's settle() waits for
 // (GE-8.4) — so there's no need to defer it to a later slice. See
 // docs/decisions.md § LMS scoring and elimination.
+//
+// settle() therefore has much less left to do than Pick5Engine's version,
+// per the repo owner's explicit 2026-08-06 instruction not to duplicate
+// calculateScore()'s work: it does the payment-void check ONLY (genuinely
+// settlement's job, untouched by calculateScore()) and nothing else. Two
+// things Pick5Engine's settle() does are deliberately NOT done here:
+//   - It never transitions game_entries.status to 'settled'. That status
+//     must stay 'pending' across the whole competition (same reasoning as
+//     lockEntries() never touching it) — 'settled' only makes sense once
+//     the competition has actually concluded, which isn't every gameweek's
+//     settle() call the way a Pick 5 gameweek concludes weekly.
+//   - It never calls generateStandings()/determineWinner()/awardPrize().
+//     Pick 5 calls them every gameweek because a new payable instance
+//     concludes every gameweek (GE-8.4). LMS's competition only concludes
+//     once (a wipeout, or one survivor) — calling award-adjacent methods
+//     on every ordinary gameweek's settle() would be structurally wrong,
+//     not just premature. Detecting "has this competition just concluded"
+//     is real, unstarted design work (wipeout detection — see
+//     docs/decisions.md § LMS settlement), correctly left for a later
+//     slice rather than guessed at here.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import { GameEngineNotImplementedError } from '../errors.ts'
@@ -332,8 +352,75 @@ export class LmsEngine implements GameEngine {
     }
   }
 
-  async settle(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {
-    throw new GameEngineNotImplementedError('last_man_standing', 'settle')
+  // GE-6: "Finalize this gameweek's outcome for the mode." For LMS that's
+  // the payment-void rule alone (docs/business-rules.md § Payment
+  // verification rules) — see the module comment above for what's
+  // deliberately NOT done here. LMS payment is scope='season' (one flat
+  // entry fee per competition, decided 2026-08-05 — GE-4.3), so this reads
+  // entry_payments once per pot, not once per gameweek the way Pick 5's
+  // scope='gameweek' check does; voiding an unpaid entry voids ALL of its
+  // picks across every gameweek, not just this one, since the entry's
+  // whole-competition participation is what's being voided.
+  async settle(ctx: GameEngineContext, gameweekId: number): Promise<void> {
+    const potIds = await this.getEligibleLmsPotIds(ctx, gameweekId)
+    if (potIds.length === 0) {
+      return
+    }
+
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id, pot_id, user_id')
+      .eq('status', 'pending')
+      .in('pot_id', potIds)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return
+    }
+
+    const { data: payments, error: paymentsError } = await ctx.supabase
+      .from('entry_payments')
+      .select('pot_id, user_id, is_paid')
+      .eq('scope', 'season')
+      .in('pot_id', potIds)
+
+    if (paymentsError) {
+      throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+    }
+
+    const paidKeys = new Set(
+      ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
+        .filter((p) => p.is_paid)
+        .map((p) => `${p.pot_id}:${p.user_id}`)
+    )
+
+    const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
+      .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
+      .map((e) => e.id)
+
+    if (unpaidEntryIds.length === 0) {
+      return
+    }
+
+    const { error: voidEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'void' })
+      .in('id', unpaidEntryIds)
+
+    if (voidEntriesError) {
+      throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+    }
+
+    const { error: voidPicksError } = await ctx.supabase
+      .from('lms_team_picks')
+      .update({ result: 'void' })
+      .in('game_entry_id', unpaidEntryIds)
+
+    if (voidPicksError) {
+      throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+    }
   }
 
   async generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {

@@ -1,11 +1,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
-import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
-import { UnknownGameTypeError } from '../_shared/game-engine/errors.ts'
+import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
-// Side-effecting import — registers 'pick5' with the dispatcher (GE-7/GE-18).
-// Same pattern as compute-deadlines/compute-scores (Milestone 4 Slices 3-4).
+// Side-effecting imports — register each mode with the dispatcher (GE-7/
+// GE-18). Same pattern as compute-deadlines/compute-scores.
 import '../_shared/game-engine/pick5/index.ts'
+import '../_shared/game-engine/lms/index.ts'
 
 // Milestone 4, Slice 5 — docs/game-engine.md § GE-6 (settle) / GE-8.4
 // (Settlement flow). The "all fixtures finished" check and everything
@@ -19,6 +19,14 @@ import '../_shared/game-engine/pick5/index.ts'
 // this flow (unlike the Locking diagram, which explicitly called for one in
 // compute-deadlines) — none added here, matching the spec as written rather
 // than inferring one from the other two functions' pattern.
+//
+// Revised, Milestone 5 Slice 5 (docs/decisions.md § LMS settlement): same
+// discovery bug Slices 3/4 already fixed in compute-deadlines/compute-scores
+// — the dispatch step queried game_entries.gameweek_id = <this gameweek>,
+// which can never match an LMS row (always null, GE-4.5). Replaced with the
+// same fix: call every registered mode's settle() unconditionally.
+const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predictor']
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
 
@@ -61,31 +69,17 @@ Deno.serve(async (req) => {
       if (!fixtures?.length) continue
       if (!fixtures.every((f) => f.status === 'finished')) continue
 
-      // Game Engine dispatch (new, GE-7/GE-8.4): discover which game types
-      // have locked entries for this gameweek — data-driven, no hardcoded
-      // 'pick5' — and call each one's settle(). Same pattern as the dispatch
-      // blocks already added to compute-deadlines/compute-scores.
-      const { data: lockedEntries } = await sb
-        .from('game_entries')
-        .select('pots(game_type)')
-        .eq('gameweek_id', gw.id)
-        .eq('status', 'locked')
-
-      type PotsEmbed = { game_type: GameType } | { game_type: GameType }[] | null
-      const gameTypes = new Set<GameType>()
-      for (const entry of (lockedEntries ?? []) as Array<{ pots: PotsEmbed }>) {
-        const gameType = Array.isArray(entry.pots) ? entry.pots[0]?.game_type : entry.pots?.game_type
-        if (gameType) gameTypes.add(gameType)
-      }
-
-      for (const gameType of gameTypes) {
-        try {
-          await resolveEngine(gameType).settle(ctx, gw.id)
-          gameEngineDispatches++
-        } catch (err) {
-          if (err instanceof UnknownGameTypeError) continue
-          throw err
-        }
+      // Game Engine dispatch (GE-7/GE-8.4): call every registered mode's
+      // settle() unconditionally — see the header comment for why this
+      // replaced a per-gameweek "discover which game types have locked
+      // entries" pre-filter that only ever worked for Pick 5. Any thrown
+      // error propagates to this gameweek's own try/catch, below — same
+      // per-gameweek isolation as before, just without the now-impossible
+      // UnknownGameTypeError branch (isRegistered() already guards it).
+      for (const gameType of ALL_GAME_TYPES) {
+        if (!isRegistered(gameType)) continue
+        await resolveEngine(gameType).settle(ctx, gw.id)
+        gameEngineDispatches++
       }
 
       await sb.from('user_entries')
