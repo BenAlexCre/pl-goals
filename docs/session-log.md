@@ -13,6 +13,64 @@ from here.
 
 ---
 
+## 2026-08-06 (35) — Milestone 5 Slice 6: LMS standings
+
+**Goal:** Slice 5 was reviewed, approved, committed, and pushed. Begin
+Slice 6 — review Pick 5's standings first, but explicitly do not assume
+that model is correct for LMS; design standings from scratch, addressing
+alive players, eliminated players, elimination gameweek, ordering, and
+ties specifically.
+
+**Review, before writing code:** Pick5Engine.generateStandings() ranks by
+`score` (accumulated `picks_won`) and writes both a per-gameweek row and an
+overall one. Neither half fits LMS: there's no score (LMS is binary, alive
+or eliminated), and there's no meaningful per-gameweek snapshot (an LMS
+entry's standing doesn't reset weekly the way a fresh 5-pick score does —
+it's one continuously-updated fact). Designed the actual ranking from the
+shape, not by analogy: every alive entrant ties for rank 1 (no signal
+distinguishes them, so none is invented); eliminated entrants rank below,
+ordered by elimination recency (`eliminated_gameweek_id` descending —
+outlasting another eliminated entrant is a real, meaningful fact); ties
+share a rank, standard competition ranking, continuing from wherever the
+alive tier left off. `score` is a plain 1/0 alive indicator; the actual
+elimination gameweek lives in `meta` — the first real use of that column
+anywhere in the codebase (Pick 5 has never populated it, despite `meta`
+anticipating exactly this example since Milestone 2).
+
+**Implemented:** `LmsEngine.generateStandings()`, writing only the overall
+snapshot row. Wired into `settle()` after the payment-void step, with the
+same per-pot failure isolation `Pick5Engine.settle()` already established
+— a small, explicit revision to Slice 5's own reasoning: standings are a
+harmless, idempotent report, not a competition-concluding action, so
+(unlike `determineWinner()`/`awardPrize()`) refreshing them every gameweek
+has real value. Slice 5 simply couldn't wire this in yet — the method only
+threw `GameEngineNotImplementedError` at the time. **No schema change** —
+`pot_standings_snapshots.meta` already existed. Reimplemented the
+partial-unique-index upsert workaround privately in `LmsEngine` (can't
+import `Pick5Engine`'s version, GE-18) — a small, acknowledged duplication
+of genuinely shared-platform-table mechanics, flagged as a future
+extraction candidate rather than silently accepted.
+
+**Verified:** 7 new unit tests (163/163 total pass) via a purpose-built
+fake simulating the `game_entries` → `game_entry_lms` embed. Live, through
+the real `settle-gameweek` function across two gameweeks, five entries in
+one test pot: two stayed alive throughout (rank 1 both times); one
+eliminated in the second gameweek (ranked *better* than an earlier-
+eliminated pair once eliminated, confirming recency ordering); two
+eliminated together in the first gameweek (tied with each other, correctly
+pushed down one rank once a third, more-recent elimination occurred). All
+test data removed by exact ID, re-verified as zero rows.
+
+**Documentation updated:** `game-engine.md` (GE-4.6, GE-5.2, GE-12, GE-17),
+`business-rules.md` (§ Last Man Standing, new Standings paragraph),
+`decisions.md` (new ADR, § LMS standings), `project-board.md`.
+
+**Status:** Slice 6 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Wipeout detection
+(`determineWinner()`) is the natural next slice, still unstarted.
+
+---
+
 ## 2026-08-06 (34) — Milestone 5 Slice 5: LMS settlement
 
 **Goal:** Slice 4 was reviewed, approved, committed, and pushed. Begin

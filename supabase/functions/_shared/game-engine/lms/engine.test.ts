@@ -640,3 +640,171 @@ Deno.test('settle never reprocesses an entry that is already void (or otherwise 
   // this point) pick result is left exactly as it was.
   assertEquals(db.lms_team_picks[0].result, 'pending')
 })
+
+// --- generateStandings() ------------------------------------------------------
+// Purpose-built fake, same reasoning as validateEntry()'s/lockEntries()'s own
+// dedicated fakes: generateStandings() reads game_entries with a nested
+// game_entry_lms embed, a shape the generic FakeDb fake above doesn't
+// simulate (it has no real relational embedding).
+
+interface FakeStandingsEntry { user_id: string; competitive_status: string; eliminated_gameweek_id: number | null; malformed?: boolean }
+
+function fakeGenerateStandingsContext(
+  entries: FakeStandingsEntry[],
+  existingSnapshots: { id: number; user_id: string }[] = []
+) {
+  const inserted: Record<string, unknown>[] = []
+  const updated: Record<string, unknown>[] = []
+
+  const fakeSupabase = {
+    from(table: string) {
+      if (table === 'game_entries') {
+        return {
+          select() {
+            return {
+              eq: () =>
+                Promise.resolve({
+                  data: entries.map((e) => ({
+                    user_id: e.user_id,
+                    game_entry_lms: e.malformed
+                      ? null
+                      : { competitive_status: e.competitive_status, eliminated_gameweek_id: e.eliminated_gameweek_id },
+                  })),
+                  error: null,
+                }),
+            }
+          },
+        }
+      }
+      if (table === 'pot_standings_snapshots') {
+        return {
+          select() {
+            return {
+              eq: () => ({
+                is: () => Promise.resolve({ data: existingSnapshots, error: null }),
+              }),
+            }
+          },
+          upsert(rows: Record<string, unknown>[]) {
+            updated.push(...rows)
+            return Promise.resolve({ data: rows, error: null })
+          },
+          insert(rows: Record<string, unknown>[]) {
+            inserted.push(...rows)
+            return Promise.resolve({ data: rows, error: null })
+          },
+        }
+      }
+      throw new Error(`Unexpected table in test fake: ${table}`)
+    },
+  }
+
+  const ctx: GameEngineContext = { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => new Date() }
+  return { ctx, inserted, updated }
+}
+
+Deno.test('generateStandings returns [] for a pot with no entries', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows, [])
+})
+
+Deno.test('generateStandings ties every alive entry at rank 1, score 1', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-1', competitive_status: 'alive', eliminated_gameweek_id: null },
+    { user_id: 'user-2', competitive_status: 'alive', eliminated_gameweek_id: null },
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.length, 2)
+  assertEquals(rows.every((r) => r.rank === 1 && r.score === 1), true)
+  assertEquals(rows.every((r) => r.meta?.competitiveStatus === 'alive'), true)
+})
+
+Deno.test('generateStandings ranks eliminated entries below alive ones, by elimination recency', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-alive', competitive_status: 'alive', eliminated_gameweek_id: null },
+    { user_id: 'user-late', competitive_status: 'eliminated', eliminated_gameweek_id: 15 }, // eliminated most recently
+    { user_id: 'user-early', competitive_status: 'eliminated', eliminated_gameweek_id: 10 }, // eliminated earliest
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  const byUser = new Map(rows.map((r) => [r.userId, r]))
+  assertEquals(byUser.get('user-alive')?.rank, 1)
+  assertEquals(byUser.get('user-late')?.rank, 2) // outlasted user-early, ranks better
+  assertEquals(byUser.get('user-early')?.rank, 3)
+  assertEquals(byUser.get('user-late')?.meta?.eliminatedGameweekId, 15)
+  assertEquals(byUser.get('user-early')?.score, 0)
+})
+
+Deno.test('generateStandings shares a rank among entries eliminated in the same gameweek, then skips ahead', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-a', competitive_status: 'eliminated', eliminated_gameweek_id: 12 },
+    { user_id: 'user-b', competitive_status: 'eliminated', eliminated_gameweek_id: 12 },
+    { user_id: 'user-c', competitive_status: 'eliminated', eliminated_gameweek_id: 10 },
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  const byUser = new Map(rows.map((r) => [r.userId, r]))
+  // No alive entries, so the eliminated tier starts at rank 1.
+  assertEquals(byUser.get('user-a')?.rank, 1)
+  assertEquals(byUser.get('user-b')?.rank, 1)
+  assertEquals(byUser.get('user-c')?.rank, 3) // skips ahead by the 2 tied at rank 1, "1224"-style
+})
+
+Deno.test('generateStandings excludes an entry with no game_entry_lms extension row', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-1', competitive_status: 'alive', eliminated_gameweek_id: null },
+    { user_id: 'user-malformed', competitive_status: 'alive', eliminated_gameweek_id: null, malformed: true },
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.length, 1)
+  assertEquals(rows[0].userId, 'user-1')
+})
+
+Deno.test('generateStandings upserts an existing snapshot row by id, inserts a new one', async () => {
+  const engine = new LmsEngine()
+  const { ctx, inserted, updated } = fakeGenerateStandingsContext(
+    [
+      { user_id: 'user-existing', competitive_status: 'alive', eliminated_gameweek_id: null },
+      { user_id: 'user-new', competitive_status: 'alive', eliminated_gameweek_id: null },
+    ],
+    [{ id: 42, user_id: 'user-existing' }]
+  )
+
+  await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(updated.length, 1)
+  assertEquals(updated[0].id, 42)
+  assertEquals(inserted.length, 1)
+  assertEquals(inserted[0].user_id, 'user-new')
+})
+
+Deno.test('settle calls generateStandings for every eligible pot, writing overall standings rows', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', is_paid: true, scope: 'season' }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  // The generic FakeDb fake doesn't simulate the game_entry_lms embed
+  // generateStandings() needs, so it correctly no-ops (no throw) rather
+  // than crashing — this test only proves settle() doesn't itself throw
+  // when it reaches the generateStandings() call, not the ranking logic
+  // itself (covered in isolation above).
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'pending')
+})

@@ -234,6 +234,21 @@ that's still a wipeout, and **Wipeout Resolution** (below) decides the
 outcome exactly as it would for a gameweek where everyone's picked team
 lost or drew.
 
+**Standings — decided 2026-08-06, designed specifically for Last Man
+Standing, not copied from Pick 5's points-based leaderboard.** LMS has no
+points, so "who's ahead" isn't a score comparison:
+- Every currently-alive entrant **ties for first place**. Nothing
+  distinguishes one survivor from another — there is no rule (and none was
+  invented) that would rank one alive entrant above another.
+- Eliminated entrants rank below every alive one, ordered by **how
+  recently they were eliminated** — outlasting another eliminated entrant
+  is a real accomplishment, so the more recent elimination ranks better.
+  Entrants eliminated in the same gameweek (including a wipeout) tie with
+  each other.
+- The standings update continuously, every gameweek — not just at the
+  end — and always show the single current picture of the competition, not
+  a separate view per gameweek the way Pick 5's weekly leaderboard does.
+
 **Wipeout and Wipeout Resolution.** Every LMS pot has a required,
 immutable-once-entries-exist setting, **Wipeout Resolution** — `Split Prize`
 or `Roll Prize` — chosen when the pot is created. It only matters for a
@@ -296,13 +311,14 @@ new competition's own, same as anyone joining a brand-new (non-rollover)
 pot.
 
 **Status: entry creation (`ISSUE-32`'s entry-window rule included), pick
-submission, locking, scoring, elimination, and payment-void settlement are
-all implemented and verified live, as of 2026-08-06** — see
+submission, locking, scoring, elimination, payment-void settlement, and
+standings are all implemented and verified live, as of 2026-08-06** — see
 [current-state.md § Resolved issues](./current-state.md#resolved-issues),
 [decisions.md § LMS: no cycles](./decisions.md#lms-no-cycles-current_cycle-removed-slice-2-implemented),
 [decisions.md § LMS locking](./decisions.md#lms-locking),
 [decisions.md § LMS scoring and elimination](./decisions.md#lms-scoring-and-elimination),
-and [decisions.md § LMS settlement](./decisions.md#lms-settlement).
+[decisions.md § LMS settlement](./decisions.md#lms-settlement), and
+[decisions.md § LMS standings](./decisions.md#lms-standings).
 Pick submission enforces the no-repeat-team rule above via a real database
 constraint, not just application logic. Wipeout resolution and season-end
 resolution themselves (splitting or rolling the prize once the competition

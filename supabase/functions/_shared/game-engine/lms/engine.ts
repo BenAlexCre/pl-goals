@@ -1,8 +1,9 @@
 // Milestone 5 (docs/game-engine.md § GE-5.2, GE-12): validateEntry (Slice 2),
-// lockEntries (Slice 3), and calculateScore (Slice 4) are implemented —
-// settle/generateStandings/determineWinner/awardPrize/notifyUsers all still
-// throw GameEngineNotImplementedError, same "half-built mode fails loudly"
-// pattern Pick5Engine used between its own Slice 2 and Slice 9.
+// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5), and
+// generateStandings (Slice 6) are implemented — determineWinner/awardPrize/
+// notifyUsers still throw GameEngineNotImplementedError, same "half-built
+// mode fails loudly" pattern Pick5Engine used between its own Slice 2 and
+// Slice 9.
 //
 // lockEntries() deliberately does NOT touch game_entries.status, unlike
 // Pick5Engine's version. game_entries is season-scoped for LMS (GE-4.5) —
@@ -33,15 +34,24 @@
 //     lockEntries() never touching it) — 'settled' only makes sense once
 //     the competition has actually concluded, which isn't every gameweek's
 //     settle() call the way a Pick 5 gameweek concludes weekly.
-//   - It never calls generateStandings()/determineWinner()/awardPrize().
-//     Pick 5 calls them every gameweek because a new payable instance
-//     concludes every gameweek (GE-8.4). LMS's competition only concludes
-//     once (a wipeout, or one survivor) — calling award-adjacent methods
-//     on every ordinary gameweek's settle() would be structurally wrong,
-//     not just premature. Detecting "has this competition just concluded"
-//     is real, unstarted design work (wipeout detection — see
-//     docs/decisions.md § LMS settlement), correctly left for a later
-//     slice rather than guessed at here.
+//   - It never calls determineWinner()/awardPrize(). Pick 5 calls them
+//     every gameweek because a new payable instance concludes every
+//     gameweek (GE-8.4). LMS's competition only concludes once (a
+//     wipeout, or one survivor) — calling award-adjacent methods on every
+//     ordinary gameweek's settle() would be structurally wrong, not just
+//     premature. Detecting "has this competition just concluded" is real,
+//     unstarted design work (wipeout detection), correctly left for a
+//     later slice rather than guessed at here.
+//
+// generateStandings() (Slice 6) IS called from settle(), though — Slice
+// 5's own reasoning grouped it with determineWinner()/awardPrize(), but on
+// reflection that was imprecise: standings are a harmless, idempotent
+// snapshot, not a competition-concluding action, so refreshing them every
+// gameweek has real value (same as Pick5Engine.settle() already does) —
+// see docs/decisions.md § LMS standings for the full reasoning, including
+// why the standings *shape* itself is not modeled on Pick 5's at all
+// (no points exist for LMS; ranking is alive-tied-at-1 then eliminated-by-
+// recency, not a score comparison).
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import { GameEngineNotImplementedError } from '../errors.ts'
@@ -353,14 +363,25 @@ export class LmsEngine implements GameEngine {
   }
 
   // GE-6: "Finalize this gameweek's outcome for the mode." For LMS that's
-  // the payment-void rule alone (docs/business-rules.md § Payment
-  // verification rules) — see the module comment above for what's
-  // deliberately NOT done here. LMS payment is scope='season' (one flat
-  // entry fee per competition, decided 2026-08-05 — GE-4.3), so this reads
-  // entry_payments once per pot, not once per gameweek the way Pick 5's
-  // scope='gameweek' check does; voiding an unpaid entry voids ALL of its
-  // picks across every gameweek, not just this one, since the entry's
-  // whole-competition participation is what's being voided.
+  // the payment-void rule (docs/business-rules.md § Payment verification
+  // rules) — see the module comment above for what's deliberately NOT done
+  // here (generateStandings()/determineWinner()/awardPrize() reasoning).
+  // LMS payment is scope='season' (one flat entry fee per competition,
+  // decided 2026-08-05 — GE-4.3), so this reads entry_payments once per
+  // pot, not once per gameweek the way Pick 5's scope='gameweek' check
+  // does; voiding an unpaid entry voids ALL of its picks across every
+  // gameweek, not just this one, since the entry's whole-competition
+  // participation is what's being voided.
+  //
+  // generateStandings() IS called here, unlike determineWinner()/
+  // awardPrize() — Milestone 5 Slice 6 revises Slice 5's reasoning for
+  // this one method specifically: standings are a harmless, idempotent
+  // snapshot of current alive/eliminated state, not a competition-
+  // concluding action, so (unlike a winner/payout) there's real value in
+  // refreshing them every gameweek, same as Pick5Engine.settle() already
+  // does. Wired in now because Slice 6 is what makes generateStandings()
+  // real — Slice 5 couldn't call a method that only threw
+  // GameEngineNotImplementedError.
   async settle(ctx: GameEngineContext, gameweekId: number): Promise<void> {
     const potIds = await this.getEligibleLmsPotIds(ctx, gameweekId)
     if (potIds.length === 0) {
@@ -376,55 +397,227 @@ export class LmsEngine implements GameEngine {
     if (entriesError) {
       throw new Error(`Failed to look up entries: ${entriesError.message}`)
     }
-    if (!entries?.length) {
-      return
+
+    if (entries?.length) {
+      const { data: payments, error: paymentsError } = await ctx.supabase
+        .from('entry_payments')
+        .select('pot_id, user_id, is_paid')
+        .eq('scope', 'season')
+        .in('pot_id', potIds)
+
+      if (paymentsError) {
+        throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+      }
+
+      const paidKeys = new Set(
+        ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
+          .filter((p) => p.is_paid)
+          .map((p) => `${p.pot_id}:${p.user_id}`)
+      )
+
+      const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
+        .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
+        .map((e) => e.id)
+
+      if (unpaidEntryIds.length > 0) {
+        const { error: voidEntriesError } = await ctx.supabase
+          .from('game_entries')
+          .update({ status: 'void' })
+          .in('id', unpaidEntryIds)
+
+        if (voidEntriesError) {
+          throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+        }
+
+        const { error: voidPicksError } = await ctx.supabase
+          .from('lms_team_picks')
+          .update({ result: 'void' })
+          .in('game_entry_id', unpaidEntryIds)
+
+        if (voidPicksError) {
+          throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+        }
+      }
     }
 
-    const { data: payments, error: paymentsError } = await ctx.supabase
-      .from('entry_payments')
-      .select('pot_id, user_id, is_paid')
-      .eq('scope', 'season')
-      .in('pot_id', potIds)
-
-    if (paymentsError) {
-      throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+    // Same per-pot failure isolation as Pick5Engine.settle() (production
+    // hardening sprint, 2026-08-05) — one pot's standings failure must
+    // never block another's, or the payment-void work above (already
+    // durably written) for unrelated pots.
+    const potErrors: { potId: string; message: string }[] = []
+    for (const potId of potIds) {
+      try {
+        await this.generateStandings(ctx, potId)
+      } catch (err) {
+        potErrors.push({ potId, message: err instanceof Error ? err.message : String(err) })
+      }
     }
 
-    const paidKeys = new Set(
-      ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
-        .filter((p) => p.is_paid)
-        .map((p) => `${p.pot_id}:${p.user_id}`)
-    )
-
-    const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
-      .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
-      .map((e) => e.id)
-
-    if (unpaidEntryIds.length === 0) {
-      return
-    }
-
-    const { error: voidEntriesError } = await ctx.supabase
-      .from('game_entries')
-      .update({ status: 'void' })
-      .in('id', unpaidEntryIds)
-
-    if (voidEntriesError) {
-      throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
-    }
-
-    const { error: voidPicksError } = await ctx.supabase
-      .from('lms_team_picks')
-      .update({ result: 'void' })
-      .in('game_entry_id', unpaidEntryIds)
-
-    if (voidPicksError) {
-      throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+    if (potErrors.length > 0) {
+      throw new Error(
+        `settle() finalized entries for gameweek ${gameweekId}, but standings processing failed for ${potErrors.length} pot(s): ` +
+          potErrors.map((e) => `${e.potId}: ${e.message}`).join('; ')
+      )
     }
   }
 
-  async generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {
-    throw new GameEngineNotImplementedError('last_man_standing', 'generateStandings')
+  // GE-6: "Write pot_standings_snapshots rows." Deliberately NOT modeled on
+  // Pick5Engine's version — LMS isn't a points game, so "who's ahead" isn't
+  // a score comparison, and there's no meaningful *per-gameweek* standings
+  // snapshot the way Pick 5 has one (a fresh score every week): LMS's
+  // standing is a single, continuously-updated state — alive or eliminated,
+  // and since when — so this writes only the overall row (gameweek_id =
+  // null), never a per-gameweek one.
+  //
+  // Ranking, decided 2026-08-06 by reasoning through the shape (no existing
+  // rule to copy — Pick 5's rankWithTies() sorts by score, which doesn't
+  // exist here):
+  //   - Every currently-alive entry ties for rank 1. Nothing distinguishes
+  //     one alive survivor from another — inventing a tie-break signal
+  //     among them (e.g. "closer results") isn't a rule anyone's stated,
+  //     so none is invented.
+  //   - Eliminated entries rank below the alive group, ordered by
+  //     eliminated_gameweek_id descending — outlasting other eliminated
+  //     players is genuinely meaningful, so "eliminated more recently"
+  //     ranks better. Standard competition ranking (ties share a rank, the
+  //     next distinct rank skips ahead by however many were tied), same
+  //     "1224" shape as Pick 5's rankWithTies(), continuing from wherever
+  //     the alive tier left off — not restarting at 1.
+  //   - score is a plain 1 (alive) / 0 (eliminated) indicator — the only
+  //     honest numeric value available for a mode with no points; the
+  //     actual elimination gameweek (the interesting fact) lives in `meta`
+  //     instead, exactly the kind of display-only detail GE-4.6/GE-20
+  //     already anticipated meta for ("elimination gameweek" is one of
+  //     that column's own original examples) — this is meta's first real
+  //     use anywhere in the codebase, Pick 5 has never populated it.
+  async generateStandings(ctx: GameEngineContext, potId: string): Promise<StandingsRow[]> {
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('user_id, game_entry_lms(competitive_status, eliminated_gameweek_id)')
+      .eq('pot_id', potId)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return []
+    }
+
+    // Same defensive array-or-object handling as Pick5Engine's own embedded-
+    // resource reads — supabase-js infers this shape generically without a
+    // generated Database type.
+    type LmsEmbed = { competitive_status: string; eliminated_gameweek_id: number | null }
+      | { competitive_status: string; eliminated_gameweek_id: number | null }[]
+      | null
+    type EntryRow = { user_id: string; game_entry_lms: LmsEmbed }
+
+    const alive: { userId: string }[] = []
+    const eliminated: { userId: string; eliminatedGameweekId: number }[] = []
+
+    for (const entry of entries as EntryRow[]) {
+      const lms = Array.isArray(entry.game_entry_lms) ? entry.game_entry_lms[0] : entry.game_entry_lms
+      if (!lms) continue // malformed — no extension row; excluded rather than guessed at
+      if (lms.competitive_status === 'alive') {
+        alive.push({ userId: entry.user_id })
+      } else if (lms.eliminated_gameweek_id !== null) {
+        eliminated.push({ userId: entry.user_id, eliminatedGameweekId: lms.eliminated_gameweek_id })
+      }
+    }
+
+    const standingsRows: StandingsRow[] = []
+
+    for (const a of alive) {
+      standingsRows.push({
+        potId,
+        gameweekId: null,
+        userId: a.userId,
+        rank: 1,
+        score: 1,
+        meta: { competitiveStatus: 'alive', eliminatedGameweekId: null },
+      })
+    }
+
+    const sortedEliminated = [...eliminated].sort((x, y) => y.eliminatedGameweekId - x.eliminatedGameweekId)
+    const startRank = alive.length + 1
+    for (let i = 0; i < sortedEliminated.length; i++) {
+      const rank =
+        i === 0 || sortedEliminated[i].eliminatedGameweekId < sortedEliminated[i - 1].eliminatedGameweekId
+          ? startRank + i
+          : standingsRows[standingsRows.length - 1].rank
+      standingsRows.push({
+        potId,
+        gameweekId: null,
+        userId: sortedEliminated[i].userId,
+        rank,
+        score: 0,
+        meta: { competitiveStatus: 'eliminated', eliminatedGameweekId: sortedEliminated[i].eliminatedGameweekId },
+      })
+    }
+
+    await this.upsertOverallStandings(ctx, potId, standingsRows)
+
+    return standingsRows
+  }
+
+  // pot_standings_snapshots has two partial unique indexes (GE-4.6) that
+  // PostgREST's upsert(onConflict: '...') can't target directly — confirmed
+  // live during Pick 5's own Slice 6 ("no unique or exclusion constraint
+  // matching the ON CONFLICT specification"). Same workaround here: look up
+  // existing rows by their natural key first, then upsert only by `id` (the
+  // real, non-partial primary key). This mirrors Pick5Engine's private
+  // upsertStandingsGroup() closely — genuinely shared-platform-table
+  // mechanics, not LMS-specific — but stays a separate copy rather than a
+  // cross-mode import, per GE-18 ("pick5/ must never import from lms/, and
+  // vice versa"); a future extraction into a shared _shared/game-engine/
+  // helper would be a legitimate, low-risk cleanup, not attempted here.
+  private async upsertOverallStandings(
+    ctx: GameEngineContext,
+    potId: string,
+    rows: StandingsRow[]
+  ): Promise<void> {
+    if (rows.length === 0) {
+      return
+    }
+
+    const { data: existing, error: existingError } = await ctx.supabase
+      .from('pot_standings_snapshots')
+      .select('id, user_id')
+      .eq('pot_id', potId)
+      .is('gameweek_id', null)
+
+    if (existingError) {
+      throw new Error(`Failed to look up existing standings: ${existingError.message}`)
+    }
+
+    const existingIdByUser = new Map<string, number>(
+      ((existing ?? []) as { id: number; user_id: string }[]).map((r) => [r.user_id, r.id])
+    )
+
+    const toUpdate: Record<string, unknown>[] = []
+    const toInsert: Record<string, unknown>[] = []
+
+    for (const row of rows) {
+      const base = { pot_id: potId, gameweek_id: null, user_id: row.userId, rank: row.rank, score: row.score, meta: row.meta }
+      const existingId = existingIdByUser.get(row.userId)
+      if (existingId !== undefined) {
+        toUpdate.push({ ...base, id: existingId })
+      } else {
+        toInsert.push(base)
+      }
+    }
+
+    if (toUpdate.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').upsert(toUpdate, { onConflict: 'id' })
+      if (error) {
+        throw new Error(`Failed to update standings: ${error.message}`)
+      }
+    }
+    if (toInsert.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').insert(toInsert)
+      if (error) {
+        throw new Error(`Failed to insert standings: ${error.message}`)
+      }
+    }
   }
 
   async determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {

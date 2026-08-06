@@ -1247,3 +1247,101 @@ settle() correctly treats a missing row as unpaid, same as the unit tests.
 Also confirmed `settle-gameweek`'s own shared logic (marking the gameweek
 `'completed'`) still runs correctly for an LMS-only gameweek. All test data
 removed by exact ID, re-verified as zero rows.
+
+## LMS standings
+
+**Decided 2026-08-06**, ahead of Milestone 5 Slice 6. The repo owner's
+instruction was explicit and specific: review Pick 5's standings, but do
+not assume that model is correct for LMS — design standings for LMS from
+first principles, addressing alive players, eliminated players, elimination
+gameweek, ordering, and ties specifically.
+
+**Why Pick 5's model doesn't transfer.** Pick5Engine.generateStandings()
+ranks by `score` (accumulated `picks_won`, a real points total) and writes
+*two* kinds of row per user: a fresh per-gameweek snapshot (that week's
+score alone) and a cumulative overall one. Neither half of that shape fits
+LMS:
+- **There is no score.** LMS is binary — alive or eliminated — not a
+  points accumulation. Ranking by "score descending" has nothing to sort.
+- **There is no meaningful per-gameweek snapshot.** Pick 5's weekly row
+  exists because a Pick 5 entry's performance genuinely resets each
+  gameweek (a fresh 5 picks, a fresh score). An LMS entry's standing
+  doesn't reset — it's one continuously-updated fact (alive, or eliminated
+  since gameweek N) that a UI would want to see the *current* state of, not
+  a series of independent weekly snapshots.
+
+**The design, reasoned from the shape rather than assumed:**
+- **Alive players**: all tie for rank 1. No signal exists to distinguish
+  one currently-alive entrant from another (no "closer calls" metric, no
+  partial credit) — inventing one would be exactly the "invent an
+  undocumented business rule" this project's standing discipline forbids.
+- **Eliminated players**: rank below every alive entrant, ordered by
+  **elimination recency** — `eliminated_gameweek_id` descending. Outlasting
+  another eliminated entrant is a genuine, meaningful accomplishment, so it
+  gets rewarded in the ranking, unlike the alive tier where nothing
+  distinguishes members.
+- **Elimination gameweek**: stored in `meta`
+  (`{ competitiveStatus, eliminatedGameweekId }`), not folded into `score`
+  or `rank` themselves — `meta`'s whole purpose (GE-4.6/GE-20) is exactly
+  this kind of display-only detail, and it was already anticipated as an
+  example ("elimination gameweek") since Milestone 2, never actually used
+  until this slice.
+- **Ordering**: standard competition ranking (ties share a rank; the next
+  distinct rank skips ahead by however many were tied), same "1224" shape
+  `Pick5Engine`'s own `rankWithTies()` already established — but continuing
+  from wherever the alive tier's count left off, not restarting at 1 for
+  the eliminated tier.
+- **Ties**: handled identically in both tiers — every alive entrant ties at
+  1; every entrant eliminated in the *same* gameweek ties with each other
+  (this includes a wipeout — every entrant a wipeout eliminates shares a
+  rank, exactly as the ordinary same-gameweek-elimination case already
+  does, with no special-casing needed).
+- **`score`**: a plain `1` (alive) / `0` (eliminated) — the only numeric
+  value that's actually true for a mode with no points. Not the
+  elimination gameweek itself (that would conflate a display fact with a
+  summary number, and risk someone reading `score: 12` as "12 points").
+- **Only the overall row is written** (`gameweek_id = null`) — no
+  per-gameweek row at all, per the "no meaningful weekly reset" reasoning
+  above.
+
+**Wiring — a small, explicit revision to Slice 5's own reasoning.** Slice
+5 grouped `generateStandings()` with `determineWinner()`/`awardPrize()` as
+"never called from `settle()`, since those conclude a competition, not a
+gameweek." On reflection, that was imprecise for `generateStandings()`
+specifically — a standings snapshot is a harmless, idempotent report, not
+a competition-concluding action (Pick5Engine.settle() already treats it
+this way, regenerating every gameweek even for a pot with no changes this
+week). Slice 5 genuinely couldn't wire it in at the time
+(`generateStandings()` only threw `GameEngineNotImplementedError`); Slice 6
+does, once per eligible pot after the payment-void step, with the same
+per-pot failure isolation `Pick5Engine.settle()` already established (the
+production hardening sprint precedent) — one pot's standings failure must
+never block another's, or the payment-void work already durably written
+for unrelated pots.
+
+**No schema change.** `pot_standings_snapshots.meta` already existed,
+unused by any mode until this slice — the Milestone 2 design was already
+general enough.
+
+**A small, acknowledged duplication, not new LMS-specific logic.** The
+partial-unique-index upsert workaround (`pot_standings_snapshots` has two
+partial unique indexes PostgREST's `upsert(onConflict:...)` can't target —
+GE-4.6) is reimplemented privately in `LmsEngine`, not imported from
+`Pick5Engine` — GE-18 forbids cross-mode imports (`pick5/` must never
+import from `lms/`, or vice versa). This mechanic is genuinely
+shared-platform-table behavior, unrelated to either mode's own scoring
+logic; a future extraction into a shared `_shared/game-engine/` helper
+(used by Pick 5, LMS, and eventually Predictor) would be a legitimate,
+low-risk cleanup — not attempted here, since it would mean touching
+already-shipped, committed `Pick5Engine` code for a refactor outside this
+slice's actual scope.
+
+**Verified live**, through the real `settle-gameweek` function across two
+gameweeks in one dedicated test pot, with five entries: two who stayed
+alive throughout (rank 1 both times); one eliminated in the second test
+gameweek (ranked *better* than the pair below once eliminated, since it
+outlasted them); two eliminated together in the first test gameweek (tied
+with each other both times, correctly pushed one rank further down once a
+third entrant was eliminated more recently). Confirmed `meta.eliminatedGameweekId`
+carries the right value and `score` is `1`/`0` as designed. All test data
+removed by exact ID, re-verified as zero rows.
