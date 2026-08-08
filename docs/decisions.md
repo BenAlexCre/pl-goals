@@ -2126,3 +2126,121 @@ call leaves the already-locked pick's `locked_at` value unchanged
 (idempotent, not re-locked) — 7 checks, all passing. All test data (1 pot,
 1 user) removed by exact ID, re-verified as zero rows across every table
 touched, independently of the script's own cleanup report.
+
+## Score Predictor scoring
+
+**Decided 2026-08-08**, Milestone 6 Slice 4, per the repo owner's explicit
+"review `Pick5Engine.calculateScore()` and `LmsEngine.calculateScore()`
+first, don't copy either, justify every similarity and difference" —
+five product questions were posed up front, plus a sixth surfaced during
+review and resolved directly by the repo owner.
+
+**Decision:** `PredictorEngine.calculateScore()` resolves each
+`predictor_fixture_picks` row against its own `fixture_id`'s status and
+score once that fixture is `finished`, awarding points from the owning
+pot's own configured values, and writes a full-recompute aggregate onto
+`game_entry_predictor`. Postponed/cancelled fixtures are left unresolved.
+
+**Context — the five questions asked before coding, and their answers:**
+
+1. **How should a draw prediction be represented?** No new representation
+   needed — a draw is simply `predicted_home_score = predicted_away_score`,
+   the same shape Slice 2 already established for the actual scoreline
+   (`decisions.md § Score Predictor pick submission`). "Correct result"
+   for a draw prediction is scored the same way as any other correct
+   result: the predicted and actual outcomes (home win / away win / draw)
+   match, independent of whether either is an exact scoreline.
+2. **What prediction states exist before a fixture finishes?** Exactly
+   one: unresolved, signalled by `points_awarded IS NULL` (Slice 2's
+   original design, unchanged). Unlike Pick 5/LMS, there is no interim
+   "live"/"winning"/"losing" label — Predictor's `points_awarded` is a
+   point value, not a `pick_result` enum, and a partial scoreline has no
+   honest partial-point interpretation while the match is still in
+   progress. This is a considered omission, not a gap.
+3. **Does a missing optional goalscorer prediction affect scoring?** No.
+   `goalscorer_player_id IS NULL` can never match a real player, so the
+   bonus is silently never awarded — no penalty, no special-case branch
+   needed. Confirmed by unit test rather than left implicit.
+4. **How should postponed/cancelled fixtures behave?** Identically to
+   scheduled/live/tbd — left unresolved, same as any not-yet-finished
+   fixture. Justified by, not copied from, `LmsEngine.calculateScore()`'s
+   own "nothing has happened yet, leave as-is" stance for a not-yet-decided
+   fixture — both engines reach the same conclusion independently, from
+   the same shared platform fact (`fixture_status`), not by one engine
+   importing the other's logic (GE-18 forbids that regardless).
+5. **Can `calculateScore()` safely rerun indefinitely?** Yes, by
+   construction. Per-pick resolution recomputes from source data
+   (`fixtures`, `player_fixture_goals`) every call — a finished fixture's
+   score never changes, so re-resolving an already-resolved pick produces
+   the same values. `game_entry_predictor`'s cumulative stats are written
+   as a full `SUM`/`COUNT` recompute across every one of an entry's
+   resolved picks (all gameweeks), never an increment — the same
+   discipline `LmsEngine.generateStandings()` established for a
+   season-scoped aggregate, reused here for the same structural reason
+   (GE-4.5: the entry itself never resets weekly, unlike Pick 5's). Proven
+   by a unit test calling `calculateScore()` three times and asserting an
+   unchanged result, and live by two consecutive calls to the real
+   `compute-scores` Edge Function.
+
+**The sixth question, raised mid-review, not on the original list: what
+exact point value should the scorer bonus be?** GE-5.3 stated 5/3/2 as
+fixed constants but never justified the bonus's own value, flagged as an
+open gap since Milestone 6 Slice 1. Offered the repo owner a fixed-value
+choice (1, 2, or 3 points) via `AskUserQuestion` — **rejected**, with an
+explicit instruction to ask open-endedly what they wanted clarified rather
+than re-offer a different fixed set. Their actual answer was structurally
+different from any option offered: **"let people set their own point for
+each option. default 5-3-2."** All three point values — not just the
+bonus — are now per-pot configuration
+(`predictor_exact_score_points`/`predictor_correct_result_points`/
+`predictor_scorer_bonus_points`, `019_predictor_scoring_config.sql`),
+defaulting to GE-5.3's original 5/3/2, immutable once the pot has entries
+(same rule as `predictor_cycle_mode`/`predictor_scorer_scope`). Lesson for
+future review cycles: a rejected multiple-choice framing is a signal to
+ask what the user wants clarified, not to re-offer a different fixed set —
+the user may have a structurally different answer in mind, as happened
+here (configurability, not a specific value).
+
+**Reason:** Configurable scoring is a real, not hypothetical, organiser
+need — a fixed platform constant for money-adjacent scoring math would
+have been a genuine design mistake to ship, caught only because the repo
+owner rejected the narrower framing before implementation started.
+
+**Alternatives considered:**
+- **Fixed 5/3/2 platform constants** (GE-5.3's original text) — rejected
+  directly by the repo owner.
+- **Configurable bonus only, fixed exact-score/correct-result** — narrower
+  than what was asked; the repo owner's phrasing ("each option") covers
+  all three, not just the one originally in question.
+- **A single ordering constraint between the three values** (e.g.
+  exact ≥ result ≥ bonus) — considered and rejected; no existing pot-config
+  column in this schema constrains one setting's value relative to
+  another's, and inventing one here would be a new, unasked-for rule.
+
+**Consequences:**
+- `points_awarded` alone is no longer sufficient to determine which
+  scoring category a pick fell into, once point values are configurable
+  (a correct-result-plus-bonus total could equal an exact-score total
+  under some pot's own configuration) — resolved by two new boolean
+  columns, `predictor_fixture_picks.is_exact_score`/`scorer_bonus_awarded`,
+  the unambiguous source of truth `game_entry_predictor`'s counts aggregate
+  from, independent of the point values themselves.
+- `PredictorEngine.calculateScore()` is the first `calculateScore()` among
+  the three modes that reads `pots` directly — a genuinely new dependency,
+  since scoring math is now per-pot configurable; Pick 5 and LMS's own
+  `calculateScore()` implementations have no equivalent need and are
+  unaffected.
+- Any future organiser-facing pot-creation UI must expose these three
+  settings (with the 5/3/2 defaults pre-filled) — not built this slice,
+  tracked as follow-up UI work.
+
+**Verified:** 15 new unit tests (248/248 across `supabase/functions/`, no
+regressions). Live, through the real `compute-scores` Edge Function (not a
+bypass script): a real, already-finished fixture (gameweek 2, a genuine
+4-1 result) with a real goal event seeded into `fixture_events` and
+`player_fixture_goals` refreshed, three real entries predicting it (exact
+score + correct goalscorer, correct result only, wrong result entirely)
+— 10 checks, all passing, including the goalscorer bonus and idempotency
+across two real calls. All test data (1 pot, 3 users, 1 seeded
+`fixture_events` row) removed by exact ID, re-verified as zero rows across
+every table touched, independently of the script's own cleanup report.

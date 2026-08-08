@@ -13,6 +13,78 @@ from here.
 
 ---
 
+## 2026-08-08 (44) — Milestone 6 Slice 4: Score Predictor scoring
+
+**Goal:** Slice 4 only — `PredictorEngine.calculateScore()`. Resolve
+exact scoreline, correct result, and optional goalscorer scoring; persist
+prediction result; update cumulative entry score. No settlement,
+standings, winner determination, prize awarding, or notifications. Review
+Pick 5's and LMS's `calculateScore()` first; do not copy either; justify
+every similarity and difference. Five product questions to resolve before
+coding.
+
+**Reviewed first, per instruction:** everything shipped so far for Score
+Predictor (Slices 1-3); GE-5.3, `business-rules.md`, `decisions.md`,
+`current-state.md` fresh; `Pick5Engine.calculateScore()` and
+`LmsEngine.calculateScore()`'s current code, not memory.
+
+**Five questions, answered before writing code:** a draw is scored as any
+other correct-result case, no new representation needed (reuses Slice 2's
+equal-scoreline shape); the only pre-finish state is unresolved
+(`points_awarded IS NULL`), no interim live/partial label, unlike Pick
+5/LMS — a partial scoreline has no honest partial-point meaning; a missing
+goalscorer prediction simply can never match, no penalty, no special-case
+branch; postponed/cancelled fixtures are left unresolved, same as any
+not-yet-finished fixture — justified by, not copied from,
+`LmsEngine.calculateScore()`'s identical stance for its own case; safe to
+call repeatedly by construction — per-pick resolution recomputes from
+source data every time, and `game_entry_predictor`'s cumulative stats are
+a full SUM/COUNT recompute, never an increment, same discipline
+`LmsEngine.generateStandings()` established for a season-scoped aggregate.
+
+**A sixth question, not on the list, surfaced mid-review: the scorer
+bonus's exact point value, open since Slice 1.** Offered a fixed-value
+choice (1/2/3 points) via `AskUserQuestion` — rejected. Asked open-endedly
+instead, per the resulting system instruction, what the repo owner wanted
+clarified. Their answer was structurally different from any option
+offered: **"let people set their own point for each option. default
+5-3-2."** All three point values (not just the bonus) are now organiser-set
+`pots` columns, defaulting to GE-5.3's original 5/3/2, immutable once the
+pot has entries — same shape as `predictor_cycle_mode`/`predictor_scorer_scope`.
+Lesson: a rejected multiple-choice framing means ask what the user wants
+clarified, not re-offer a different fixed set — the real answer can be
+structurally different, as it was here.
+
+**`019_predictor_scoring_config.sql` applied** — three new `pots` columns
+(`predictor_exact_score_points`/`predictor_correct_result_points`/
+`predictor_scorer_bonus_points`); two new `predictor_fixture_picks`
+columns (`is_exact_score`/`scorer_bonus_awarded`), the unambiguous source
+of truth `game_entry_predictor`'s counts aggregate from once the point
+*values* can no longer be trusted alone (a correct-result-plus-bonus total
+could collide with an exact-score total under some pot's own
+configuration). `PredictorEngine.calculateScore()` is the first
+`calculateScore()` among the three modes that reads `pots` directly.
+`compute-scores` needed only a missing `predictor/index.ts` registration
+import — its dispatch loop was already fully generic, no discovery bug
+this time.
+
+**Verified:** 15 new unit tests (248/248 across `supabase/functions/`, no
+regressions). Live, through the real `compute-scores` Edge Function (not a
+bypass script): a real, already-finished fixture (gameweek 2, a genuine
+4-1 result) with a real goal event seeded into `fixture_events` and
+`player_fixture_goals` refreshed, three real entries (exact score +
+correct goalscorer, correct result only, wrong result) — 10 checks, all
+passing, including the goalscorer bonus and idempotency across two real
+calls. All test data (1 pot, 3 users, 1 seeded `fixture_events` row)
+removed by exact ID; an independent residue check across every touched
+table (pots, game_entries, predictor_fixture_picks, auth.users,
+fixture_events, the materialized view) confirmed zero rows remain,
+separate from the verification script's own cleanup report. Full ADR:
+[decisions.md § Score Predictor scoring](./decisions.md#score-predictor-scoring).
+Not committed — awaiting review, per explicit instruction.
+
+---
+
 ## 2026-08-08 (43) — Milestone 6 Slice 3: Score Predictor locking
 
 **Goal:** Slice 3 only — `PredictorEngine.lockEntries()`, any required

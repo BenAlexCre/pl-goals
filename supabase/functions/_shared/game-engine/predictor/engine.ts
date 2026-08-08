@@ -1,8 +1,8 @@
-// Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2)
-// and lockEntries (Slice 3) are implemented — every other GameEngine method
-// still throws GameEngineNotImplementedError, same "half-built mode fails
-// loudly" pattern Pick5Engine/LmsEngine used between their own early slices
-// and later ones.
+// Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2),
+// lockEntries (Slice 3), and calculateScore (Slice 4) are implemented —
+// every other GameEngine method still throws GameEngineNotImplementedError,
+// same "half-built mode fails loudly" pattern Pick5Engine/LmsEngine used
+// between their own early slices and later ones.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -191,8 +191,290 @@ export class PredictorEngine implements GameEngine {
     return locked?.length ?? 0
   }
 
-  async calculateScore(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {
-    throw new GameEngineNotImplementedError('score_predictor', 'calculateScore')
+  // GE-6: "Resolve picks against real fixture data." Not copied from
+  // either Pick5Engine or LmsEngine — justified fresh, per method, below.
+  //
+  // No pot filter needed here, same reasoning as lockEntries() (Slice 3):
+  // predictor_fixture_picks is written only by submit-predictor-picks,
+  // already gated to score_predictor pots, so every row is unambiguously
+  // this mode's.
+  //
+  // Per-fixture status check (not Pick5's gameweek-wide `isLive` flag):
+  // justified by data shape, not preference. Pick5's own flag is only
+  // correct because its player_fixture_goals data isn't fixture-specific;
+  // every Predictor pick already names its own fixture_id, so checking
+  // that fixture's own status directly (same as LmsEngine's
+  // fixtureByTeam-keyed check) is both more precise and no more complex.
+  // scheduled/live/postponed/cancelled/tbd: nothing resolved yet, leave
+  // points_awarded null — deliberately no interim "currently winning"
+  // label the way Pick 5/LMS give live picks one (Slice 2 already decided
+  // points_awarded has no in-between state: null = unresolved, a value =
+  // resolved, no `pick_result`-style enum). Postponed/cancelled are
+  // treated identically to scheduled/live/tbd — same as
+  // LmsEngine.calculateScore()'s own explicit stance ("nothing has
+  // happened yet, leave as-is"), reused here because fixture_status is
+  // shared platform data, not a rule either mode invented for itself.
+  //
+  // Money-adjacent scoring math is now per-pot configurable (repo owner
+  // decision, 2026-08-08 — 019_predictor_scoring_config.sql), unlike
+  // either Pick 5 (goal_threshold lives on the pick itself) or LMS (no
+  // per-pick scoring math at all, just win/lose). This is why this
+  // method, uniquely among the three modes' calculateScore()s, needs to
+  // read `pots` at all.
+  //
+  // Idempotency (the whole reason cumulative stats are a full recompute,
+  // never an increment): a season-scoped `game_entry_predictor` row can be
+  // touched by many different gameweeks' calculateScore() calls over the
+  // season, each of which might retry independently — incrementing
+  // `total_points` would double-count on any retry. Recomputing it (and
+  // exact_score_count/correct_scorer_count) as a fresh SUM/COUNT across
+  // every one of the entry's resolved picks, every time, is the only way
+  // to make this safe to call any number of times, in any order, matching
+  // generateStandings()'s own "always recompute" philosophy in every other
+  // mode rather than calculateScore()'s own per-gameweek delta pattern
+  // (safe for Pick 5 only because its entry — and picks_won — are
+  // themselves gameweek-scoped, not season-scoped).
+  async calculateScore(ctx: GameEngineContext, gameweekId: number): Promise<void> {
+    // Cheap early exit — no consequential work happens before at least one
+    // fixture in this gameweek has actually started.
+    const { data: activeFixtures, error: activeFixturesError } = await ctx.supabase
+      .from('fixtures')
+      .select('id')
+      .eq('gameweek_id', gameweekId)
+      .in('status', ['live', 'finished'])
+      .limit(1)
+
+    if (activeFixturesError) {
+      throw new Error(`Failed to check fixture status: ${activeFixturesError.message}`)
+    }
+    if ((activeFixtures?.length ?? 0) === 0) {
+      return
+    }
+
+    const { data: picks, error: picksError } = await ctx.supabase
+      .from('predictor_fixture_picks')
+      .select(
+        'id, game_entry_id, fixture_id, predicted_home_score, predicted_away_score, goalscorer_player_id, points_awarded, is_exact_score, scorer_bonus_awarded'
+      )
+      .eq('gameweek_id', gameweekId)
+
+    if (picksError) {
+      throw new Error(`Failed to look up picks: ${picksError.message}`)
+    }
+    if (!picks?.length) {
+      return
+    }
+
+    type PickRow = {
+      id: number
+      game_entry_id: string
+      fixture_id: number
+      predicted_home_score: number
+      predicted_away_score: number
+      goalscorer_player_id: number | null
+      points_awarded: number | null
+      is_exact_score: boolean
+      scorer_bonus_awarded: boolean
+    }
+    const pickRows = picks as PickRow[]
+
+    const fixtureIds = [...new Set(pickRows.map((p) => p.fixture_id))]
+    const { data: fixtures, error: fixturesError } = await ctx.supabase
+      .from('fixtures')
+      .select('id, status, home_goals, away_goals')
+      .in('id', fixtureIds)
+
+    if (fixturesError) {
+      throw new Error(`Failed to look up fixtures: ${fixturesError.message}`)
+    }
+
+    type FixtureRow = { id: number; status: string; home_goals: number; away_goals: number }
+    const fixtureById = new Map<number, FixtureRow>((fixtures as FixtureRow[] | null ?? []).map((f) => [f.id, f]))
+
+    const entryIds = [...new Set(pickRows.map((p) => p.game_entry_id))]
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id, pot_id')
+      .in('id', entryIds)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+
+    type EntryRow = { id: string; pot_id: string }
+    const potIdByEntryId = new Map<string, string>((entries as EntryRow[] | null ?? []).map((e) => [e.id, e.pot_id]))
+
+    const potIds = [...new Set(potIdByEntryId.values())]
+    const { data: pots, error: potsError } = await ctx.supabase
+      .from('pots')
+      .select('id, predictor_exact_score_points, predictor_correct_result_points, predictor_scorer_bonus_points, predictor_scorer_scope')
+      .in('id', potIds)
+
+    if (potsError) {
+      throw new Error(`Failed to look up pot scoring configuration: ${potsError.message}`)
+    }
+
+    type PotConfig = {
+      id: string
+      predictor_exact_score_points: number
+      predictor_correct_result_points: number
+      predictor_scorer_bonus_points: number
+      predictor_scorer_scope: 'fixture_only' | 'gameweek_wide'
+    }
+    const potConfigById = new Map<string, PotConfig>((pots as PotConfig[] | null ?? []).map((p) => [p.id, p]))
+
+    // Goal data for the whole gameweek (not just each pick's own predicted
+    // fixture) — predictor_scorer_scope = 'gameweek_wide' needs to check
+    // anywhere in the gameweek, not only the predicted fixture, per that
+    // column's own existing, already-decided definition (GE-5.3/004).
+    const goalscorerPlayerIds = [...new Set(pickRows.map((p) => p.goalscorer_player_id).filter((id): id is number => id !== null))]
+
+    let goalRows: { player_id: number; fixture_id: number; goals: number }[] = []
+    if (goalscorerPlayerIds.length > 0) {
+      const { data: goalData, error: goalsError } = await ctx.supabase
+        .from('player_fixture_goals')
+        .select('player_id, fixture_id, goals')
+        .eq('gameweek_id', gameweekId)
+        .in('player_id', goalscorerPlayerIds)
+
+      if (goalsError) {
+        throw new Error(`Failed to look up player goals: ${goalsError.message}`)
+      }
+      goalRows = (goalData ?? []) as { player_id: number; fixture_id: number; goals: number }[]
+    }
+
+    const scoredFixturesByPlayer = new Map<number, Set<number>>()
+    const gameweekGoalsByPlayer = new Map<number, number>()
+    for (const row of goalRows) {
+      if (row.goals > 0) {
+        if (!scoredFixturesByPlayer.has(row.player_id)) scoredFixturesByPlayer.set(row.player_id, new Set())
+        scoredFixturesByPlayer.get(row.player_id)!.add(row.fixture_id)
+      }
+      gameweekGoalsByPlayer.set(row.player_id, (gameweekGoalsByPlayer.get(row.player_id) ?? 0) + row.goals)
+    }
+
+    const pickUpdates: {
+      id: number
+      game_entry_id: string
+      gameweek_id: number
+      fixture_id: number
+      predicted_home_score: number
+      predicted_away_score: number
+      goalscorer_player_id: number | null
+      points_awarded: number
+      is_exact_score: boolean
+      scorer_bonus_awarded: boolean
+    }[] = []
+    const affectedEntryIds = new Set<string>()
+
+    for (const pick of pickRows) {
+      const fixture = fixtureById.get(pick.fixture_id)
+      if (!fixture || fixture.status !== 'finished') continue
+
+      const potId = potIdByEntryId.get(pick.game_entry_id)
+      const potConfig = potId ? potConfigById.get(potId) : undefined
+      if (!potConfig) continue // defensive — shouldn't happen given the FK chain from pick to entry to pot
+
+      const isExactScore = pick.predicted_home_score === fixture.home_goals && pick.predicted_away_score === fixture.away_goals
+      const predictedSign = Math.sign(pick.predicted_home_score - pick.predicted_away_score)
+      const actualSign = Math.sign(fixture.home_goals - fixture.away_goals)
+      const isCorrectResult = predictedSign === actualSign
+
+      let scorerBonusAwarded = false
+      if (pick.goalscorer_player_id !== null) {
+        scorerBonusAwarded =
+          potConfig.predictor_scorer_scope === 'fixture_only'
+            ? (scoredFixturesByPlayer.get(pick.goalscorer_player_id)?.has(pick.fixture_id) ?? false)
+            : (gameweekGoalsByPlayer.get(pick.goalscorer_player_id) ?? 0) > 0
+      }
+
+      const basePoints = isExactScore
+        ? potConfig.predictor_exact_score_points
+        : isCorrectResult
+          ? potConfig.predictor_correct_result_points
+          : 0
+      const pointsAwarded = basePoints + (scorerBonusAwarded ? potConfig.predictor_scorer_bonus_points : 0)
+
+      affectedEntryIds.add(pick.game_entry_id)
+
+      if (pick.points_awarded === pointsAwarded && pick.is_exact_score === isExactScore && pick.scorer_bonus_awarded === scorerBonusAwarded) {
+        continue // already correctly resolved — avoid a no-op write
+      }
+
+      pickUpdates.push({
+        id: pick.id,
+        game_entry_id: pick.game_entry_id,
+        gameweek_id: gameweekId,
+        fixture_id: pick.fixture_id,
+        predicted_home_score: pick.predicted_home_score,
+        predicted_away_score: pick.predicted_away_score,
+        goalscorer_player_id: pick.goalscorer_player_id,
+        points_awarded: pointsAwarded,
+        is_exact_score: isExactScore,
+        scorer_bonus_awarded: scorerBonusAwarded,
+      })
+    }
+
+    if (pickUpdates.length > 0) {
+      const { error: pickUpdateError } = await ctx.supabase
+        .from('predictor_fixture_picks')
+        .upsert(pickUpdates, { onConflict: 'id' })
+
+      if (pickUpdateError) {
+        throw new Error(`Failed to write pick results: ${pickUpdateError.message}`)
+      }
+    }
+
+    if (affectedEntryIds.size === 0) {
+      return
+    }
+
+    // Full recompute, batched — see this method's own comment above for
+    // why an increment would not be safe here. game_entry_predictor.game_entry_id
+    // is a real primary key (not a partial-unique-index shape like
+    // pot_prizes/pot_standings_snapshots), so a plain upsert by it is
+    // correct with no get-or-create-by-id workaround needed.
+    const affectedEntryIdList = [...affectedEntryIds]
+    const { data: allResolvedPicks, error: allPicksError } = await ctx.supabase
+      .from('predictor_fixture_picks')
+      .select('game_entry_id, points_awarded, is_exact_score, scorer_bonus_awarded')
+      .in('game_entry_id', affectedEntryIdList)
+      .not('points_awarded', 'is', null)
+
+    if (allPicksError) {
+      throw new Error(`Failed to look up resolved picks for cumulative stats: ${allPicksError.message}`)
+    }
+
+    type ResolvedPick = { game_entry_id: string; points_awarded: number; is_exact_score: boolean; scorer_bonus_awarded: boolean }
+    const statsByEntry = new Map<string, { totalPoints: number; exactScoreCount: number; correctScorerCount: number }>()
+    for (const entryId of affectedEntryIdList) {
+      statsByEntry.set(entryId, { totalPoints: 0, exactScoreCount: 0, correctScorerCount: 0 })
+    }
+    for (const resolvedPick of (allResolvedPicks as ResolvedPick[] | null) ?? []) {
+      const stats = statsByEntry.get(resolvedPick.game_entry_id)
+      if (!stats) continue
+      stats.totalPoints += resolvedPick.points_awarded
+      if (resolvedPick.is_exact_score) stats.exactScoreCount++
+      if (resolvedPick.scorer_bonus_awarded) stats.correctScorerCount++
+    }
+
+    const statsUpdates = affectedEntryIdList.map((entryId) => {
+      const stats = statsByEntry.get(entryId)!
+      return {
+        game_entry_id: entryId,
+        total_points: stats.totalPoints,
+        exact_score_count: stats.exactScoreCount,
+        correct_scorer_count: stats.correctScorerCount,
+      }
+    })
+
+    const { error: statsUpdateError } = await ctx.supabase
+      .from('game_entry_predictor')
+      .upsert(statsUpdates, { onConflict: 'game_entry_id' })
+
+    if (statsUpdateError) {
+      throw new Error(`Failed to update cumulative stats: ${statsUpdateError.message}`)
+    }
   }
 
   async settle(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {

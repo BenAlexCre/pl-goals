@@ -347,12 +347,13 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-3: entry creation, pick submission,
-locking).** Scoring, winner determination, and prize awarding are not
+decided and shipped so far (Slices 1-4: entry creation, pick submission,
+locking, scoring).** Winner determination and prize awarding are not
 built yet — see
 [decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
 [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
-and [§ Score Predictor locking](./decisions.md#score-predictor-locking)
+[§ Score Predictor locking](./decisions.md#score-predictor-locking),
+and [§ Score Predictor scoring](./decisions.md#score-predictor-scoring)
 for the full reasoning and everything still genuinely undecided.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
@@ -366,11 +367,11 @@ equal score (e.g. 1-1); the winning team, if any, is worked out from the
 predicted scoreline itself, not chosen separately.
 
 **Goalscorer bonus prediction — optional.** An entrant may also guess a
-player to score in that fixture, for a bonus (the bonus's point value is
-not yet decided). This is entirely optional — a prediction with no
-goalscorer guess is fully valid, it simply isn't eligible for that
-gameweek's bonus. If a goalscorer guess is given, it must be a player
-who's actually on one of the two teams playing in the predicted fixture.
+player to score in that fixture, for a bonus. This is entirely optional —
+a prediction with no goalscorer guess is fully valid, it simply isn't
+eligible for that gameweek's bonus and loses no points for omitting it.
+If a goalscorer guess is given, it must be a player who's actually on one
+of the two teams playing in the predicted fixture.
 
 **When picks lock.** Same 30-minutes-before-earliest-kickoff deadline rule
 as every other mode (§ [When picks lock](#when-picks-lock)) — a prediction
@@ -382,13 +383,40 @@ for the same gameweek any time before that gameweek's deadline — this
 replaces the previous prediction for that gameweek, it does not create a
 second one.
 
-**Not yet decided, deliberately not guessed at:** how many points the
-goalscorer bonus is actually worth; whether predicting the same scoreline
-or the same goalscorer more than once across a season is restricted in
-any way (`predictor_cycle_mode`'s "two_halves"/"single_cycle" setting is
-confirmed to govern some such restriction, but not which predictions or
-how); how scoring, standings, and prize payout work at all; whether there's
-any restriction on when an entrant may join a Score Predictor pot.
+**Scoring — points are per-pot configurable, defaulting to 5-3-2.** Once a
+predicted fixture finishes, each prediction is scored one of three ways,
+using that pot's own configured point values (an organiser sets these when
+creating the pot; every pot defaults to 5/3/2 and most will never need to
+change them):
+
+- **Exact scoreline** — the predicted score matches the final score
+  exactly (e.g. predicted 2-1, actual 2-1). Worth
+  `predictor_exact_score_points`, default **5**.
+- **Correct result, wrong scoreline** — the predicted outcome (home win,
+  away win, or draw) matches the actual outcome, but the exact score
+  doesn't (e.g. predicted 2-1, actual 3-0 — both home wins). Worth
+  `predictor_correct_result_points`, default **3**. Mutually exclusive
+  with exact-scoreline points — a prediction is scored one or the other,
+  never both.
+- **Wrong result entirely** — worth 0 points.
+
+The optional goalscorer bonus, when correctly predicted, is worth
+`predictor_scorer_bonus_points` (default **2**) **on top of** whichever
+result points were already earned — it is never mutually exclusive with
+either of the above. Whether the goalscorer needs to score in the
+specifically-predicted fixture, or anywhere in that gameweek, is a
+separate per-pot setting (`predictor_scorer_scope`).
+
+A prediction for a postponed or cancelled fixture is left unresolved
+(no points either way) until the fixture actually finishes or the
+competition is otherwise settled — it is not automatically scored zero.
+
+**Not yet decided, deliberately not guessed at:** whether predicting the
+same scoreline or the same goalscorer more than once across a season is
+restricted in any way (`predictor_cycle_mode`'s "two_halves"/"single_cycle"
+setting is confirmed to govern some such restriction, but not which
+predictions or how); how standings and prize payout work at all; whether
+there's any restriction on when an entrant may join a Score Predictor pot.
 
 ## Admin permissions
 
