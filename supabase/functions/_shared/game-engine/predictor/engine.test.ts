@@ -720,16 +720,22 @@ Deno.test('calculateScore does not fold a voided entry\'s points into game_entry
 interface FakeSettlePot { id: string; game_type: string }
 interface FakeSettleGameEntry { id: string; pot_id: string; user_id: string; status: string }
 interface FakeSettleEntryPayment { pot_id: string; user_id: string; scope: string; is_paid: boolean }
+interface FakeSettleGameEntryPredictor { game_entry_id: string; total_points: number; exact_score_count: number; correct_scorer_count: number }
+interface FakeSettleSnapshot { id: number; pot_id: string; gameweek_id: number | null; user_id: string; rank: number; score: number; meta?: unknown }
 
 interface FakeSettleDb {
   pots: FakeSettlePot[]
   game_entries: FakeSettleGameEntry[]
   entry_payments: FakeSettleEntryPayment[]
+  // settle() now calls generateStandings() unconditionally per pot
+  // (Slice 6) — these two tables are what that method reads/writes.
+  game_entry_predictor: FakeSettleGameEntryPredictor[]
+  pot_standings_snapshots: FakeSettleSnapshot[]
 }
 
 function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
   // deno-lint-ignore no-explicit-any
-  function queryBuilder(getRows: () => any[]) {
+  function queryBuilder(table: keyof FakeSettleDb, getRows: () => any[]) {
     // deno-lint-ignore no-explicit-any
     const filters: ((row: any) => boolean)[] = []
     let updatePatch: Record<string, unknown> | null = null
@@ -737,6 +743,14 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
     const builder: any = {
       select: () => builder,
       eq: (col: string, val: unknown) => {
+        filters.push((row) => row[col] === val)
+        return builder
+      },
+      neq: (col: string, val: unknown) => {
+        filters.push((row) => row[col] !== val)
+        return builder
+      },
+      is: (col: string, val: unknown) => {
         filters.push((row) => row[col] === val)
         return builder
       },
@@ -750,10 +764,39 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
         return builder
       },
       // deno-lint-ignore no-explicit-any
+      upsert: (rows: Record<string, unknown>[]) => {
+        const table_ = db[table] as unknown as { id: unknown }[]
+        for (const row of rows) {
+          const idx = table_.findIndex((r) => r.id === row.id)
+          if (idx >= 0) Object.assign(table_[idx], row)
+          else table_.push(row as never)
+        }
+        return Promise.resolve({ data: rows, error: null })
+      },
+      // deno-lint-ignore no-explicit-any
+      insert: (rows: Record<string, unknown>[]) => {
+        const table_ = db[table] as unknown as Record<string, unknown>[]
+        let nextId = table_.reduce((max, r) => Math.max(max, (r.id as number) ?? 0), 0) + 1
+        for (const row of rows) {
+          table_.push(table === 'pot_standings_snapshots' ? { id: nextId++, ...row } : row)
+        }
+        return Promise.resolve({ data: rows, error: null })
+      },
+      // deno-lint-ignore no-explicit-any
       then: (resolve: (v: { data: any; error: null }) => void) => {
-        const rows = getRows().filter((row) => filters.every((f) => f(row)))
+        let rows = getRows().filter((row) => filters.every((f) => f(row)))
+        // game_entries' own select('user_id, game_entry_predictor(...)')
+        // needs the embedded shape generateStandings() expects — joined
+        // in here rather than genuinely modeled relationally, same
+        // simplification every other fake in this file already uses.
+        if (table === 'game_entries') {
+          rows = rows.map((row) => ({
+            ...row,
+            game_entry_predictor: db.game_entry_predictor.find((s) => s.game_entry_id === row.id) ?? null,
+          }))
+        }
         if (updatePatch) {
-          for (const row of rows) Object.assign(row, updatePatch)
+          for (const row of getRows().filter((r) => filters.every((f) => f(r)))) Object.assign(row, updatePatch)
         }
         resolve({ data: rows, error: null })
       },
@@ -763,7 +806,7 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
 
   const fakeSupabase = {
     from(table: keyof FakeSettleDb) {
-      return queryBuilder(() => db[table])
+      return queryBuilder(table, () => db[table])
     },
   }
   return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => new Date('2026-06-01T00:00:00Z') }
@@ -774,6 +817,8 @@ function baseSettleDb(overrides: Partial<FakeSettleDb> = {}): FakeSettleDb {
     pots: [{ id: 'pot-1', game_type: 'score_predictor' }],
     game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
     entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: true }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 0, exact_score_count: 0, correct_scorer_count: 0 }],
+    pot_standings_snapshots: [],
     ...overrides,
   }
 }
@@ -912,4 +957,223 @@ Deno.test('settle is safe to call repeatedly — a second call finds nothing new
 
   await engine.settle(ctx, 13)
   assertEquals(db.game_entries[0].status, 'void')
+})
+
+// --- generateStandings() -----------------------------------------------
+// Reuses fakeSettleContext/baseSettleDb — settle() (Slice 6) now calls
+// generateStandings() internally, so that fake already supports every
+// table/query shape this method needs (game_entries with the embedded
+// game_entry_predictor read, plus pot_standings_snapshots' is/eq/upsert/
+// insert). No separate bespoke fake needed.
+
+Deno.test('generateStandings returns [] for a pot with no entries', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ game_entries: [], game_entry_predictor: [] })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows, [])
+})
+
+Deno.test('generateStandings ranks multiple entries by cumulative points, descending', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-3', pot_id: 'pot-1', user_id: 'user-3', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 15, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 22, exact_score_count: 3, correct_scorer_count: 2 },
+      { game_entry_id: 'entry-3', total_points: 8, exact_score_count: 1, correct_scorer_count: 0 },
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  const byUser = new Map(rows.map((r) => [r.userId, r]))
+  assertEquals(byUser.get('user-2')?.rank, 1) // 22 points
+  assertEquals(byUser.get('user-1')?.rank, 2) // 15 points
+  assertEquals(byUser.get('user-3')?.rank, 3) // 8 points
+})
+
+Deno.test('generateStandings shares a rank among tied cumulative scores, then skips ahead ("1224")', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-3', pot_id: 'pot-1', user_id: 'user-3', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-2', total_points: 10, exact_score_count: 0, correct_scorer_count: 2 },
+      { game_entry_id: 'entry-3', total_points: 5, exact_score_count: 0, correct_scorer_count: 0 },
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  const byUser = new Map(rows.map((r) => [r.userId, r]))
+  assertEquals(byUser.get('user-1')?.rank, 1)
+  assertEquals(byUser.get('user-2')?.rank, 1) // tied at 10 — shares rank 1
+  assertEquals(byUser.get('user-3')?.rank, 3) // skips ahead by the 2 tied at rank 1
+})
+
+Deno.test('generateStandings excludes a voided entry', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-voided', pot_id: 'pot-1', user_id: 'user-voided', status: 'void' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-voided', total_points: 50, exact_score_count: 5, correct_scorer_count: 5 }, // high score, still must not appear
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.length, 1)
+  assertEquals(rows[0].userId, 'user-1')
+})
+
+Deno.test('generateStandings includes a settled entry (a future awardPrize() slice will use this status) alongside a pending one', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-pending', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-settled', status: 'settled' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-2', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.map((r) => r.userId).sort(), ['user-pending', 'user-settled'])
+})
+
+Deno.test('generateStandings excludes an entry with no game_entry_predictor extension row', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-malformed', pot_id: 'pot-1', user_id: 'user-malformed', status: 'pending' },
+    ],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.length, 1)
+  assertEquals(rows[0].userId, 'user-1')
+})
+
+Deno.test('generateStandings populates meta with exactScoreCount/correctScorerCount', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 17, exact_score_count: 3, correct_scorer_count: 2 }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows[0].meta, { exactScoreCount: 3, correctScorerCount: 2 })
+})
+
+Deno.test('generateStandings writes only the overall row (gameweek_id null), never a per-gameweek one', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(db.pot_standings_snapshots.length, 1)
+  assertEquals(db.pot_standings_snapshots[0].gameweek_id, null)
+})
+
+Deno.test('generateStandings upserts an existing snapshot row by id rather than duplicating it, and is idempotent across repeated calls', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.generateStandings(ctx, 'pot-1')
+  assertEquals(db.pot_standings_snapshots.length, 1)
+  const firstId = db.pot_standings_snapshots[0].id
+
+  // Score changes — same source-of-truth table a real calculateScore()
+  // recompute would have updated — then generateStandings() runs again.
+  db.game_entry_predictor[0].total_points = 12
+  await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(db.pot_standings_snapshots.length, 1) // still exactly one row, not a duplicate
+  assertEquals(db.pot_standings_snapshots[0].id, firstId) // same row, updated in place
+  assertEquals(db.pot_standings_snapshots[0].score, 12) // reflects the recomputed total, not incremented
+
+  await engine.generateStandings(ctx, 'pot-1')
+  assertEquals(db.pot_standings_snapshots.length, 1)
+  assertEquals(db.pot_standings_snapshots[0].score, 12)
+})
+
+Deno.test('generateStandings never depends on a previous snapshot — a reinstated entry (status back to pending, points recomputed) reappears automatically', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'void' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-2', total_points: 6, exact_score_count: 1, correct_scorer_count: 0 },
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  const before = await engine.generateStandings(ctx, 'pot-1')
+  assertEquals(before.map((r) => r.userId), ['user-1']) // user-2 is void, excluded
+
+  // Reinstatement (docs/decisions.md § Late Payment Override): status
+  // flips back to pending and its recompute pass updates its points —
+  // exactly what admin-actions/reinstate.ts does, simulated here directly
+  // on the fake rather than re-exercising that whole flow.
+  db.game_entries[1].status = 'pending'
+  db.game_entry_predictor[1].total_points = 9
+
+  const after = await engine.generateStandings(ctx, 'pot-1')
+  assertEquals(after.map((r) => r.userId).sort(), ['user-1', 'user-2']) // reappears with no special-case code
+  assertEquals(after.find((r) => r.userId === 'user-2')?.score, 9)
+})
+
+Deno.test('settle writes standings even when nobody needs voiding — the common-tick path', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: true }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 9, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'pending') // nobody was voided
+  assertEquals(db.pot_standings_snapshots.length, 1) // but standings were still (re)generated
+  assertEquals(db.pot_standings_snapshots[0].score, 9)
 })

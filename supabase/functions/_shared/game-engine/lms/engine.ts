@@ -596,11 +596,24 @@ export class LmsEngine implements GameEngine {
   //     already anticipated meta for ("elimination gameweek" is one of
   //     that column's own original examples) — this is meta's first real
   //     use anywhere in the codebase, Pick 5 has never populated it.
+  // Prerequisite correction, 2026-08-08 (ahead of Milestone 6 Slice 6, see
+  // docs/decisions.md § LMS standings must exclude voided entries):
+  // .neq('status', 'void') closes a real, confirmed read-side gap — this
+  // query had no game_entries.status filter at all, so a voided (unpaid)
+  // entry, whose game_entry_lms.competitive_status settle()'s void step
+  // never touches (the same fact the calculateScore() mutation fix
+  // earlier the same day already established), would still render in the
+  // "alive" tier here. Not .eq('status', 'settled') like Pick5Engine's own
+  // filter — that would be wrong for LMS, which (unlike Pick 5) must show
+  // *current*, in-progress standing every gameweek, not only after the
+  // whole competition concludes; 'pending' (still competing) and
+  // 'settled' (concluded) both belong here, only 'void' is excluded.
   async generateStandings(ctx: GameEngineContext, potId: string): Promise<StandingsRow[]> {
     const { data: entries, error: entriesError } = await ctx.supabase
       .from('game_entries')
       .select('user_id, game_entry_lms(competitive_status, eliminated_gameweek_id)')
       .eq('pot_id', potId)
+      .neq('status', 'void')
 
     if (entriesError) {
       throw new Error(`Failed to look up entries: ${entriesError.message}`)

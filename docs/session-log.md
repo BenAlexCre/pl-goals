@@ -13,6 +13,77 @@ from here.
 
 ---
 
+## 2026-08-08 (48) — Milestone 6 Slice 6: Score Predictor standings
+
+**Goal:** Slice 6 only — `PredictorEngine.generateStandings()`. Before
+coding: review all completed Predictor slices, LMS's and Pick 5's own
+`generateStandings()`, the recent reinstatement work, and the
+`calculateScore()` eligibility correction. First investigate the
+previously-documented LMS read-side issue (can a voided/reinstated entry
+appear incorrectly in standings) and fix if confirmed — smallest
+correction only, no LMS redesign. Then implement Predictor's own
+standings, justified against both existing modes, not assumed to match
+either. No determineWinner()/awardPrize()/notifications this slice.
+
+**Prerequisite investigation — confirmed real, one real gap:**
+`LmsEngine.generateStandings()` had no `game_entries.status` filter at
+all, and ranks purely by `game_entry_lms.competitive_status` — a column
+`settle()`'s void step never touches. A voided entry could therefore
+still render, most often in the "alive" tier — directly contradicting
+the shared "voided entries never appear" business rule. Reinstated
+entries were NOT wrongly excluded (no filter meant nothing was ever
+hidden; the bug was one-directional). Fixed with `.neq('status', 'void')`
+— not `.eq('status','pending')` (a settled entry must still show) and not
+Pick5's own `.eq('status','settled')` (would hide every in-progress LMS
+entry). Belongs here because it was already flagged during yesterday's
+`calculateScore()` correction, and Predictor's own standings need the
+identical consideration — fixing LMS first establishes the verified
+precedent.
+
+**Architecture review, main objective:** `PredictorEngine.generateStandings()`
+splits down the middle between the two existing modes, justified rather
+than assumed. Ranking matches Pick 5 (`total_points` is a real,
+comparable score, unlike LMS's synthetic 1/0 — reuses Pick 5's exact
+`rankWithTies()`, duplicated per GE-18). Row shape matches LMS (overall
+row only — no per-gameweek payout concept exists for Predictor, the same
+reason LMS has none). Void entries excluded with the same corrected
+filter just applied to LMS. `meta`: `{ exactScoreCount, correctScorerCount }`.
+No Predictor-specific tiebreak invented — nothing documents one, and
+inventing one would repeat the exact `ISSUE-17` mistake this codebase
+already learned from. A reinstated entry reappears automatically, with
+zero special-case code, since the method has no memory of any previous
+snapshot.
+
+**`settle()` needed a real restructure, not an appended call** — its
+"nobody's unpaid" early return would otherwise have skipped standings on
+the overwhelmingly common tick. Payment-void logic moved inside a
+conditional block; `generateStandings()` now runs unconditionally per
+eligible pot afterward — the same revision Pick5's/LMS's own `settle()`
+needed when each shipped generateStandings() for the first time.
+
+**Verified:** 13 new unit tests for Predictor + 2 for the LMS
+prerequisite fix (287/287 across `supabase/functions/`, no regressions —
+the generic `settle()` test fake needed `.neq()`/`.is()`/`.upsert()`/
+`.insert()` support added to stay in sync with the new query shapes).
+Live, through the real `compute-scores` and `admin-actions` Edge
+Functions (not a bypass script): five real entries in one pot — an exact
+score, two tied correct-result predictions, a wrong-result prediction,
+and a fifth entry that started void and was reinstated mid-verification.
+`admin-actions reinstate_entry` was the real trigger that first invoked
+`settle()`/`generateStandings()` for this pot at all — the resulting
+standings correctly showed the tie shape (`rank 1` shared by the two
+5-point entries including the freshly-reinstated one, `rank 3` shared by
+the two 3-point entries, `rank 5` for the 0-point entry), correct `meta`,
+and a repeated `reinstate_entry` call left every score and rank
+unchanged — 15 checks, all passing. All test data removed by exact ID,
+independently re-verified as zero residue. Full ADRs:
+[decisions.md § LMS standings must exclude voided entries](./decisions.md#lms-standings-must-exclude-voided-entries)
+and
+[decisions.md § Score Predictor standings](./decisions.md#score-predictor-standings).
+Not committed. Slice 7 not started, per instruction.
+
+---
+
 ## 2026-08-08 (47) — Prerequisite correction: Late Payment Override (reinstate_entry)
 
 **Goal:** before Slice 6, review the payment lifecycle across all three

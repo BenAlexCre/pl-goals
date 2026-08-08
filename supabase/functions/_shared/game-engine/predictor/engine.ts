@@ -1,8 +1,9 @@
 // Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2),
-// lockEntries (Slice 3), calculateScore (Slice 4), and settle (Slice 5) are
-// implemented — every other GameEngine method still throws
-// GameEngineNotImplementedError, same "half-built mode fails loudly" pattern
-// Pick5Engine/LmsEngine used between their own early slices and later ones.
+// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5), and
+// generateStandings (Slice 6) are implemented — determineWinner/awardPrize/
+// notifyUsers still throw GameEngineNotImplementedError, same "half-built
+// mode fails loudly" pattern Pick5Engine/LmsEngine used between their own
+// early slices and later ones.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -75,6 +76,25 @@ function parsePick(picks: unknown): PredictorPickInput {
   }
 
   return { gameweekId, fixtureId, predictedHomeScore, predictedAwayScore, goalscorerPlayerId: parsedGoalscorerPlayerId }
+}
+
+// GE-6/GE-8.4: standard competition ranking ("1224" — ties share a rank;
+// the next distinct score skips ahead by however many were tied) —
+// identical algorithm to Pick5Engine's own private rankWithTies(),
+// duplicated per GE-18 ("pick5/ must never import from lms/ or predictor/,
+// and vice versa") rather than imported. Reused here, not reinvented,
+// because Predictor's game_entry_predictor.total_points is a genuine,
+// directly comparable cumulative score — the same shape Pick 5's
+// picks_won is, unlike LMS's synthetic alive/eliminated indicator, which
+// has no equivalent use for this function at all.
+function rankWithTies(entries: { userId: string; score: number }[]): { userId: string; score: number; rank: number }[] {
+  const sorted = [...entries].sort((a, b) => b.score - a.score)
+  const ranked: { userId: string; score: number; rank: number }[] = []
+  for (let index = 0; index < sorted.length; index++) {
+    const rank = index === 0 || sorted[index].score < sorted[index - 1].score ? index + 1 : ranked[index - 1].rank
+    ranked.push({ ...sorted[index], rank })
+  }
+  return ranked
 }
 
 export class PredictorEngine implements GameEngine {
@@ -612,6 +632,20 @@ export class PredictorEngine implements GameEngine {
   // LmsEngine.settle(), which never transitions a paid entry to 'settled'
   // either, since that only makes sense once the competition itself
   // concludes (determineWinner()/awardPrize() territory, out of scope).
+  //
+  // Revised, Milestone 6 Slice 6: now also calls generateStandings() per
+  // eligible pot, unconditionally — the same "small, explicit revision"
+  // both Pick5Engine.settle() and LmsEngine.settle() needed when their own
+  // Slice 6 shipped generateStandings() for the first time (neither
+  // originally called it, since it didn't exist yet). Restructured so the
+  // payment-void logic (unchanged) sits inside an `if (entries?.length)`
+  // block instead of its own early return — the old early-return-when-
+  // nothing's-unpaid path would otherwise skip standings entirely on the
+  // overwhelmingly common tick where nobody needs voiding, which is
+  // exactly when a fresh calculateScore() pass most needs its results
+  // reflected. determineWinner()/awardPrize()/notifyUsers() are
+  // deliberately NOT called here, per explicit instruction — same
+  // "generateStandings() only" scope this slice was given.
   async settle(ctx: GameEngineContext, gameweekId: number): Promise<void> {
     const potIds = await this.getPredictorPotIds(ctx)
     if (potIds.length === 0) {
@@ -627,46 +661,258 @@ export class PredictorEngine implements GameEngine {
     if (entriesError) {
       throw new Error(`Failed to look up entries: ${entriesError.message}`)
     }
-    if (!entries?.length) {
-      return
+
+    if (entries?.length) {
+      const { data: payments, error: paymentsError } = await ctx.supabase
+        .from('entry_payments')
+        .select('pot_id, user_id, is_paid')
+        .eq('scope', 'season')
+        .in('pot_id', potIds)
+
+      if (paymentsError) {
+        throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+      }
+
+      const paidKeys = new Set(
+        ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
+          .filter((p) => p.is_paid)
+          .map((p) => `${p.pot_id}:${p.user_id}`)
+      )
+
+      const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
+        .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
+        .map((e) => e.id)
+
+      if (unpaidEntryIds.length > 0) {
+        const { error: voidEntriesError } = await ctx.supabase
+          .from('game_entries')
+          .update({ status: 'void' })
+          .in('id', unpaidEntryIds)
+
+        if (voidEntriesError) {
+          throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+        }
+      }
     }
 
-    const { data: payments, error: paymentsError } = await ctx.supabase
-      .from('entry_payments')
-      .select('pot_id, user_id, is_paid')
-      .eq('scope', 'season')
-      .in('pot_id', potIds)
-
-    if (paymentsError) {
-      throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+    // Same per-pot failure isolation Pick5Engine.settle()/LmsEngine.settle()
+    // already established (production hardening sprint, 2026-08-06) — one
+    // pot's generateStandings() failure must never block another
+    // unrelated pot's, or the payment-void work above (already durably
+    // written). Collected and raised together, after every pot's had its
+    // chance, rather than on the first failure.
+    const potErrors: { potId: string; message: string }[] = []
+    for (const potId of potIds) {
+      try {
+        await this.generateStandings(ctx, potId)
+      } catch (err) {
+        potErrors.push({ potId, message: err instanceof Error ? err.message : String(err) })
+      }
     }
 
-    const paidKeys = new Set(
-      ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
-        .filter((p) => p.is_paid)
-        .map((p) => `${p.pot_id}:${p.user_id}`)
-    )
-
-    const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
-      .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
-      .map((e) => e.id)
-
-    if (unpaidEntryIds.length === 0) {
-      return
-    }
-
-    const { error: voidEntriesError } = await ctx.supabase
-      .from('game_entries')
-      .update({ status: 'void' })
-      .in('id', unpaidEntryIds)
-
-    if (voidEntriesError) {
-      throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+    if (potErrors.length > 0) {
+      throw new Error(
+        `settle() finalized entries for gameweek ${gameweekId}, but standings processing failed for ${potErrors.length} pot(s): ` +
+          potErrors.map((e) => `${e.potId}: ${e.message}`).join('; ')
+      )
     }
   }
 
-  async generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {
-    throw new GameEngineNotImplementedError('score_predictor', 'generateStandings')
+  // GE-6: "Write pot_standings_snapshots rows." Reviewed
+  // Pick5Engine.generateStandings() and LmsEngine.generateStandings()
+  // first — modeled on neither wholesale, and NOT assumed to match either
+  // by default, per explicit instruction. Justified against both:
+  //
+  // vs. Pick 5: same in one real way — Predictor's game_entry_predictor.
+  // total_points is a genuine, directly comparable cumulative score,
+  // exactly like Pick 5's picks_won, so ranking reuses the identical
+  // standard-competition-ranking algorithm (rankWithTies(), below — ties
+  // share a rank, the next distinct score skips ahead by however many
+  // tied; the same ISSUE-17 resolution, confirmed with the repo owner
+  // once, applies platform-wide, not per mode). Different in shape:
+  // Pick 5 writes a per-gameweek row *and* an overall row, because a new
+  // payable instance (a weekly jackpot) concludes every gameweek — no
+  // such per-gameweek payout concept exists for Predictor (GE-5.3: the
+  // pot is split once, at season end), so writing a per-gameweek snapshot
+  // here would be schema nobody reads, the same "no unused abstraction"
+  // discipline this codebase already applies elsewhere.
+  //
+  // vs. LMS: same in shape — season-scoped entry (GE-4.5), so only the
+  // overall row (gameweek_id null) is written, never a per-gameweek one,
+  // for the identical reason LMS has none: no meaningful per-gameweek
+  // snapshot exists when the entry itself isn't gameweek-scoped. Same
+  // get-or-create-by-id upsert workaround (upsertOverallStandings(),
+  // below), duplicated per GE-18 rather than imported, mirroring
+  // LmsEngine's own private copy. Different in ranking entirely: LMS has
+  // no real score (a synthetic 1/0 alive/eliminated indicator, ranked by
+  // elimination recency) because nobody accumulates points; Predictor's
+  // score is real from the start, so it's ranked like Pick 5's, not LMS's
+  // — copying LMS's alive/eliminated-shaped ranking here would have been
+  // assuming the wrong precedent for a mode that actually has a score.
+  //
+  // Six questions, answered before writing this method:
+  //
+  // 1/2. Answered above (Pick 5/LMS comparison).
+  //
+  // 3. Generated every gameweek settle() runs, gated only by the same
+  //    caller-side "this gameweek's fixtures are all finished" check
+  //    settle-gameweek/index.ts already applies uniformly — not "only
+  //    after settled gameweeks" (that phrase describes determineWinner()/
+  //    awardPrize() territory, out of scope) and not a separate internal
+  //    fixture-status check of its own. This method trusts
+  //    game_entry_predictor.total_points as already-correct, exactly like
+  //    Pick5Engine's/LmsEngine's own generateStandings() trust their
+  //    respective source tables — calculateScore() (Slice 4) is what
+  //    actually enforces "only finished fixtures contribute," and its own
+  //    full-recompute design (never incremental) is precisely what makes
+  //    trusting it here safe rather than assumed.
+  //
+  // 4. Standard competition ranking, ties sharing a rank — see the Pick 5
+  //    comparison above. No Predictor-specific secondary tiebreak (e.g.
+  //    "most exact scores wins a tie") is invented — nothing in GE-5.3 or
+  //    business-rules.md states one, and inventing one here would be the
+  //    same mistake ISSUE-17 already taught this codebase to avoid when
+  //    real money is involved.
+  //
+  // 5. meta: { exactScoreCount, correctScorerCount } — the same
+  //    "interesting fact behind the number" purpose LMS's meta already
+  //    established (elimination gameweek), sourced directly from
+  //    game_entry_predictor's own existing columns, zero extra queries.
+  //    Display-only, never queried or joined on (GE-20).
+  //
+  // 6. Void entries never appear — same shared Payment Verification rule
+  //    every mode follows (business-rules.md § Payment verification
+  //    rules), enforced with the exact filter just corrected on
+  //    LmsEngine.generateStandings() moments earlier this same session
+  //    (docs/decisions.md § LMS standings must exclude voided entries):
+  //    .neq('status', 'void'), not .eq('status', 'pending') — Predictor
+  //    entries can also reach 'settled' once a future awardPrize() slice
+  //    ships, and a settled entry must still show in standings (the
+  //    competition having concluded doesn't erase its final position),
+  //    so excluding only 'void' is the correct filter, matching LMS's own
+  //    corrected reasoning exactly rather than Pick5's narrower
+  //    'settled'-only one (which excludes not-yet-concluded entries
+  //    entirely — wrong for a mode with no per-gameweek conclusion).
+  //
+  // 7. A reinstated entry reappears automatically, with no special-case
+  //    code — this method has no memory of any previous snapshot, reads
+  //    game_entries.status and game_entry_predictor fresh every call, and
+  //    a successful reinstatement (docs/decisions.md § Late Payment
+  //    Override) already leaves both correctly updated by the time this
+  //    runs again.
+  //
+  // 8. Yes, naturally — a gameweek with some fixtures finished and others
+  //    not yet is not a special case this method needs to detect: an
+  //    unresolved pick simply hasn't added to total_points yet
+  //    (calculateScore()'s own design, Slice 4), so the cumulative score
+  //    read here is always an honest "as of right now" total, never a
+  //    fabricated complete one.
+  async generateStandings(ctx: GameEngineContext, potId: string): Promise<StandingsRow[]> {
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('user_id, game_entry_predictor(total_points, exact_score_count, correct_scorer_count)')
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return []
+    }
+
+    // Same defensive array-or-object handling as Pick5Engine's/LmsEngine's
+    // own embedded-resource reads — supabase-js infers this many-to-one
+    // relation's shape generically without a generated Database type.
+    type PredictorEmbed =
+      | { total_points: number; exact_score_count: number; correct_scorer_count: number }
+      | { total_points: number; exact_score_count: number; correct_scorer_count: number }[]
+      | null
+    type EntryRow = { user_id: string; game_entry_predictor: PredictorEmbed }
+
+    const statsByUser = new Map<string, { totalPoints: number; exactScoreCount: number; correctScorerCount: number }>()
+
+    for (const entry of entries as EntryRow[]) {
+      const stats = Array.isArray(entry.game_entry_predictor) ? entry.game_entry_predictor[0] : entry.game_entry_predictor
+      if (!stats) continue // malformed — no extension row; excluded rather than guessed at, same as LmsEngine
+      statsByUser.set(entry.user_id, {
+        totalPoints: stats.total_points,
+        exactScoreCount: stats.exact_score_count,
+        correctScorerCount: stats.correct_scorer_count,
+      })
+    }
+
+    const ranked = rankWithTies([...statsByUser.entries()].map(([userId, s]) => ({ userId, score: s.totalPoints })))
+
+    const standingsRows: StandingsRow[] = ranked.map((r) => {
+      const stats = statsByUser.get(r.userId)!
+      return {
+        potId,
+        gameweekId: null,
+        userId: r.userId,
+        rank: r.rank,
+        score: r.score,
+        meta: { exactScoreCount: stats.exactScoreCount, correctScorerCount: stats.correctScorerCount },
+      }
+    })
+
+    await this.upsertOverallStandings(ctx, potId, standingsRows)
+
+    return standingsRows
+  }
+
+  // pot_standings_snapshots has two partial unique indexes (GE-4.6) that
+  // PostgREST's upsert(onConflict: '...') can't target directly — same
+  // workaround as Pick5Engine's/LmsEngine's own private copies: look up
+  // existing rows by their natural key first, then upsert only by `id`
+  // (the real, non-partial primary key). Duplicated per GE-18 rather than
+  // imported — the project-board.md "Ready" item flagging this workaround
+  // for a future shared-helper extraction now has a third private copy,
+  // strengthening rather than changing that already-deferred decision.
+  private async upsertOverallStandings(ctx: GameEngineContext, potId: string, rows: StandingsRow[]): Promise<void> {
+    if (rows.length === 0) {
+      return
+    }
+
+    const { data: existing, error: existingError } = await ctx.supabase
+      .from('pot_standings_snapshots')
+      .select('id, user_id')
+      .eq('pot_id', potId)
+      .is('gameweek_id', null)
+
+    if (existingError) {
+      throw new Error(`Failed to look up existing standings: ${existingError.message}`)
+    }
+
+    const existingIdByUser = new Map<string, number>(
+      ((existing ?? []) as { id: number; user_id: string }[]).map((r) => [r.user_id, r.id])
+    )
+
+    const toUpdate: Record<string, unknown>[] = []
+    const toInsert: Record<string, unknown>[] = []
+
+    for (const row of rows) {
+      const base = { pot_id: potId, gameweek_id: null, user_id: row.userId, rank: row.rank, score: row.score, meta: row.meta }
+      const existingId = existingIdByUser.get(row.userId)
+      if (existingId !== undefined) {
+        toUpdate.push({ ...base, id: existingId })
+      } else {
+        toInsert.push(base)
+      }
+    }
+
+    if (toUpdate.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').upsert(toUpdate, { onConflict: 'id' })
+      if (error) {
+        throw new Error(`Failed to update standings: ${error.message}`)
+      }
+    }
+    if (toInsert.length > 0) {
+      const { error } = await ctx.supabase.from('pot_standings_snapshots').insert(toInsert)
+      if (error) {
+        throw new Error(`Failed to insert standings: ${error.message}`)
+      }
+    }
   }
 
   async determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {

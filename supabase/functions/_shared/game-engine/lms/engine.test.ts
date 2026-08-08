@@ -368,6 +368,7 @@ function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
     // deno-lint-ignore no-explicit-any
     const builder: any = {
       eq(col: string, val: unknown) { filtered = filtered.filter((r) => r[col] === val); return builder },
+      neq(col: string, val: unknown) { filtered = filtered.filter((r) => r[col] !== val); return builder },
       in(col: string, vals: unknown[]) { const set = new Set(vals); filtered = filtered.filter((r) => set.has(r[col])); return builder },
       lte(col: string, val: unknown) { filtered = filtered.filter((r) => r[col] !== null && (r[col] as number) <= (val as number)); return builder },
       maybeSingle: () => Promise.resolve({ data: filtered[0] ?? null, error: null }),
@@ -756,7 +757,7 @@ Deno.test('settle never reprocesses an entry that is already void (or otherwise 
 // game_entry_lms embed, a shape the generic FakeDb fake above doesn't
 // simulate (it has no real relational embedding).
 
-interface FakeStandingsEntry { user_id: string; competitive_status: string; eliminated_gameweek_id: number | null; malformed?: boolean }
+interface FakeStandingsEntry { user_id: string; competitive_status: string; eliminated_gameweek_id: number | null; malformed?: boolean; status?: string }
 
 function fakeGenerateStandingsContext(
   entries: FakeStandingsEntry[],
@@ -771,16 +772,25 @@ function fakeGenerateStandingsContext(
         return {
           select() {
             return {
-              eq: () =>
-                Promise.resolve({
-                  data: entries.map((e) => ({
-                    user_id: e.user_id,
-                    game_entry_lms: e.malformed
-                      ? null
-                      : { competitive_status: e.competitive_status, eliminated_gameweek_id: e.eliminated_gameweek_id },
-                  })),
-                  error: null,
-                }),
+              // .eq('pot_id', potId).neq('status', 'void') — the fake
+              // applies the status filter for real (unlike the pot_id
+              // filter, which every test's fixture is already scoped to),
+              // so a test can prove a 'void' entry is actually excluded,
+              // not just that the query shape compiles.
+              eq: () => ({
+                neq: (_col: string, excludedStatus: string) =>
+                  Promise.resolve({
+                    data: entries
+                      .filter((e) => (e.status ?? 'pending') !== excludedStatus)
+                      .map((e) => ({
+                        user_id: e.user_id,
+                        game_entry_lms: e.malformed
+                          ? null
+                          : { competitive_status: e.competitive_status, eliminated_gameweek_id: e.eliminated_gameweek_id },
+                      })),
+                    error: null,
+                  }),
+              }),
             }
           },
         }
@@ -881,6 +891,36 @@ Deno.test('generateStandings excludes an entry with no game_entry_lms extension 
 
   assertEquals(rows.length, 1)
   assertEquals(rows[0].userId, 'user-1')
+})
+
+// Prerequisite correction, 2026-08-08 (docs/decisions.md § LMS standings
+// must exclude voided entries) — reproduces the exact read-side gap found
+// during Slice 6's own prerequisite investigation: a voided entry whose
+// game_entry_lms.competitive_status is still (stale) 'alive' — settle()'s
+// void step never touches that column — must not render in standings.
+Deno.test('generateStandings excludes a voided entry even though its stale competitive_status still says alive', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-1', competitive_status: 'alive', eliminated_gameweek_id: null, status: 'pending' },
+    { user_id: 'user-voided', competitive_status: 'alive', eliminated_gameweek_id: null, status: 'void' },
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.length, 1)
+  assertEquals(rows[0].userId, 'user-1')
+})
+
+Deno.test('generateStandings includes a settled entry (competition concluded) alongside a still-pending one', async () => {
+  const engine = new LmsEngine()
+  const { ctx } = fakeGenerateStandingsContext([
+    { user_id: 'user-pending', competitive_status: 'alive', eliminated_gameweek_id: null, status: 'pending' },
+    { user_id: 'user-settled', competitive_status: 'eliminated', eliminated_gameweek_id: 5, status: 'settled' },
+  ])
+
+  const rows = await engine.generateStandings(ctx, 'pot-1')
+
+  assertEquals(rows.map((r) => r.userId).sort(), ['user-pending', 'user-settled'])
 })
 
 Deno.test('generateStandings upserts an existing snapshot row by id, inserts a new one', async () => {

@@ -370,14 +370,15 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-5: entry creation, pick submission,
-locking, scoring, settlement).** Standings, winner determination, and prize
+decided and shipped so far (Slices 1-6: entry creation, pick submission,
+locking, scoring, settlement, standings).** Winner determination and prize
 awarding are not built yet — see
 [decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
 [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
 [§ Score Predictor locking](./decisions.md#score-predictor-locking),
 [§ Score Predictor scoring](./decisions.md#score-predictor-scoring),
-and [§ Score Predictor settlement](./decisions.md#score-predictor-settlement)
+[§ Score Predictor settlement](./decisions.md#score-predictor-settlement),
+and [§ Score Predictor standings](./decisions.md#score-predictor-standings)
 for the full reasoning and everything still genuinely undecided.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
@@ -442,12 +443,31 @@ A prediction for a postponed or cancelled fixture is left unresolved
 (no points either way) until the fixture actually finishes or the
 competition is otherwise settled — it is not automatically scored zero.
 
+**Standings.** A leaderboard ranks every non-voided entrant by cumulative
+points, highest first; entrants tied on points share a rank, and the next
+distinct score skips ahead by however many were tied (the same rule Pick 5's
+own leaderboard uses). A voided (unpaid) entry never appears; if it's
+later reinstated after a late payment (see below), it reappears
+automatically, at its correct, fully-rescored position, the next time
+standings are generated — no separate action is needed to "add it back."
+
+**Late Payment Override.** If a player's entry was voided for non-payment
+and they pay late, a pot admin can mark the payment paid and then, as a
+separate, explicit action, choose to reinstate the entry. This never
+happens automatically — same shared rule every mode follows. Reinstatement
+re-scores everything the entry missed while voided and refreshes
+standings; a gameweek the entry had no chance to pick for during the void
+window still counts as a miss, the same as any other missed gameweek.
+Reinstatement is refused once the pot's prize has already been paid out.
+Full reasoning: [decisions.md § Late Payment Override](./decisions.md#late-payment-override).
+
 **Not yet decided, deliberately not guessed at:** whether predicting the
 same scoreline or the same goalscorer more than once across a season is
 restricted in any way (`predictor_cycle_mode`'s "two_halves"/"single_cycle"
 setting is confirmed to govern some such restriction, but not which
-predictions or how); how standings and prize payout work at all; whether
-there's any restriction on when an entrant may join a Score Predictor pot.
+predictions or how); how the season winner is determined and the prize
+paid out; whether there's any restriction on when an entrant may join a
+Score Predictor pot.
 
 ## Admin permissions
 

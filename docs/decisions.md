@@ -2726,3 +2726,211 @@ re-resolved a previously-unresolved pick and updated `game_entry_predictor`'s
 totals — 18 checks, all passing. All test data (4 pots' worth of
 users/entries/picks/payments) removed by exact ID, independently
 re-verified as zero residue rows across pots, users, and entries.
+
+## LMS standings must exclude voided entries
+
+**Investigated and fixed 2026-08-08**, a prerequisite correction ahead of
+Milestone 6 Slice 6, per the repo owner's explicit instruction to
+investigate the previously-documented `LmsEngine.generateStandings()`
+read-side issue before implementing Score Predictor's own standings.
+
+**Question asked: can a reinstated or voided entry appear incorrectly in
+standings because `generateStandings()` doesn't filter
+`game_entries.status`?** Confirmed, for the voided case; not reachable for
+the reinstated case.
+
+- **Voided entries: confirmed, real, one-directional.**
+  `LmsEngine.generateStandings()`'s own `game_entries` query had no
+  `status` filter at all, and ranks purely by
+  `game_entry_lms.competitive_status` — a column `settle()`'s void step
+  never touches (established by the earlier `calculateScore()` mutation
+  fix the same day). A voided (unpaid) entry, still carrying whatever
+  `competitive_status` it had at the moment it was voided, would
+  therefore still render — most often in the "alive" tier, directly
+  contradicting the shared Payment Verification rule every mode is
+  supposed to follow (business-rules.md § Payment verification rules:
+  "excluded from the leaderboard entirely, regardless of how well its
+  picks would have scored").
+- **Reinstated entries: not incorrectly excluded.** There is no OTHER
+  filter in this method that could wrongly hide a properly-reinstated
+  entry — the bug is the *absence* of a filter, which means everything
+  currently shows regardless of status. Once a reinstatement's own
+  recompute pass (docs/decisions.md § Late Payment Override) correctly
+  updates `competitive_status`, that entry displays correctly, with or
+  without this fix. The fix's benefit is specific to the voided case.
+
+**Fix — the smallest correction required:** `.neq('status', 'void')` added
+to the existing `game_entries` query. Not `.eq('status', 'pending')` —
+LMS entries can also reach `'settled'` once `awardPrize()` concludes the
+competition, and a settled entry must still show (the competition having
+concluded doesn't erase its final standing); excluding only `'void'` is
+the minimal, correct filter. Not `.eq('status', 'settled')` either
+(Pick5Engine's own filter) — that would hide every currently-in-progress
+LMS entry until the whole competition concludes, wrong for a mode whose
+standings are meant to reflect *current*, ongoing standing every
+gameweek.
+
+**Why this belongs here, not deferred:** two reasons, both explicit. It
+was already flagged as a known, confirmed-adjacent gap during the
+cross-slice `calculateScore()` correction earlier the same day (not a new
+discovery). And Score Predictor's own `generateStandings()` (this slice's
+actual objective) needs the identical consideration — reviewing and
+fixing LMS's version first establishes the correct, verified precedent
+Predictor's implementation follows, matching this whole project's
+"review the existing modes before implementing the new one" discipline
+applied to a bug fix instead of a fresh feature.
+
+**Idempotency:** unaffected — `generateStandings()` was already a full
+recompute + upsert-by-natural-key every call; adding a `WHERE` clause to
+the initial read doesn't change that property. No new state, no schema
+change.
+
+**Not done, explicitly out of scope:** no redesign of LMS standings'
+ranking, tie-break, or `meta` shape — only the missing filter was added.
+
+**Verified:** 2 new unit tests (one reproducing the exact stale-`'alive'`
+voided-entry bug, one confirming a `'settled'` entry still appears
+alongside a `'pending'` one) — 276/276 across `supabase/functions/` at
+the time this fix landed, no regressions (the generic `settle()` test
+fake needed a `.neq()` method added to stay in sync with the new query
+shape, itself a fake-only change, not a behavior change). No standalone
+live check for this fix alone — it's exercised live as part of Slice 6's
+own verification, below, whose scenario deliberately reuses the identical
+`.neq('status', 'void')` shape for `PredictorEngine.generateStandings()`.
+
+## Score Predictor standings
+
+**Decided 2026-08-08**, Milestone 6 Slice 6, per the repo owner's explicit
+"review Pick5Engine.generateStandings() and LmsEngine.generateStandings()
+first, do not assume Predictor should follow either, justify every
+similarity and difference" instruction — following directly from the
+prerequisite investigation above.
+
+**Decision:** `PredictorEngine.generateStandings()` ranks every non-void
+entry in a pot by `game_entry_predictor.total_points`, using standard
+competition ranking (ties share a rank), and writes only the overall
+(`gameweek_id = null`) snapshot row per entry. Wired into `settle()`
+(revised the same way Pick5's/LMS's own `settle()` needed revising when
+each of their own Slice 6 shipped generateStandings() for the first
+time), called unconditionally per eligible pot regardless of whether any
+voiding happened that tick.
+
+**Architecture review, the eight questions, in order:**
+
+1/2. **How does Predictor differ from Pick 5, and from LMS?** Genuinely
+   split down the middle, not modeled on either wholesale:
+   - **Ranking — matches Pick 5, diverges from LMS.**
+     `game_entry_predictor.total_points` is a real, directly comparable
+     cumulative score, exactly like Pick 5's `picks_won` — so ranking
+     reuses Pick 5's exact `rankWithTies()` algorithm (the same
+     `ISSUE-17` resolution, confirmed with the repo owner once,
+     platform-wide, not re-derived per mode). LMS has no real score at
+     all (a synthetic 1/0 alive/eliminated indicator, ranked by
+     elimination recency) — copying *that* shape here would have been
+     assuming the wrong precedent for a mode that genuinely has points.
+   - **Row shape — matches LMS, diverges from Pick 5.** Season-scoped
+     entry (GE-4.5), so only the overall row is written, never a
+     per-gameweek one — same reason LMS has none: Pick 5 writes a
+     per-gameweek snapshot specifically because a new payable instance (a
+     weekly jackpot) concludes every gameweek; no such per-gameweek
+     payout concept exists for Predictor (GE-5.3: the pot splits once, at
+     season end) or for LMS. Writing a per-gameweek row here would be
+     schema nobody reads — the same "no unused abstraction" discipline
+     already applied elsewhere in this codebase.
+   - **Upsert workaround — shared mechanics, all three.** Same
+     get-or-create-by-id workaround for `pot_standings_snapshots`'s
+     partial unique indexes (GE-4.6) as Pick5Engine's and LmsEngine's own
+     private copies — duplicated per GE-18, not imported (see
+     Consequences, below).
+3. **Generated every gameweek, only after settled gameweeks, or only
+   after finished fixtures?** Every time `settle()` runs, gated only by
+   the same caller-side "this gameweek's fixtures are all finished" check
+   `settle-gameweek/index.ts` already applies uniformly — no separate
+   internal fixture-status check inside `generateStandings()` itself.
+   This method trusts `game_entry_predictor.total_points` as already
+   correct, exactly like Pick5Engine's/LmsEngine's own
+   `generateStandings()` trust their own source tables;
+   `calculateScore()`'s own full-recompute design (Slice 4) is what
+   actually enforces "only finished fixtures contribute," and trusting it
+   here is safe because that guarantee was already established, not
+   assumed fresh.
+4. **How should tied cumulative scores be ranked?** Standard competition
+   ranking, ties sharing a rank — see the Pick 5 comparison above. No
+   Predictor-specific secondary tiebreak invented (e.g. "most exact
+   scores wins a tie") — nothing in GE-5.3 or business-rules.md states
+   one, and inventing one would repeat the exact mistake `ISSUE-17`
+   already taught this codebase to avoid when real money is involved.
+5. **What belongs in `meta`?** `{ exactScoreCount, correctScorerCount }`
+   — the same "interesting fact behind the number" purpose LMS's own
+   `meta` established (elimination gameweek), sourced directly from
+   `game_entry_predictor`'s existing columns, zero extra queries,
+   display-only (GE-20).
+6. **Should void entries appear?** No — same shared Payment Verification
+   rule every mode follows, enforced with the exact filter just corrected
+   on `LmsEngine.generateStandings()` moments earlier the same session
+   (above): `.neq('status', 'void')`, not `.eq('status', 'pending')` —
+   Predictor entries can also reach `'settled'` once a future
+   `awardPrize()` slice ships, and a settled entry must still show.
+7. **Should reinstated entries automatically return once rescored?** Yes,
+   with zero special-case code — this method has no memory of any
+   previous snapshot, reads `game_entries.status` and
+   `game_entry_predictor` fresh every call, and a successful
+   reinstatement (§ Late Payment Override, above) already leaves both
+   correctly updated by the time this runs again.
+8. **Should standings ever contain partially-scored gameweeks?** Yes,
+   naturally, no special handling needed — an unresolved pick simply
+   hasn't added to `total_points` yet (`calculateScore()`'s own design),
+   so the cumulative score read here is always an honest "as of right
+   now" total, never a fabricated complete one.
+
+**`settle()` needed a real restructure, not just an appended call.** Its
+existing control flow had three early returns (no eligible pots; no
+pending entries; nobody unpaid), the last of which — the overwhelmingly
+common case, where nobody needs voiding — would have skipped standings
+entirely if a `generateStandings()` call were merely appended at the
+function's end. Restructured so the payment-void logic sits inside an
+`if (entries?.length)` block instead of its own early return, and the
+per-pot `generateStandings()` loop runs unconditionally afterward — the
+same shape Pick5Engine's/LmsEngine's own `settle()` already needed when
+*their* Slice 6 shipped generateStandings() for the first time.
+`determineWinner()`/`awardPrize()`/`notifyUsers()` are deliberately not
+called, per explicit instruction — same per-pot try/catch failure
+isolation as Pick5/LMS, just for one method instead of two.
+
+**Consequences:**
+- `rankWithTies()` is now duplicated a second time (Pick 5, now also
+  Predictor) — per GE-18, a cross-mode import isn't possible. The
+  already-existing, deferred "extract the shared
+  upsert/get-or-create-by-id workaround into a helper" `project-board.md`
+  item now also covers this third private copy of that workaround
+  (Pick 5, LMS, Predictor) plus a second copy of `rankWithTies()` — the
+  case for that already-deferred, low-risk cleanup is stronger, not
+  changed in kind.
+- Predictor's `settle()` now performs meaningfully more work per call
+  (a full standings recompute for the whole pot, every tick) than its
+  Slice 5 self did — matches Pick5/LMS's own established cost, not a new
+  category of cost.
+
+**Verified:** 13 new unit tests (287/287 across `supabase/functions/`, no
+regressions) — multiple cumulative scores ranked correctly, a tie sharing
+a rank with the next rank skipping ahead, void exclusion, a settled entry
+still included, a malformed (no extension row) entry excluded, `meta`
+correctness, overall-only row shape, upsert-by-id idempotency across
+repeated calls with a changed score, a reinstated entry reappearing with
+no special-case code, and `settle()` writing standings even when nobody
+needs voiding. Live, through the real `compute-scores` and `admin-actions`
+Edge Functions (not a bypass script): five real entries in one pot — an
+exact-score prediction, two tied correct-result predictions, a
+wrong-result prediction, and a fifth, voided entry predicting the same
+exact score as the first — `compute-scores` resolved the four paid
+entries' picks; `admin-actions reinstate_entry` (marking the fifth paid,
+then reinstating it) was the real trigger that first invoked
+`settle()`/`generateStandings()` for this pot at all (confirmed nothing
+had run beforehand) — the resulting standings correctly showed the exact
+tie shape (`rank 1` shared by the two 5-point entries including the
+freshly-reinstated one, `rank 3` shared by the two 3-point entries,
+`rank 5` for the 0-point entry), correct `meta`, and a second
+`reinstate_entry` call (a legitimate retry) left every score and rank
+unchanged rather than duplicating or incrementing anything — 15 checks,
+all passing. All test data removed by exact ID, independently
+re-verified as zero residue.
