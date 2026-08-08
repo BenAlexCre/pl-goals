@@ -2050,3 +2050,79 @@ the same row in place (confirmed by id and by row count — exactly one
 `predictor_fixture_picks` row after both calls); a gameweek whose deadline
 has already passed is correctly rejected — 16 checks, all passing. All test
 data (2 pots, 2 users) removed by exact ID, re-verified as zero rows.
+
+## Score Predictor locking
+
+**Decided 2026-08-08**, Milestone 6 Slice 3, per the repo owner's explicit
+"review Pick 5's and LMS's `lockEntries()` first, justify every similarity
+and every difference against the architecture, don't assume either" —
+same review discipline LMS's own Slice 3 used, applied fresh rather than
+just re-applying LMS's answer.
+
+**Lock the prediction, not the entry, not both — same conclusion as LMS,
+independently derived from the same structural fact, not copied.**
+`game_entries` for Score Predictor is season-scoped (GE-4.5), confirmed by
+Slices 1–2, not an assumption carried over from LMS: one row for the whole
+competition. Locking that row at gameweek 13's deadline would make it
+impossible to ever submit gameweek 14's prediction — the identical problem
+LMS's own architecture review found, because it's the identical shape.
+"Lock both" was considered and rejected: there is no concept, at
+`lockEntries()`'s level, of the entry itself needing to become
+non-submittable — that's `settle()`'s/voiding's job (a future slice,
+explicitly out of scope here), and conflating the two would duplicate a
+concern already owned elsewhere. `PredictorEngine.lockEntries()` sets a new
+column, `predictor_fixture_picks.locked_at` (`018_predictor_fixture_picks_locked_at.sql`),
+mirroring `lms_team_picks.locked_at`'s exact mechanism — nullable, set once
+per gameweek, checked nowhere else yet.
+
+**No pot-id/game-type filter needed, same reasoning as `LmsEngine.lockEntries()`.**
+`predictor_fixture_picks` is written only by `submit-predictor-picks`,
+itself gated to `score_predictor` pots (confirmed in that function's own
+code, not assumed) — every row in this table is already unambiguously
+Score Predictor's, so a direct, unfiltered `UPDATE ... WHERE gameweek_id =
+$1 AND locked_at IS NULL` is correct and sufficient, same as LMS, unlike
+Pick 5's version which genuinely needs `getPick5PotIds()` because
+`game_entries` is shared across every mode.
+
+**`validateEntry()` needed no changes this slice — confirmed, not
+assumed.** Considered whether it should also check
+`predictor_fixture_picks.locked_at` once the column existed. It shouldn't,
+same reasoning as `LmsEngine.validateEntry()`: the live gameweek-deadline
+comparison already already gates submission, and it is strictly at least
+as current as `locked_at` can ever be (`locked_at` is only set by the next
+`lockEntries()` cron tick, which by definition runs *after* the deadline
+has passed, never before it) — checking both would be redundant, not
+additionally protective. `locked_at` exists as an explicit, queryable "is
+this final" signal for `calculateScore()`/`settle()` (future slices), not
+as a second submission gate.
+
+**No shared-scheduler discovery bug, unlike the one Milestone 5 Slice 3
+found and fixed for LMS.** Verified, not assumed: `compute-deadlines`'s
+dispatch loop (`ALL_GAME_TYPES` + `isRegistered()` + unconditional
+`lockEntries()` call per registered mode) was already fully generic —
+Milestone 5 Slice 3 had already replaced the old
+`game_entries.gameweek_id`-based pre-filter that couldn't have discovered
+a season-scoped mode. The only gap found was narrower and different in
+kind: `compute-deadlines`'s own module never imported
+`_shared/game-engine/predictor/index.ts`, so `registerEngine('score_predictor', ...)`'s
+side effect never ran within that Edge Function's own process, and
+`isRegistered('score_predictor')` was therefore `false` there regardless of
+what the dispatch loop itself did. Not a query silently excluding a whole
+mode (the LMS bug's shape) — a missing registration import, exactly what
+`compute-deadlines`'s own comment (written during Milestone 5 Slice 3)
+already anticipated needing: "Predictor's import lands in Milestone 6...
+with no further changes here." One line added; the dispatch loop itself
+is untouched, still has zero mode-specific branching.
+
+**Verified:** 4 new `lockEntries()` unit tests (233/233 across the whole
+`supabase/functions/` tree, no regressions). Live, through the real
+`compute-deadlines` Edge Function (not a bypass script, matching LMS's own
+Slice 3 standard) against two real, already-existing gameweeks — one whose
+deadline has already passed (gameweek 9), one that isn't due yet (gameweek
+28), no fabricated dates needed: both seeded picks start unlocked; after
+one real `compute-deadlines` call, the past-deadline gameweek's pick is
+locked and the not-yet-due gameweek's pick remains unlocked; a second real
+call leaves the already-locked pick's `locked_at` value unchanged
+(idempotent, not re-locked) — 7 checks, all passing. All test data (1 pot,
+1 user) removed by exact ID, re-verified as zero rows across every table
+touched, independently of the script's own cleanup report.

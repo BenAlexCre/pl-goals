@@ -3,11 +3,24 @@ import { corsHeaders } from '../_shared/cors.ts'
 import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
 // Side-effecting imports — register each mode with the dispatcher (GE-7/
-// GE-18). Predictor's import lands in Milestone 6 and this function's
-// dispatch loop below picks it up automatically, with no further changes
-// here.
+// GE-18). Milestone 6 Slice 3: added the predictor import below — this is
+// the ONLY change this file needed for Score Predictor locking. Confirmed
+// before writing any Predictor locking code (not discovered by a live
+// failure): the dispatch loop itself already had zero mode-specific
+// branching and zero discovery bug (the ALL_GAME_TYPES/isRegistered()
+// rewrite below is what Milestone 5 Slice 3 already fixed for LMS, and it
+// generalizes to any mode with no further change) — the only reason
+// resolveEngine('score_predictor') would ever have failed here is that
+// nothing in this function's own module graph ever imported
+// predictor/index.ts, so registerEngine('score_predictor', ...) never ran
+// within this specific Edge Function's process. Not a "discovery" bug in
+// the LMS sense (a query silently excluding a whole mode) — a plain
+// missing registration import, exactly what this comment block's own
+// prior version already anticipated ("Predictor's import lands in
+// Milestone 6... with no further changes here").
 import '../_shared/game-engine/pick5/index.ts'
 import '../_shared/game-engine/lms/index.ts'
+import '../_shared/game-engine/predictor/index.ts'
 
 // Milestone 4, Slice 3 — docs/game-engine.md § GE-6 (lockEntries) / GE-8.2
 // (Locking flow) / GE-19 (sequence diagram, which names this exact function

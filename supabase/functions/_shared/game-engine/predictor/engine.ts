@@ -1,8 +1,8 @@
 // Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2)
-// is implemented — every other GameEngine method still throws
-// GameEngineNotImplementedError, same "half-built mode fails loudly"
-// pattern Pick5Engine/LmsEngine used between their own Slice 2 and later
-// slices.
+// and lockEntries (Slice 3) are implemented — every other GameEngine method
+// still throws GameEngineNotImplementedError, same "half-built mode fails
+// loudly" pattern Pick5Engine/LmsEngine used between their own early slices
+// and later ones.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -105,6 +105,17 @@ export class PredictorEngine implements GameEngine {
       throw new PredictorValidationError(`Gameweek ${gameweekId}'s deadline has passed — this pick can no longer be made or changed`)
     }
 
+    // Milestone 6 Slice 3: deliberately does NOT also check
+    // predictor_fixture_picks.locked_at here, even though lockEntries()
+    // (below) now sets it. Same reasoning as LmsEngine.validateEntry():
+    // this live deadline comparison is already the actual enforcement
+    // mechanism, and it's strictly at least as current as locked_at can
+    // ever be (locked_at is only set by the next lockEntries() cron tick,
+    // which runs after the deadline, never before it) — checking both
+    // would be redundant, not additionally protective. locked_at exists as
+    // an explicit, queryable "is this final" signal for calculateScore()/
+    // settle() (future slices), not as a second gate here.
+
     // GE-5.3: "one fixture predicted per gameweek" — the fixture must
     // actually belong to the gameweek being predicted, not merely exist.
     const { data: fixture, error: fixtureError } = await ctx.supabase
@@ -146,8 +157,38 @@ export class PredictorEngine implements GameEngine {
     }
   }
 
-  async lockEntries(_ctx: GameEngineContext, _gameweekId: number): Promise<number> {
-    throw new GameEngineNotImplementedError('score_predictor', 'lockEntries')
+  // GE-6: "Transition eligible [picks] from pending to locked" — for Score
+  // Predictor that's predictor_fixture_picks.locked_at, not
+  // game_entries.status. Not copied from LmsEngine.lockEntries() — the
+  // same structural fact independently forces the same conclusion: a
+  // season-scoped game_entries row (GE-4.5, confirmed by Slices 1-2) has no
+  // life tied to any one gameweek, so locking it at gameweek 13's deadline
+  // would make it impossible to ever submit a prediction for gameweek 14.
+  // What actually needs to become immutable at a deadline is this specific
+  // gameweek's prediction, not the season-long entry. "Lock both" was
+  // considered and rejected too — there is no concept, at lockEntries()'s
+  // level, of the entry itself needing to become non-submittable; that's
+  // settle()'s/voiding's job, out of scope for this slice, and conflating
+  // the two would duplicate a concern already owned elsewhere. See
+  // docs/decisions.md § Score Predictor locking.
+  //
+  // No pot-id/game-type filter needed, same reasoning as LmsEngine's own
+  // version: predictor_fixture_picks is written only by
+  // submit-predictor-picks, itself gated to score_predictor pots, so every
+  // row in this table is already unambiguously Score Predictor's.
+  async lockEntries(ctx: GameEngineContext, gameweekId: number): Promise<number> {
+    const { data: locked, error } = await ctx.supabase
+      .from('predictor_fixture_picks')
+      .update({ locked_at: ctx.now().toISOString() })
+      .eq('gameweek_id', gameweekId)
+      .is('locked_at', null)
+      .select('id')
+
+    if (error) {
+      throw new Error(`Failed to lock predictor picks: ${error.message}`)
+    }
+
+    return locked?.length ?? 0
   }
 
   async calculateScore(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {

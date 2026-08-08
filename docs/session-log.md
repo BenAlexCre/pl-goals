@@ -13,6 +13,73 @@ from here.
 
 ---
 
+## 2026-08-08 (43) — Milestone 6 Slice 3: Score Predictor locking
+
+**Goal:** Slice 3 only — `PredictorEngine.lockEntries()`, any required
+`compute-deadlines` wiring, any validation changes locking requires. No
+scoring, settlement, standings, winner determination, prize awarding, or
+notifications. Review Pick 5's and LMS's `lockEntries()` first; do not
+assume Score Predictor matches either; justify every similarity and
+difference against the architecture.
+
+**Reviewed first, per instruction:** everything shipped so far for Score
+Predictor (Slices 1-2); `game-engine.md`, `business-rules.md`,
+`decisions.md`, `current-state.md` fresh; `Pick5Engine.lockEntries()` and
+`LmsEngine.lockEntries()`'s current code, not memory.
+
+**Lock the prediction, not the entry, not both.** `game_entries` for Score
+Predictor is season-scoped (GE-4.5, confirmed by Slices 1-2's own work) —
+locking it at one gameweek's deadline would permanently block every future
+gameweek's submission. Same conclusion LMS reached in its own Slice 3,
+reached independently here from the same structural fact, not copied —
+full "entry vs. prediction vs. both" reasoning in decisions.md. Added
+`predictor_fixture_picks.locked_at` (`018_predictor_fixture_picks_locked_at.sql`,
+mirrors `016_lms_team_picks_locked_at.sql` exactly). No pot-id filter
+needed in `lockEntries()` itself — `predictor_fixture_picks` is written
+only by `submit-predictor-picks`, already gated to `score_predictor` pots,
+so every row is unambiguously Predictor's, same reasoning as LMS.
+
+**`validateEntry()` needed no changes — confirmed by reasoning it through,
+not assumed.** Considered checking `predictor_fixture_picks.locked_at`
+there too; rejected, same reasoning as LMS: the existing live
+deadline comparison is always at least as current as `locked_at`, since
+`locked_at` can only ever be set *after* that same deadline has passed.
+Checking both would be redundant, not additionally protective.
+
+**No LMS-style discovery bug found in `compute-deadlines` — checked, not
+assumed clean.** Milestone 5 Slice 3 already replaced the old
+`game_entries.gameweek_id`-based pre-filter with a fully generic
+"call every registered mode's `lockEntries()`" loop; that loop already
+listed `score_predictor` in its `ALL_GAME_TYPES` constant. The only actual
+gap: `compute-deadlines`'s own module never imported
+`predictor/index.ts`, so `registerEngine('score_predictor', ...)`'s side
+effect never ran within that function's own process — `isRegistered('score_predictor')`
+was `false` there regardless of the dispatch loop's own correctness. One
+import line added; the dispatch loop itself untouched, zero mode-specific
+branching introduced.
+
+**Verified:** 4 new unit tests (233/233 across the whole
+`supabase/functions/` tree, no regressions). Live, through the real
+`compute-deadlines` Edge Function (not a bypass script) against two real,
+already-existing gameweeks — one whose deadline has already passed
+(gameweek 9), one not yet due (gameweek 28), no fabricated dates needed:
+both seeded picks start unlocked; one real `compute-deadlines` call locks
+the past-deadline one and leaves the other alone; a second real call
+leaves the already-locked `locked_at` value unchanged (idempotent) — 7
+checks, all passing. All test data (1 pot, 1 user) removed by exact ID; an
+independent residue check (not just the script's own report) confirmed
+zero rows across `pots`/`game_entries`/`predictor_fixture_picks`/`auth.users`.
+
+**Documentation updated:** `game-engine.md` (GE-8.2, GE-9, GE-12, GE-17),
+`decisions.md` (new ADR, § Score Predictor locking), `project-board.md`
+(Slice 3 moved to Done).
+
+**Status:** Slice 3 implemented and fully verified, migration applied.
+Nothing committed, per explicit instruction. Stopping here — Slice 4 not
+started.
+
+---
+
 ## 2026-08-06 (42) — Milestone 6 Slice 2: Score Predictor pick submission
 
 **Goal:** begin Slice 2 without assuming Score Predictor mirrors either

@@ -229,3 +229,85 @@ Deno.test('rejects a goalscorer who is not on either team in the fixture', async
     PredictorValidationError
   )
 })
+
+// --- lockEntries() -------------------------------------------------------
+// Milestone 6 Slice 3. Same fake-shape and same four scenarios as
+// LmsEngine.lockEntries()'s own test suite (not copied blindly — the same
+// mechanism, predictor_fixture_picks.locked_at, drives the same four
+// behaviors: lock what's due and unlocked, leave other gameweeks alone,
+// don't re-lock, no-op when there's nothing to lock).
+
+interface FakePickRow {
+  id: number
+  gameweek_id: number
+  locked_at: string | null
+}
+
+function fakeLockEntriesContext(picks: FakePickRow[]): GameEngineContext {
+  const fakeSupabase = {
+    from(table: string) {
+      if (table !== 'predictor_fixture_picks') {
+        throw new Error(`Unexpected table in test fake: ${table}`)
+      }
+      return {
+        update: (patch: { locked_at: string }) => ({
+          eq: (_col: string, gameweekId: number) => ({
+            is: (_col2: string, _val: null) => ({
+              select: () => {
+                const matched = picks.filter((p) => p.gameweek_id === gameweekId && p.locked_at === null)
+                matched.forEach((p) => { p.locked_at = patch.locked_at })
+                return Promise.resolve({ data: matched.map((p) => ({ id: p.id })), error: null })
+              },
+            }),
+          }),
+        }),
+      }
+    },
+  }
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => new Date('2026-06-01T00:00:00Z') }
+}
+
+Deno.test('lockEntries locks not-yet-locked picks for the given gameweek and returns the count', async () => {
+  const engine = new PredictorEngine()
+  const picks: FakePickRow[] = [
+    { id: 1, gameweek_id: 13, locked_at: null },
+    { id: 2, gameweek_id: 13, locked_at: null },
+  ]
+  const ctx = fakeLockEntriesContext(picks)
+
+  const count = await engine.lockEntries(ctx, 13)
+
+  assertEquals(count, 2)
+  assertEquals(picks.every((p) => p.locked_at === '2026-06-01T00:00:00.000Z'), true)
+})
+
+Deno.test('lockEntries does not touch picks for a different gameweek', async () => {
+  const engine = new PredictorEngine()
+  const picks: FakePickRow[] = [{ id: 1, gameweek_id: 14, locked_at: null }]
+  const ctx = fakeLockEntriesContext(picks)
+
+  const count = await engine.lockEntries(ctx, 13)
+
+  assertEquals(count, 0)
+  assertEquals(picks[0].locked_at, null)
+})
+
+Deno.test('lockEntries does not re-lock a pick that is already locked', async () => {
+  const engine = new PredictorEngine()
+  const picks: FakePickRow[] = [{ id: 1, gameweek_id: 13, locked_at: '2020-01-01T00:00:00.000Z' }]
+  const ctx = fakeLockEntriesContext(picks)
+
+  const count = await engine.lockEntries(ctx, 13)
+
+  assertEquals(count, 0)
+  assertEquals(picks[0].locked_at, '2020-01-01T00:00:00.000Z')
+})
+
+Deno.test('lockEntries returns 0 when there are no picks at all for the gameweek', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeLockEntriesContext([])
+
+  const count = await engine.lockEntries(ctx, 13)
+
+  assertEquals(count, 0)
+})

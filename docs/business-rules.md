@@ -347,10 +347,12 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-2: entry creation, pick submission).**
-Scoring, winner determination, and prize awarding are not built yet — see
-[decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review)
-and [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2)
+decided and shipped so far (Slices 1-3: entry creation, pick submission,
+locking).** Scoring, winner determination, and prize awarding are not
+built yet — see
+[decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
+[§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
+and [§ Score Predictor locking](./decisions.md#score-predictor-locking)
 for the full reasoning and everything still genuinely undecided.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
