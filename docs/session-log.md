@@ -13,6 +13,303 @@ from here.
 
 ---
 
+## 2026-08-06 (42) — Milestone 6 Slice 2: Score Predictor pick submission
+
+**Goal:** begin Slice 2 without assuming Score Predictor mirrors either
+Pick 5 or LMS. First, a focused review of the five open product questions
+from Slice 1, resolving or deferring each with reasoning; only after that,
+design the schema, migrate, and implement.
+
+**Flagged immediately, not resolved by this session:** the repo owner's
+claim that three prior bodies of work (Game Engine Hardening, Milestone 6
+Slice 1, Production Hardening Sprint) were "committed separately" did not
+match `git log`/`git reflog` — HEAD was still the same pre-hardening commit,
+with the 6 Game Engine Hardening files staged but never committed, and the
+other two bodies of work still just sitting as unstaged/untracked edits.
+Third such discrepancy this project. Did not attempt to fix git state
+myself; proceeded with the requested technical work regardless, since
+nothing was lost either way.
+
+**Five questions, re-examined against GE-5.3's exact text, not memory —
+one new fact changed the read:** "`predictor_cycle_mode` already lets a pot
+choose `two_halves` vs. `single_cycle` **reuse restriction**" confirms a
+reuse restriction is real, not purely inferred from the unreliable retired
+prototype, though still underspecified (which predictions? how is "half"
+computed?).
+- **Draw representation** — resolved by design: store one scoreline, not a
+  separate winner column; a draw is simply equal predicted scores. Derived
+  from GE-5.3's own "5 points exact score, OR 3 for correct winner
+  (mutually exclusive)" — only coherent if both are evaluated against one
+  prediction. Not asked — grounded in already-approved text, not invented.
+- **Goalscorer mandatory or optional** — genuine product decision, asked
+  directly via `AskUserQuestion`. **Decided: optional.**
+- **Scorer bonus point value** — confirmed not to block this slice (only
+  `calculateScore()`, a future slice, needs it).
+- **`predictor_cycle_mode = 'two_halves'` semantics** — partially resolved:
+  the reuse restriction is real but underspecified, so this slice ships
+  without enforcing any reuse restriction at all, flagged as a real,
+  known gap rather than guessed at (same discipline
+  `013_lms_wipeout_and_rollover.sql`'s own predecessor draft should have
+  used and didn't, requiring a full revision later).
+- **Entry-window rule** — confirmed not to apply to pick submission at all
+  (it's an entry-*creation*, Slice 1 concern).
+
+**Schema:** `017_predictor_picks.sql` applied — `predictor_fixture_picks`
+table (named to dodge the retired prototype's own `predictor_picks`
+collision, confirmed live before writing the migration, same pattern
+`lms_team_picks` used). Mirrors `pick5_picks`/`lms_team_picks` wherever
+genuinely shared (service-role-only writes, cascade from `game_entries`,
+`updated_at` trigger, one SELECT policy scoped to pot membership);
+diverges where Score Predictor's own rules differ: `fixture_id` (a
+gameweek has multiple fixtures, the user picks one), a scoreline instead
+of a winner column, a nullable `goalscorer_player_id`, no `half_cycle`
+column or reuse-restricting constraint (deferred, see above), and
+deliberately no `result pick_result` column — `pick_result`'s won/lost
+vocabulary doesn't fit a point-valued outcome; `points_awarded` null vs.
+populated already distinguishes unresolved from resolved.
+
+**Implemented:** `_shared/game-engine/predictor/` (new — `PredictorEngine`,
+`PredictorValidationError`, registered with the dispatcher).
+`PredictorEngine.validateEntry()`: entry status, live per-gameweek
+deadline (season-scoped entry, same reasoning as LMS), fixture-belongs-
+to-gameweek (a genuinely new check neither Pick 5 nor LMS needs), and
+goalscorer eligibility (active player on one of the fixture's two teams)
+when one is provided. No elimination/competitive-status check at all —
+confirmed by `game_entry_predictor`'s own schema, no such column exists.
+`submit-predictor-picks` implemented, mirroring `submit-lms-pick`, with
+the Production Hardening Sprint's malformed-JSON `.catch()` guard built in
+from the start rather than retrofitted.
+
+**Verified:** 25 new unit tests (13 `validateEntry()`, 12 request-shape
+validation) — 229/229 across the whole `supabase/functions/` tree, no
+regressions. Live, through the real Edge Function over HTTP (required a
+full `supabase stop`/`start` cycle for the new function directory): missing
+auth, malformed JSON, missing fields, non-owner, wrong-pot-type,
+fixture/gameweek mismatch, ineligible goalscorer all correctly rejected;
+a valid draw submission (2-2) stores the scoreline exactly with a null
+goalscorer; resubmitting the same gameweek with a new scoreline and an
+eligible goalscorer updates the same row in place (same id, exactly one
+row after both calls); a deadline-passed gameweek correctly rejected — 16
+checks, all passing. All test data (2 pots, 2 users) removed by exact ID,
+re-verified as zero rows.
+
+**Documentation updated:** `game-engine.md` (GE-9, GE-12, GE-17),
+`decisions.md` (new ADR, § Score Predictor pick submission),
+`project-board.md` (Slice 2 moved to Done; Ready updated — reuse
+restriction reframed from "blocked" to "shipped without it, flagged",
+payout model and entry-window items carried over unchanged, scorer bonus
+value added).
+
+**Status:** Slice 2 implemented and fully verified, migration applied.
+Nothing committed, per explicit instruction.
+
+---
+
+## 2026-08-06 (41) — Production Hardening Sprint
+
+**Goal:** comprehensive production-readiness sweep across correctness,
+database, security, operations, API, performance, and documentation — no
+new features, no Milestone 6 continuation, no refactoring for its own sake.
+Fix P0/P1 findings immediately; document P2 findings only.
+
+**P0 — confirmed still live, fixed in local dev, real environments still
+need the same out-of-band action:** the 7 `supabase_admin`-owned prototype
+tables (`ISSUE-20`) still had RLS fully disabled with unrestricted
+`anon`/`authenticated` grants — re-verified fresh, not assumed. Re-confirmed
+the ownership blocker (`ISSUE-21`) empirically: `postgres` cannot `ALTER`
+these tables (`must be owner of table`) or even `REVOKE` grants it didn't
+itself grant (silently no-ops). Fixed locally via a direct `supabase_admin`
+connection (available in local dev only): 6 genuinely dead tables (no code
+references any of them) fully locked down; `fixture_player_status`
+(confirmed actively read by `hooks/useEntry.js`/`useLiveScores.js`) given a
+real `authenticated`-only SELECT policy matching the exact pattern
+`fixtures`/`teams`/`players` already use, with write access revoked. No
+migration added — one would hard-fail under `postgres` on any environment
+with the same ownership split, breaking the whole migration chain for
+future replays. Full tested SQL recorded in `current-state.md` ISSUE-20 for
+whoever has `supabase_admin`-equivalent access on the real environment.
+
+**P1 fixes, implemented:**
+- **Malformed-JSON crash, 6 Edge Functions.** `req.json()` with no
+  `.catch()` guard — confirmed live: malformed JSON with valid auth crashed
+  `get-or-create-{pick5,lms,predictor}-entry`, `submit-{pick5,lms}-pick`,
+  and `admin-actions` with a bare 500, no detail. `settle-gameweek` already
+  had the correct `.catch(() => ({}))` pattern; applied the same fix to the
+  other 6, letting existing downstream validation reject the resulting `{}`
+  as a clean 400 instead. Re-verified live: all 6 now return proper 400s
+  (403 for `admin-actions`, whose validation isn't a dedicated
+  `validateXRequest()` module — acceptable, not a crash either way).
+- **Orphaned, always-failing duplicate cron job.** `sync-live-events-every-5-min`
+  (jobid 7) — confirmed live, 100% failure rate (201/201), a `null value in
+  column "url"` constraint violation from an empty `vault.decrypted_secrets`
+  table. `006_fix_cron_job_headers.sql` already contains a correct
+  `cron.unschedule()` call for this exact job, with the correct reasoning
+  in its own comment — but it never took effect, because this job (like
+  `lock-due-entries-every-minute`) is `supabase_admin`-owned, not
+  `postgres`-owned, and `006`'s `exception when others then null` guard
+  silently swallowed the resulting permission error as if it were the
+  harmless "job doesn't already exist" case. A genuinely new discovery: the
+  `ISSUE-21` ownership split extends to `cron.job` rows, not just
+  tables/types. Fixed locally the same way as the RLS issue — direct
+  `supabase_admin` connection, `cron.unschedule()` succeeded instantly once
+  run as the owning role. Same real-environment caveat.
+
+**P2 findings, documented only (see `current-state.md`/this entry, no code
+changed):** `submit-lms-pick`'s pre-write race-check re-verifies
+`entry.status`, which isn't LMS's actual submission gate (the live gameweek
+deadline is) — a narrow, single-request-latency window, not the
+multi-minute window Pick 5's identical-looking check actually closes; no
+data corruption results either way. `admin-actions`' `mark_unpaid` writes
+to the legacy `user_entries` table (dead — nothing reads it) with its
+result unchecked. `compute-scores`/`settle-gameweek` still run the retired
+prototype's `user_entries`-based scoring in parallel with the Game Engine
+dispatch, against 1 stale pre-cutover row — confirmed still true, no
+functional risk, already known. Several foreign-key columns across the
+schema have no covering index — no evidence of an actual slow query at
+current (dev-scale) data volumes; flagged for future-scale awareness, not
+acted on, per the explicit "do not optimise prematurely" instruction.
+
+**Verified:** 204/204 unit tests pass (no regressions — every fix here was
+additive: a `.catch()`, a live SQL correction, no logic changed). Live: the
+malformed-JSON fix re-tested against all 6 functions (400s, not 500s); the
+`fixture_player_status` RLS fix re-tested (authenticated read still works,
+anonymous read/write now correctly denied); a spot-check anonymous write
+against `lms_picks` denied the same way; the orphaned cron job's removal
+confirmed via `cron.job` (6 jobs remain, all either succeeding or already
+tracked under `ISSUE-4`). All test users/pots from this session's checks
+removed by exact ID, re-verified as zero rows.
+
+**Documentation updated:** `current-state.md` (`ISSUE-20`/`ISSUE-21`, new
+verified remediation SQL and the cron-ownership discovery), `project-board.md`.
+
+**Status:** all P0/P1 findings addressed (locally, for the two
+privilege-blocked ones — real environments need the documented SQL run
+separately). Nothing committed, per explicit instruction.
+
+---
+
+## 2026-08-06 (40) — Milestone 6 kickoff: Score Predictor architecture review + Slice 1
+
+**Goal:** Milestone 5 complete. Do not begin Milestone 6 Slice 1 without
+first reviewing Score Predictor's product rules, comparing all eight
+`GameEngine` methods against Pick 5/LMS, reviewing the schema, and drafting
+a migration only if genuinely needed — flagging genuine product questions
+rather than inventing behaviour, and not forcing Score Predictor into
+either existing mode's shape.
+
+**Architecture review, done first, no code written until it was complete.**
+Read GE-1's one-line vision, GE-5.3 (three sentences — the thinnest of the
+three mode sections), the already-applied `predictor_cycle_mode`/
+`predictor_scorer_scope` columns and `game_entry_predictor` table, the
+`pot_prizes` lazy-creation ADR's forward note about Predictor's "variable
+half-cycle/full-cycle boundaries," and the retired prototype's
+`predictor_picks` table shape (evidence of intent only, per ISSUE-20 — never
+reused). `business-rules.md` has no Score Predictor section at all, unlike
+LMS's, which was drafted and revised three times before its own Slice 1.
+
+**Five genuine, undecided product questions found and flagged, not
+invented:** how a draw is predicted (the prototype's
+`predicted_winner_team_id` is `NOT NULL`, no visible draw mechanism); whether
+the goalscorer prediction is mandatory; what the scorer bonus is actually
+worth in points (GE-5.3 never says); what `predictor_cycle_mode = 'two_halves'`
+means for payouts (two conflicting pieces of existing evidence — the
+lazy-creation ADR implies two possible payout boundaries, but the prototype
+only ever had one `settle_predictor_season` function, no
+`settle_predictor_half`); and whether Score Predictor needs an entry-window
+rule at all (a real, if softer, version of LMS's late-joiner fairness
+problem, but `pots` has no column for Predictor to check against yet). None
+of these block Slice 1.
+
+**Method-by-method comparison, all eight `GameEngine` methods:**
+`validateEntry()`/`lockEntries()`/`calculateScore()`/`settle()` all closer to
+LMS's season-scoped shape (structurally, not code-for-code); `generateStandings()`
+closer to Pick 5's shape (a real cumulative score to rank by, unlike LMS's
+alive/eliminated ranking); `determineWinner()`/`awardPrize()` closer to
+LMS's shape but genuinely blocked on the `two_halves` payout question;
+`notifyUsers()` fully reusable as a pattern. Full table in decisions.md.
+
+**Schema review:** every genuinely shared platform table already exists and
+needs no changes. Missing: a picks table — deliberately not designed or
+migrated this slice, since its correct shape depends directly on the draw/
+goalscorer/scorer-bonus questions above; drafting it now risked either
+inventing an answer to a real product question or repeating migration 013's
+own history of needing revision once an early assumption was overturned.
+**No migration drafted.**
+
+**Implemented — Slice 1 only, entry creation:** `get-or-create-predictor-entry`,
+mirroring `get-or-create-lms-entry`'s season-scoped shape (`entry_scope='season'`,
+`game_entry_predictor` extension row) but deliberately without an
+entry-window check, per the open question above. No `PredictorEngine` class
+yet, mirroring exactly when Pick 5's and LMS's own Game Engine classes first
+appeared (Slice 2). No schema change — `game_entries`/`game_entry_predictor`
+already existed.
+
+**Verified:** 4 new unit tests (204/204 across the whole `supabase/functions/`
+tree). Live, through the real Edge Function over HTTP (required a full
+`supabase stop`/`start` cycle for the new function directory to be served,
+the same local-dev mechanic LMS's own Slice 1 first documented): missing
+`pot_id`, missing auth, a `pick5`-typed pot, and a non-member all correctly
+rejected; entry creation and idempotency confirmed (same entry id, exactly
+one `game_entries` row after both calls) — 9 checks, all passing. All test
+data (2 pots, 2 users) removed by exact ID, re-verified as zero rows.
+
+**Documentation updated:** `game-engine.md` (GE-12 milestone table, GE-9,
+GE-17), `decisions.md` (new ADR, § Score Predictor architecture review),
+`project-board.md` (Slice 1 moved to Done; Ready updated with the three
+schema/payout/entry-window open questions).
+
+**Status:** Slice 1 implemented and fully verified, no migration needed.
+Nothing committed, per explicit instruction. Slice 2 (`validateEntry()`,
+the picks table) is next, and is genuinely blocked on product decisions,
+not just unstarted.
+
+---
+
+## 2026-08-06 (39) — Hardening sprint: settle() partial-write risk (both engines) + Pick5 awardPrize() transactionality
+
+**Goal:** the read-only architecture review (previous entry) identified two
+P0 correctness risks. Fix only those, plus one P1 documentation correction,
+nothing else — no Milestone 6, no refactoring for cleanliness, no shared
+helper extraction.
+
+**P0-1, both engines' `settle()`:** unpaid entries were voided (`game_entries.status='void'`)
+*before* their picks were voided. Since the entries query selects by status
+(`locked`/`pending`), a voided entry drops out of that selection permanently
+— a failure on the picks write after the entries write succeeded left the
+entry stuck void with un-voided picks and no way for any retry to find it
+again. Fixed by reversing the order: picks voided first (a failure there
+leaves the entry untouched, still selectable), entries voided second (a
+failure there leaves picks already-void, a harmless idempotent state, entry
+still selectable). Same fix, both engines.
+
+**P0-2, `Pick5Engine.awardPrize()`:** applied the identical transactionality
+correction already made to `LmsEngine.awardPrize()` — the `pot_prizes` write
+(the idempotency gate) now runs last, after the payout loop, not first.
+Found and fixed in the same code path: the update/insert error handlers were
+throwing `Pick5PrizePoolExceededError` for *any* write failure, not just the
+fee-exceeds-gross case that error class actually means — now throws a
+generic `Error`, matching LMS's own pattern.
+
+**P1:** removed the stale "DESIGN ONLY — NOT APPLIED" / "NOT YET APPLIED AT
+TIME OF WRITING" header wording from `010_prize_pool_deductions.sql` and
+`013_lms_wipeout_and_rollover.sql` (both confirmed applied via
+`supabase_migrations.schema_migrations`). Comment-only, no SQL statement
+touched — an explicit, narrow, repo-owner-instructed exception to the
+general "never modify applied migrations" rule.
+
+**Verified:** 6 new failure-injection unit tests (2 per `settle()`
+implementation from both failure angles, 2 for `Pick5Engine.awardPrize()`'s
+retry-safety and the error-class fix) — 148/148 across `game-engine/`, no
+regressions. Live, against the real database: three scenarios each seeded to
+the exact partial state a mid-sequence crash would leave, then confirmed to
+complete correctly on the next call — 6 checks, all passing. All test data
+removed by exact ID.
+
+**Status:** implemented and fully verified. **Committed and pushed** —
+confirmed by the repo owner at the start of the next session.
+
+---
+
 ## 2026-08-06 (38) — Milestone 5 Slice 9: LMS notifications, plus a transactionality correction
 
 **Goal:** Slice 8 was reviewed, approved, committed, and pushed. Before

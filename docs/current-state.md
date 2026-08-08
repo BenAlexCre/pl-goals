@@ -256,6 +256,62 @@ remains exploitable until the prototype objects are actually dropped or their
 ownership is resolved. Treat as live and urgent independent of the Game Engine
 rebuild's timeline.
 
+**Fixed in local dev, 2026-08-06 (production hardening sprint) — re-verified
+the ownership blocker empirically first** (`alter table
+public.whoscored_fixture_map_staging enable row level security;` as
+`postgres` fails live with `ERROR: must be owner of table
+whoscored_fixture_map_staging`; `revoke` as `postgres` silently no-ops with
+`WARNING: no privileges could be revoked`, since `postgres` isn't the
+grantor either — confirmed via `pg_roles`: `supabase_admin` is
+`rolsuper=true`, `postgres` is not). **This cannot be fixed via a normal
+`postgres`-run migration in any environment with the same ownership split**
+— not a gap in this project's migration authorship, a hard platform
+permission wall. Local dev happens to allow a direct `psql -U
+supabase_admin` connection (not available against a real hosted project),
+which was used to apply and verify the fix locally:
+
+```sql
+-- The 6 genuinely dead prototype tables (no application code references any
+-- of them — confirmed by repo-wide grep before applying).
+alter table public.gameweek_pots enable row level security;
+alter table public.lms_entries enable row level security;
+alter table public.lms_picks enable row level security;
+alter table public.predictor_entries enable row level security;
+alter table public.predictor_picks enable row level security;
+alter table public.whoscored_fixture_map_staging enable row level security;
+revoke all on public.gameweek_pots from anon, authenticated;
+revoke all on public.lms_entries from anon, authenticated;
+revoke all on public.lms_picks from anon, authenticated;
+revoke all on public.predictor_entries from anon, authenticated;
+revoke all on public.predictor_picks from anon, authenticated;
+revoke all on public.whoscored_fixture_map_staging from anon, authenticated;
+
+-- fixture_player_status IS actively read by the frontend
+-- (hooks/useEntry.js, hooks/useLiveScores.js) — needs a real SELECT policy,
+-- not a full lockdown. Mirrors the exact policy shape/naming already used
+-- for fixtures/teams/players (reference_data_read_<table>, authenticated
+-- only, using (true)).
+alter table public.fixture_player_status enable row level security;
+create policy "reference_data_read_fixture_player_status"
+  on public.fixture_player_status for select
+  to authenticated
+  using (true);
+revoke insert, update, delete, truncate, references, trigger on public.fixture_player_status from anon, authenticated;
+revoke select on public.fixture_player_status from anon;
+```
+
+Verified live, post-fix: an authenticated client can still read
+`fixture_player_status` (0 rows currently, no RLS error); an anonymous
+client is denied both read and write on it (`permission denied for table
+fixture_player_status`); anonymous write to `lms_picks` (spot-checked) is
+denied the same way. **This SQL still needs to be run, by someone with
+`supabase_admin`-equivalent access, against every real (non-local-dev)
+environment** — local dev's fix does not propagate anywhere by itself.
+Local-only, not captured in any migration (a migration containing this SQL
+would hard-fail under `postgres` on every environment with the same
+ownership split, breaking the whole migration chain for anyone replaying
+it — worse than leaving the gap documented here).
+
 #### ISSUE-21 — `postgres` role cannot alter `supabase_admin`-owned prototype objects
 **Confirmed live**, 2026-08-03. Every object identified as "missing migration" in the
 drift investigation (7 tables, 11 functions, 1 debug view) is owned by
@@ -279,6 +335,36 @@ columns/tables reference — genuinely needs the Supabase Dashboard's delete UI 
 privilege level that created these objects) or a Supabase support request. Blocks
 both ISSUE-20's permanent fix and applying `004`/`005`. See `session-log.md` for the
 full remediation plan, including which Dashboard surface to try first.
+
+**New object class found in the same ownership split, 2026-08-06 (production
+hardening sprint): `cron.job` rows, not just tables/types.** `lock-due-entries-every-minute`
+(jobid 6) and, until fixed today, `sync-live-events-every-5-min` (jobid 7)
+were both owned by `supabase_admin` (`cron.job.username`), not `postgres` —
+confirmed via `select jobid, jobname, username from cron.job`. This is why
+`006_fix_cron_job_headers.sql`'s own `cron.unschedule('sync-live-events-every-5-min')`
+call — wrapped in `exception when others then null` to tolerate the job
+simply not existing — silently swallowed a **different** error
+(`could not find valid entry for job`, pg_cron's actual message when the
+calling role doesn't own the job) as if it were that harmless case. The
+migration's own comment already correctly identified this exact job as "a
+redundant, differently-broken duplicate... already recommended for removal,"
+but the removal never actually took effect, and nothing surfaced that
+silently, since `DO` blocks don't report caught exceptions. Confirmed live:
+`sync-live-events-every-5-min` was still active and failing on every run
+(100% failure, 201/201 in `cron.job_run_details`) — a `null value in
+column "url"` constraint violation from an empty `vault.decrypted_secrets`
+table, not even reaching the network. **Fixed locally** via
+`psql -U supabase_admin -c "select cron.unschedule('sync-live-events-every-5-min');"`
+(succeeded instantly once run as the actual owning role) — `lock-due-entries-every-minute`
+was left alone since it's functioning correctly (1009/1009 succeeded,
+already documented as calling a harmless legacy SQL function on frozen
+data). Same real-environment caveat as the RLS fix above: this specific
+unschedule needs the same out-of-band action repeated wherever this
+project is actually deployed; `006`'s own migration file is not modified
+(the unschedule call it already contains is correct — it just can't
+succeed under `postgres`'s privileges, the same wall this whole issue
+describes) and should not be re-run either way, since migrations aren't
+replayed.
 
 **Execution attempt, 2026-08-03 (evening session):** ran the reviewed six-object
 isolation transaction (2 type renames + 4 column drops) as a single `begin`/`commit`

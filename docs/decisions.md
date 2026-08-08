@@ -1747,3 +1747,306 @@ survivor writes exactly one notification, for the winner, with the
 correct payout amount in its payload; `awardPrize()` for a `roll_prize`
 wipeout writes none. 7 checks, all passing; all test data removed by
 exact ID, re-verified as zero rows.
+
+## Score Predictor architecture review
+
+**Decided 2026-08-06**, Milestone 6 kickoff, before any `PredictorEngine` code
+was written. Per the repo owner's explicit instruction: review the existing
+product rules, compare Score Predictor against Pick 5 and LMS method-by-method,
+review the schema, draft a migration only if genuinely needed, flag genuine
+product questions rather than inventing behaviour, and do not force Score
+Predictor into either existing mode's shape.
+
+**Sources reviewed.** GE-1's one-line product vision ("Predict one fixture per
+gameweek — exact score, winner, goalscorer; cumulative points across the
+season; top scorer(s) split the pot at season end"); GE-5.3 (three sentences —
+the thinnest of the three mode sections, confirming Predictor genuinely has
+less approved design behind it than LMS did going into Milestone 5); the
+already-applied `pots.predictor_cycle_mode`/`predictor_scorer_scope` columns
+and their comments (`004_game_engine_shared_platform.sql`); the already-applied
+`game_entry_predictor` table; the `pot_prizes` lazy-creation ADR's forward
+note about "LMS's season-long single payout and **Score Predictor's variable
+half-cycle/full-cycle boundaries**"; and the retired prototype's
+`predictor_picks` table shape (`supabase_admin`-owned, 0 rows, ISSUE-20 — read
+as evidence of prior design intent only, never as something to reuse or
+depend on, same stance this whole rebuild has taken toward every retired
+prototype object). `business-rules.md` has **no Score Predictor section at
+all** — unlike LMS, which had an extensive one drafted and revised three
+times before its own Slice 1 shipped. This is the clearest single signal that
+Predictor needs more product decisions made than LMS did, not fewer.
+
+**What's well-evidenced enough to proceed on (not invented — derived from
+already-applied schema and the one-line product vision):**
+- **Entry lifecycle is season-scoped**, like LMS, not gameweek-scoped like
+  Pick 5. `game_entry_predictor` (existing since Milestone 2) has no gameweek
+  dimension at all — a single aggregate row per entry
+  (`total_points`/`exact_score_count`/`correct_scorer_count`) — the same
+  shape `game_entry_lms` has, for the same reason: "cumulative points across
+  the season" (GE-1) cannot be represented as a per-gameweek row the way
+  Pick 5's `game_entry_pick5.picks_won` is.
+- **One fixture predicted per gameweek** — GE-5.3 states this directly, and
+  the retired prototype's `predictor_picks_entry_id_gameweek_id_key` unique
+  constraint independently confirms it.
+- **Scoring has two mutually exclusive point sources plus a bonus** — exact
+  score (5 pts) OR correct winner (3 pts), never both for the same
+  prediction, plus a scorer bonus whose *scope* (does the predicted scorer
+  need to have scored in the predicted fixture specifically, or anywhere in
+  that gameweek) is the already-decided, already-applied
+  `predictor_scorer_scope` setting.
+- **No elimination concept** — every entry stays in until the season ends;
+  ranking is by cumulative `total_points`, not a survive/eliminate mechanic.
+  This is the one point where Predictor is unambiguously closer to Pick 5's
+  shape (a persistent, cumulative score) than LMS's (entries can drop out).
+
+**Genuine product questions found, flagged, not invented — these block
+later slices, not Slice 1:**
+1. **How is a draw predicted?** The retired prototype's
+   `predicted_winner_team_id` column is `NOT NULL` — no visible mechanism for
+   predicting "no winner." Either the prototype never actually supported
+   draws (a real gap, not a design to copy) or used a convention this
+   codebase has no record of. Blocks designing the picks table and the
+   scoring rule for "correct winner."
+2. **Is the goalscorer prediction mandatory?** The prototype's
+   `goalscorer_player_id` is `NOT NULL`, but GE-5.3 doesn't say whether
+   guessing a scorer is required to submit a valid pick at all, or optional
+   (with no scorer bonus available if skipped).
+3. **What is the scorer bonus actually worth, in points?** GE-5.3 says
+   "plus a scorer bonus" and never states a value. `game_entry_predictor`
+   doesn't even track it as its own counter (only `exact_score_count` and
+   `correct_scorer_count` exist — no `correct_winner_count`), so the
+   points-vs-counters relationship itself isn't fully specified either.
+4. **What does `predictor_cycle_mode = 'two_halves'` actually mean for
+   payouts?** This is the most consequential open question, because two
+   different pieces of existing evidence point in different directions and
+   neither is a settled decision:
+   - The `pot_prizes` lazy-creation ADR's forward note explicitly says
+     "Score Predictor's **variable half-cycle/full-cycle boundaries**,"
+     grouped alongside LMS's "season-long single payout" as parallel
+     examples of "whenever *its* engine decides the season... has ended" —
+     read plainly, this implies a `two_halves` pot might conclude (and pay
+     out) **twice**: once at the halfway point, once at the true season end.
+   - The retired prototype's own settlement functions were
+     `settle_predictor_gameweek` and `settle_predictor_season` — **no**
+     `settle_predictor_half` function ever existed, suggesting the
+     prototype's own design only ever paid out once, at the true season
+     end, and `two_halves` only affected the pick-reuse-restriction reset
+     (the prototype's `half_cycle` column scopes its unique constraints,
+     e.g. "may not predict the same team to win twice in the same half"),
+     never payout timing at all.
+   These two sources conflict. Guessing either way risks building the wrong
+   payout model for a real-money feature — exactly the kind of decision this
+   project's whole discipline (LMS's Wipeout Resolution, Season-End Tie
+   Rule, Final Prediction) has consistently insisted on getting an explicit
+   answer for before writing scoring/payout code. Blocks `awardPrize()`
+   design specifically; does not block Slice 1 or `validateEntry()`.
+5. **Does Score Predictor need an entry-window rule at all?** LMS's
+   `checkEntryWindow()` exists because a late joiner into a survive-or-die
+   competition has an obvious fairness problem RLS/UX can't paper over.
+   Predictor's cumulative-points model has a real, if softer, version of the
+   same problem — a mid-season joiner starts at 0 points, permanently behind
+   anyone who's been predicting since gameweek 1. Whether the product wants
+   to allow this (accepting the asymmetry, same as Pick 5's own "always open"
+   model, which has no such problem since every gameweek restarts the
+   comparison) or block it (LMS's model) is genuinely undecided — and
+   Predictor's `pots` row has neither a `start_gameweek_id` nor a
+   `rollover_source_pot_id` column to hang a check on, unlike LMS's. Not
+   invented here; **Slice 1 ships without an entry-window check**, exactly
+   mirroring LMS's own history — Slice 1 shipped without one too, and the
+   rule (`ISSUE-32`) was decided and added only afterward, once someone
+   asked. If Predictor needs one, it'll need its own new `pots` column(s)
+   first, added in whichever future migration actually decides this.
+
+**Method-by-method comparison against Pick 5 / LMS (GE-6's eight-method
+contract) — what's reusable, what must differ, and whether each is required
+unchanged, adapted, or replaced. Deliberately not answered beyond what's
+needed to plan Slice 1 and the schema — each method's actual design is real
+work for its own future slice, same discipline as every prior mode:**
+
+| Method | Pick 5 shape | LMS shape | Score Predictor — expected shape |
+|---|---|---|---|
+| `validateEntry()` | Exactly 5 non-goalkeeper picks, gameweek-scoped | One team, never repeated across the competition, season-scoped entry + per-gameweek pick | **Adapted, closer to LMS's structure** (season-scoped entry, one pick row written per gameweek) but with genuinely different validation content (fixture/winner/scorer shape, not a team choice) — blocked on open questions 1–2 above |
+| `lockEntries()` | Locks `game_entries.status` per gameweek | Locks the individual pick's own `locked_at`, never the season-long entry (GE-5.2's own reasoning) | **Reuses LMS's reasoning directly, not its code** — season-scoped entry means the entry itself can never lock either; almost certainly a `predictor_picks.locked_at`-shaped column, same reasoning as `lms_team_picks.locked_at` |
+| `calculateScore()` | Resolves each gameweek's picks against goals scored | Resolves each gameweek's pick against the team's result, eliminates on loss/draw | **Adapted** — resolves each gameweek's prediction against the real fixture result (score, winner, scorer), no elimination consequence at all (no analog to LMS's elimination branch) |
+| `settle()` | Payment-void (gameweek-scoped `entry_payments`), then `generateStandings()`+`awardPrize()` per pot | Payment-void (season-scoped `entry_payments`), then `generateStandings()`+`awardPrize()` per pot | **Reuses LMS's shape** (season-scoped payment-void, same `paidKeys` idiom) — genuinely different only in which scope of `entry_payments` it reads, once the payment-model question is settled |
+| `generateStandings()` | Rank by cumulative `picks_won`, ties share a rank, per-gameweek AND overall rows | Alive-tied-at-1 then eliminated-by-recency, overall row only | **Closer to Pick 5's shape than LMS's** — a real cumulative score (`total_points`) exists to rank by, standard "1224" ranking, most likely both per-gameweek and overall rows (a gameweek's individual result is meaningful to show, unlike LMS where there's nothing per-gameweek left to display once eliminated) |
+| `determineWinner()` | Rank-1 of the most recently settled gameweek (repeats every gameweek) | Four-way outcome classification, evaluated once (or, pending question 4, possibly twice) | **Closer to LMS's shape** — a season (or half-cycle) conclusion check, not a per-gameweek jackpot; genuinely blocked on open question 4 |
+| `awardPrize()` | Splits a per-gameweek pool every settled gameweek | Splits or rolls a single season-long pool, once | **Blocked on open question 4** — cannot be designed correctly until "does `two_halves` pay out twice" is answered; building this now would mean guessing at real money logic |
+| `notifyUsers()` | One event type, called after the trailing `pot_prizes` write | Same shape, same placement, reused near-verbatim from Pick 5 | **Fully reusable pattern** — same `notifications` insert shape; only the event type name and payload content would differ, once `awardPrize()` exists |
+
+**Schema review.**
+- **Reusable, already applied, no changes needed:** `pots.game_type = 'score_predictor'`
+  (enum value existing since Milestone 2), `pots.predictor_cycle_mode`/
+  `predictor_scorer_scope`, `game_entries` (season scope, same as LMS),
+  `game_entry_predictor`, `entry_payments` (scope-generic), `pot_prizes`,
+  `pot_standings_snapshots`, `notifications` — every genuinely shared
+  platform table GE-3 already established.
+- **Missing:** a picks table (deliberately not named or designed this slice
+  — see below), and a `locked_at`-equivalent column on it once it exists.
+- **Obsolete prototype table explaining the naming collision:**
+  `predictor_picks` (`supabase_admin`-owned, 0 rows, ISSUE-20) — isolated,
+  not reused, not deleted. Milestone 6's real picks table will need a
+  different name for the same reason `lms_team_picks` dodged the prototype's
+  own `lms_picks` (`015_lms_picks.sql`'s own comment already flagged this
+  collision as "worth remembering then, not solved here since that table
+  doesn't exist yet" — now it does).
+- **Minimum schema addition required, and why it's not drafted yet:** the
+  picks table itself. Deliberately **not** designed or migrated this slice —
+  its correct shape depends directly on open questions 1–3 above (can a pick
+  represent a draw; is the scorer mandatory; what does a "correct winner"
+  actually mean without a resolved draw representation). Migration 013's own
+  history is the cautionary example here: it was drafted, then had to be
+  substantially revised once a payment-model assumption was overturned
+  (see [decisions.md § LMS: multi-generation rollover review](#lms-multi-generation-rollover-review-found-a-real-gap-added-rollover_generation)).
+  Drafting the picks table now, before questions 1–3 are answered, risks the
+  identical rework — or worse, silently encoding an invented answer to a
+  real product question into schema. **No migration accompanies this
+  review.**
+
+**Slice 1 (entry creation) needs none of the above, and ships anyway.**
+Exactly like Pick 5's and LMS's own Slice 1: `get-or-create-predictor-entry`
+only touches `game_entries`/`game_entry_predictor`, both already applied,
+mirrors `get-or-create-lms-entry`'s season-scoped shape, and deliberately
+omits an entry-window check per open question 5. No `PredictorEngine` class
+yet — same as both prior modes, where the Game Engine class first appeared
+at Slice 2 alongside `validateEntry()`.
+
+**Verified:** 4 new unit tests (`validate.test.ts`, mirroring
+`get-or-create-lms-entry`'s own minus the entry-window cases) — 204/204
+across the whole `supabase/functions/` tree. Live, through the real Edge
+Function over HTTP (required a full `supabase stop`/`start` cycle, not just
+a container restart, for the new function directory to be served — the
+identical local-dev mechanic LMS's own Slice 1 first documented): missing
+`pot_id` rejected, missing auth rejected, a `pick5`-typed pot rejected with
+a specific message, a non-member rejected, first creation succeeds with
+`entry_scope='season'`/`gameweek_id=null`/a zeroed `game_entry_predictor`
+row, a second call is idempotent (same entry id, exactly one `game_entries`
+row exists after both calls) — 9 checks, all passing. All test data (2 pots,
+2 users) removed by exact ID, re-verified as zero rows.
+
+## Score Predictor pick submission (Slice 2)
+
+**Decided 2026-08-06**, Milestone 6 Slice 2. Before any schema or code, the
+five open product questions from the Slice 1 review were re-examined
+against GE-5.3's exact text (not memory) — one new fact changed the
+analysis: "`predictor_cycle_mode` already lets a pot choose `two_halves` vs.
+`single_cycle` **reuse restriction**" confirms a reuse restriction is a real,
+approved concept, not purely inferred from the unreliable retired
+prototype, though GE-5.3 still doesn't say which predictions it restricts
+or how "half" is computed.
+
+**Two questions resolved as design, not invented:**
+- **How is a draw predicted?** Not by a separate column. GE-5.3's own
+  scoring rule — "5 points exact score, **or** 3 for correct winner
+  (mutually exclusive)" — only makes logical sense if both are evaluated
+  against one scoreline prediction; if they were independent picks,
+  mutual exclusivity wouldn't be a meaningful constraint (a player could
+  win on both mechanisms independently). So `predictor_fixture_picks`
+  stores only `predicted_home_score`/`predicted_away_score`; "correct
+  winner" is derived at scoring time from the sign of the predicted score
+  difference. A draw is simply the case where both predicted scores are
+  equal. This also avoids repeating what looks like a real prototype bug:
+  its `predicted_winner_team_id` was `NOT NULL`, with no way to represent
+  "no winner" (a draw) at all.
+- **Is the goalscorer prediction mandatory or optional?** Genuinely a
+  product decision — asked the repo owner directly rather than guessing;
+  a nullable column doesn't inherently favor either answer, and the two
+  options have real, different UX/fairness implications. **Decided:
+  optional.** `goalscorer_player_id` is nullable; `PredictorEngine.validateEntry()`
+  accepts a pick with no scorer guess — the entry is simply not eligible
+  for that gameweek's scorer bonus.
+
+**One question confirmed not to block this slice:** the scorer bonus's
+point value is only ever consumed by `calculateScore()` (a future slice) —
+this table only needs to *store* a prediction, not score it.
+
+**One question partially resolved, partially deferred:** `predictor_cycle_mode`'s
+reuse restriction is real (per GE-5.3) but underspecified (which
+predictions? what counts as "half"?). Rather than guess at either detail —
+the same mistake `013_lms_wipeout_and_rollover.sql`'s own predecessor draft
+made, later requiring a full revision once its payment-model assumption was
+overturned (see [decisions.md § LMS: multi-generation rollover review](#lms-multi-generation-rollover-review-found-a-real-gap-added-rollover_generation))
+— this slice ships without enforcing any reuse restriction at all. No
+`half_cycle` column, no reuse-scoped unique constraint.
+`PredictorEngine.validateEntry()` currently allows the same scoreline or
+the same goalscorer to be predicted any number of times across a season.
+**Flagged as a known, real gap for a future slice, not a silent omission**
+— see `project-board.md`'s Ready section.
+
+**The last open question (entry-window rule) doesn't apply here** — it
+concerns entry *creation* (Slice 1), not pick *submission* (this slice),
+which operates on entries that already exist regardless of how they were
+created.
+
+**Schema: `017_predictor_picks.sql`, `predictor_fixture_picks` table.**
+Named to avoid colliding with the retired prototype's own
+`supabase_admin`-owned `predictor_picks` (confirmed live before writing the
+migration, not assumed) — the identical collision `lms_team_picks` was
+named to dodge, which `015_lms_picks.sql`'s own comment predicted would
+repeat here. Mirrors `pick5_picks`/`lms_team_picks` wherever the shape is
+genuinely shared (service-role-only writes, no client-insert RLS policy,
+`on delete cascade` from `game_entries`, `updated_at` trigger, one SELECT
+policy scoped to pot membership) and diverges where Score Predictor's own
+rules genuinely differ:
+- `fixture_id` (not present in `pick5_picks`/`lms_team_picks`) — a
+  gameweek has multiple fixtures; the user picks exactly one to predict,
+  per GE-5.3's "one fixture predicted per gameweek."
+- `predicted_home_score`/`predicted_away_score` replace the prototype's
+  `predicted_winner_team_id` (see the draw-representation reasoning
+  above).
+- `goalscorer_player_id` is nullable, unlike the prototype's `NOT NULL`
+  version — reflects the repo owner's actual decision, not a guess.
+- **No `result pick_result` column**, unlike `pick5_picks`/`lms_team_picks`.
+  Deliberate: `pick_result`'s won/lost vocabulary fits a binary outcome;
+  Score Predictor's outcome is a point value (0, 3, or 5, plus a bonus)
+  with no natural won/lost label. `points_awarded` being null vs.
+  populated already distinguishes unresolved from resolved — the one fact
+  `pick_result`'s `'pending'` state exists to capture for the other two
+  modes — without a second, partially-redundant column that would need an
+  invented mapping to populate.
+- **No `half_cycle` column and no reuse-restricting unique constraint** —
+  see the deferred reuse-restriction reasoning above.
+- **No `locked_at` column yet** — mirrors `lms_team_picks`'s own history
+  exactly: added in a later migration (`016`) once `lockEntries()` (Slice
+  3) actually needed it, not upfront in the picks-table migration.
+
+**`PredictorEngine.validateEntry()` implemented** (`_shared/game-engine/predictor/`,
+new directory — `PredictorEngine`, `PredictorValidationError`, registered
+with the dispatcher exactly like `Pick5Engine`/`LmsEngine`). Checks, in
+order: `entry.status === 'pending'` (season-scoped entry, same reasoning
+as LMS — no per-gameweek entry status to check); the target gameweek's
+`deadline_utc`, live, same pattern every mode's `validateEntry()` uses;
+the requested fixture exists **and** belongs to the requested gameweek (a
+genuinely new check — neither Pick 5 nor LMS needs it, since neither mode
+lets the picker choose *which* fixture within a gameweek); if a goalscorer
+is provided, that they're an active player on one of the fixture's two
+teams (a data-integrity check confirming the prediction is coherent, not
+an invented business rule — same spirit as `Pick5Engine`'s own "is this
+player eligible for this gameweek" check, narrowed to "eligible for this
+specific fixture"). **No elimination/competitive-status check at all** —
+`game_entry_predictor` has no such column; nobody is ever eliminated,
+confirmed by the schema itself, not assumed.
+
+**Comparison against Pick 5/LMS's own `validateEntry()`, confirming Score
+Predictor is a genuine hybrid, not forceable into either shape** (per the
+explicit instruction not to assume either): season-scoped entry and a live
+per-gameweek deadline check, like LMS; no competitive-status/elimination
+check at all, unlike LMS; a genuinely new fixture-selection check neither
+prior mode needs, since both Pick 5 and LMS's picks are unambiguous about
+which fixture(s) are in play.
+
+**Verified:** 13 new `PredictorEngine.validateEntry()` unit tests plus 12
+new `validateSubmitPredictorPickRequest()` unit tests (229/229 across the
+whole `supabase/functions/` tree, no regressions). Live, through the real
+Edge Function over HTTP (required a full `supabase stop`/`start` cycle for
+the new function directory): missing auth, malformed JSON (built in from
+the start this time, not retrofitted — `submit-predictor-picks` never had
+the bare-500 bug the Production Hardening Sprint found elsewhere), missing
+fields, non-owner, wrong-pot-type, fixture/gameweek mismatch, and
+ineligible goalscorer all correctly rejected; a valid submission predicting
+a draw (2-2) succeeds and stores the scoreline exactly, with
+`goalscorer_player_id` correctly null when omitted; resubmitting for the
+same gameweek with a different scoreline and an eligible goalscorer updates
+the same row in place (confirmed by id and by row count — exactly one
+`predictor_fixture_picks` row after both calls); a gameweek whose deadline
+has already passed is correctly rejected — 16 checks, all passing. All test
+data (2 pots, 2 users) removed by exact ID, re-verified as zero rows.

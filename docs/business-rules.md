@@ -344,6 +344,50 @@ work); and a rollover-specific notification (telling the organiser their
 competition rolled over — flagged as a likely future addition, not built
 ahead of being asked for).
 
+## Score Predictor
+
+**Milestone 6, in progress — this section covers only what's actually
+decided and shipped so far (Slices 1-2: entry creation, pick submission).**
+Scoring, winner determination, and prize awarding are not built yet — see
+[decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review)
+and [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2)
+for the full reasoning and everything still genuinely undecided.
+
+**Entry.** One entry per pot for the whole season (like Last Man Standing,
+unlike Pick 5's per-gameweek entries) — cumulative points accrue across
+every gameweek's prediction, so there's no separate entry per week.
+
+**Predicting a fixture.** Each gameweek, an entrant chooses exactly one
+fixture from that gameweek and predicts its exact scoreline (e.g. 2-1).
+There is no separate "who wins" pick — a draw is simply predicting an
+equal score (e.g. 1-1); the winning team, if any, is worked out from the
+predicted scoreline itself, not chosen separately.
+
+**Goalscorer bonus prediction — optional.** An entrant may also guess a
+player to score in that fixture, for a bonus (the bonus's point value is
+not yet decided). This is entirely optional — a prediction with no
+goalscorer guess is fully valid, it simply isn't eligible for that
+gameweek's bonus. If a goalscorer guess is given, it must be a player
+who's actually on one of the two teams playing in the predicted fixture.
+
+**When picks lock.** Same 30-minutes-before-earliest-kickoff deadline rule
+as every other mode (§ [When picks lock](#when-picks-lock)) — a prediction
+for a gameweek can no longer be made or changed once that gameweek's
+deadline passes.
+
+**Changing a prediction.** An entrant may resubmit a different prediction
+for the same gameweek any time before that gameweek's deadline — this
+replaces the previous prediction for that gameweek, it does not create a
+second one.
+
+**Not yet decided, deliberately not guessed at:** how many points the
+goalscorer bonus is actually worth; whether predicting the same scoreline
+or the same goalscorer more than once across a season is restricted in
+any way (`predictor_cycle_mode`'s "two_halves"/"single_cycle" setting is
+confirmed to govern some such restriction, but not which predictions or
+how); how scoring, standings, and prize payout work at all; whether there's
+any restriction on when an entrant may join a Score Predictor pot.
+
 ## Admin permissions
 
 Two distinct admin levels exist:
