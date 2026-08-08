@@ -1,7 +1,8 @@
--- DESIGN ONLY — NOT APPLIED. Drafted for review ahead of Milestone 4 Slice 8,
--- per the repo owner's explicit "design it, review it, do not apply it"
--- instruction. docs/decisions.md § Prize pool deductions (Admin Fee, Charity
--- Fee) records the full investigation this migration implements.
+-- Drafted for review ahead of Milestone 4 Slice 8, per the repo owner's
+-- explicit "design it, review it, do not apply it" process — reviewed,
+-- approved, and applied. docs/decisions.md § Prize pool deductions (Admin
+-- Fee, Charity Fee) records the full investigation this migration
+-- implements.
 --
 -- Configuration (admin_fee_*/charity_fee_*) lives on pots — shared platform
 -- data, reusable by every mode's awardPrize() (Pick 5 now; LMS/Predictor

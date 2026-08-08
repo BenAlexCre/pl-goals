@@ -352,6 +352,14 @@ interface FakeDb {
   fixtures: FakeFixture[]
   entry_payments: FakeEntryPayment[]
   pot_prizes: FakePotPrize[]
+  // Hardening sprint, 2026-08-06: failure-injection flags for settle()'s
+  // payment-void partial-write risk. Table-level (not patch-aware) is
+  // sufficient here — unlike Pick5's fake, this context's game_entries is
+  // only ever updated by settle()'s void step (LMS never transitions to
+  // 'settled' inside settle() itself, see Slice 5), and lms_team_picks is
+  // only ever updated (not upserted) by that same void step.
+  entriesVoidShouldFail?: boolean
+  picksVoidShouldFail?: boolean
 }
 
 function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
@@ -375,6 +383,12 @@ function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
         update(patch: Record<string, unknown>) {
           return {
             in: (col: string, vals: unknown[]) => {
+              if (table === 'game_entries' && db.entriesVoidShouldFail) {
+                return Promise.resolve({ data: null, error: { message: 'Fake update() simulated failure' } })
+              }
+              if (table === 'lms_team_picks' && db.picksVoidShouldFail) {
+                return Promise.resolve({ data: null, error: { message: 'Fake update() simulated failure' } })
+              }
               const set = new Set(vals)
               for (const row of db[table] as unknown as Record<string, unknown>[]) {
                 if (set.has(row[col])) Object.assign(row, patch)
@@ -593,6 +607,60 @@ Deno.test('settle voids an unpaid entry and all of its picks, across every gamew
   assertEquals(db.game_entries[0].status, 'void')
   assertEquals(db.lms_team_picks[0].result, 'void')
   assertEquals(db.lms_team_picks[1].result, 'void')
+})
+
+// --- settle() partial-write retry-safety (hardening sprint, 2026-08-06) ---
+// Same architecture-review finding, same fix as Pick5Engine.settle(): picks
+// are voided BEFORE the entries themselves, so a failure on the entries
+// write can't strand an entry outside the status='pending' selection a
+// retry depends on.
+
+Deno.test('settle: if voiding picks fails, the entry is untouched and stays retryable', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', is_paid: false, scope: 'season' }],
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'won' }],
+    picksVoidShouldFail: true,
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await assertRejects(() => engine.settle(ctx, 13))
+
+  assertEquals(db.game_entries[0].status, 'pending', 'the entry was never touched — still selectable by a retry')
+  assertEquals(db.lms_team_picks[0].result, 'won', 'the pick write itself failed, so it is unchanged')
+
+  db.picksVoidShouldFail = false
+  await engine.settle(ctx, 13)
+  assertEquals(db.game_entries[0].status, 'void')
+  assertEquals(db.lms_team_picks[0].result, 'void')
+})
+
+Deno.test('settle: if voiding the entry fails after its picks were already voided, a retry still finds and finishes it', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', is_paid: false, scope: 'season' }],
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'won' }],
+    entriesVoidShouldFail: true,
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await assertRejects(() => engine.settle(ctx, 13))
+
+  // The picks write (which now runs first) already succeeded, even though
+  // the overall call failed and threw.
+  assertEquals(db.lms_team_picks[0].result, 'void')
+  assertEquals(db.game_entries[0].status, 'pending', 'still pending — this is what makes the retry below possible')
+
+  // This is the actual bug the review found: with the OLD write order
+  // (entries first), this entry would now be permanently 'void' with an
+  // un-voided pick, and this retry would silently find nothing to do
+  // (status='pending' no longer matches it). With the fix, it's still
+  // 'pending', so the retry correctly finds it, re-voids its (already-void)
+  // picks harmlessly, and this time succeeds in voiding the entry too.
+  db.entriesVoidShouldFail = false
+  await engine.settle(ctx, 13)
+  assertEquals(db.game_entries[0].status, 'void')
+  assertEquals(db.lms_team_picks[0].result, 'void')
 })
 
 Deno.test('settle treats a missing entry_payments row as unpaid', async () => {

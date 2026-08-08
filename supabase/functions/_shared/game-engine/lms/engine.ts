@@ -493,16 +493,21 @@ export class LmsEngine implements GameEngine {
         .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
         .map((e) => e.id)
 
+      // Hardening sprint, 2026-08-06 (architecture review finding, same
+      // fix as Pick5Engine.settle()): picks are voided BEFORE the entries
+      // themselves, deliberately reversed from the most natural reading
+      // order. The entries query above selects by status = 'pending' —
+      // once an entry flips to 'void', it drops out of that selection on
+      // any future call. With the old order (entries first, picks
+      // second), a failure on the picks write left the entry permanently
+      // 'void' with its picks never voided, and no retry could ever find
+      // that entry again to finish the job. Voiding picks first has no
+      // such gate: it doesn't depend on, or change, entries.status, so if
+      // IT fails, the entry is still 'pending' and a retry re-derives the
+      // same unpaidEntryIds and simply tries again — idempotently, since
+      // re-voiding an already-void pick is a no-op. Only once the picks
+      // write has actually succeeded does the entry itself flip to 'void'.
       if (unpaidEntryIds.length > 0) {
-        const { error: voidEntriesError } = await ctx.supabase
-          .from('game_entries')
-          .update({ status: 'void' })
-          .in('id', unpaidEntryIds)
-
-        if (voidEntriesError) {
-          throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
-        }
-
         const { error: voidPicksError } = await ctx.supabase
           .from('lms_team_picks')
           .update({ result: 'void' })
@@ -510,6 +515,15 @@ export class LmsEngine implements GameEngine {
 
         if (voidPicksError) {
           throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+        }
+
+        const { error: voidEntriesError } = await ctx.supabase
+          .from('game_entries')
+          .update({ status: 'void' })
+          .in('id', unpaidEntryIds)
+
+        if (voidEntriesError) {
+          throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
         }
       }
     }

@@ -392,16 +392,20 @@ export class Pick5Engine implements GameEngine {
       }
     }
 
+    // Hardening sprint, 2026-08-06 (architecture review finding): picks are
+    // voided BEFORE the entries themselves, deliberately reversed from the
+    // most natural reading order. The entries query above selects by
+    // status = 'locked' — once an entry flips to 'void', it drops out of
+    // that selection on any future call. With the old order (entries
+    // first, picks second), a failure on the picks write left the entry
+    // permanently 'void' with its picks never voided, and no retry could
+    // ever find that entry again to finish the job. Voiding picks first
+    // has no such gate: it doesn't depend on, or change, entries.status,
+    // so if IT fails, the entry is still 'locked' and a retry re-derives
+    // the same unpaidEntryIds and simply tries again — idempotently, since
+    // re-voiding an already-void pick is a no-op. Only once the picks
+    // write has actually succeeded does the entry itself flip to 'void'.
     if (unpaidEntryIds.length > 0) {
-      const { error: voidEntriesError } = await ctx.supabase
-        .from('game_entries')
-        .update({ status: 'void' })
-        .in('id', unpaidEntryIds)
-
-      if (voidEntriesError) {
-        throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
-      }
-
       const { error: voidPicksError } = await ctx.supabase
         .from('pick5_picks')
         .update({ result: 'void' })
@@ -409,6 +413,15 @@ export class Pick5Engine implements GameEngine {
 
       if (voidPicksError) {
         throw new Error(`Failed to void unpaid entries' picks: ${voidPicksError.message}`)
+      }
+
+      const { error: voidEntriesError } = await ctx.supabase
+        .from('game_entries')
+        .update({ status: 'void' })
+        .in('id', unpaidEntryIds)
+
+      if (voidEntriesError) {
+        throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
       }
     }
 
@@ -695,6 +708,22 @@ export class Pick5Engine implements GameEngine {
   //     anyone.
   //   - idempotent: a gameweek whose pot_prizes row is already `is_settled`
   //     is left untouched and this method returns without re-awarding.
+  //
+  // Hardening sprint, 2026-08-06 (architecture review finding): the
+  // pot_prizes write is deliberately the LAST write in this method, not
+  // the first — mirrors the identical correction already applied to
+  // LmsEngine.awardPrize(). is_settled=true is the exact flag this
+  // method's own idempotency check, above, trusts as "this gameweek has
+  // already been awarded." Writing it only once every payout has already
+  // succeeded means a payout failing partway through (winner 2 of 3, say)
+  // leaves the gameweek safely retryable — a retry re-derives the same
+  // winners/amounts and simply re-applies the same payout_amount values
+  // (harmless; UPDATEs are naturally idempotent), rather than getting
+  // permanently stuck: with the old ordering, is_settled was already true
+  // by the time any payout could fail, so every future call would
+  // short-circuit before ever reaching the unpaid winner. See
+  // docs/decisions.md § LMS prize awarding: transactionality correction
+  // for the original investigation this reuses.
   async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
     const gameweekId = await this.getMostRecentGameweekWithStandings(ctx, potId)
     if (gameweekId === null) {
@@ -761,6 +790,26 @@ export class Pick5Engine implements GameEngine {
       throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
     }
 
+    const perWinnerAmount = floorToCents(netAmount / winners.length)
+
+    for (const userId of winners) {
+      const { error: payoutError } = await ctx.supabase
+        .from('game_entries')
+        .update({ payout_amount: perWinnerAmount })
+        .eq('pot_id', potId)
+        .eq('gameweek_id', gameweekId)
+        .eq('user_id', userId)
+
+      if (payoutError) {
+        throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+      }
+    }
+
+    // Written LAST, deliberately — see this method's own comment above for
+    // why. is_settled=true here is what makes every future call treat this
+    // gameweek as concluded, so nothing above this line may be allowed to
+    // run again "for free" after it — the payout loop above is a naturally
+    // idempotent UPDATE, safe to repeat on a retry.
     const prizeRow = {
       pot_id: potId,
       scope: 'gameweek' as const,
@@ -776,6 +825,17 @@ export class Pick5Engine implements GameEngine {
     // in generateStandings()'s upsertStandingsGroup() — pot_prizes has the
     // identical shape of partial unique indexes that made a direct
     // upsert(onConflict: 'pot_id,gameweek_id') fail live in Slice 6.
+    //
+    // Hardening sprint, 2026-08-06: these used to throw
+    // Pick5PrizePoolExceededError on ANY update/insert failure, not just
+    // the fee-exceeds-gross case that error class actually describes — a
+    // real bug (found while reviewing this exact write path for the
+    // reorder above), since a caller catching that specific error to mean
+    // "the pot's fee configuration needs fixing" would misdiagnose a
+    // transient database/network failure the same way. Now throws a
+    // generic Error for a write failure, matching LmsEngine.awardPrize()'s
+    // own pattern — Pick5PrizePoolExceededError is reserved for its one
+    // actual meaning: the netAmount < 0 pre-check above.
     if (existingPrize) {
       const { error: updateError } = await ctx.supabase
         .from('pot_prizes')
@@ -783,41 +843,32 @@ export class Pick5Engine implements GameEngine {
         .eq('id', (existingPrize as { id: string }).id)
 
       if (updateError) {
-        throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+        throw new Error(`Failed to update prize: ${updateError.message}`)
       }
     } else {
       const { error: insertError } = await ctx.supabase.from('pot_prizes').insert(prizeRow)
 
       if (insertError) {
-        throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+        throw new Error(`Failed to insert prize: ${insertError.message}`)
       }
     }
 
-    const perWinnerAmount = floorToCents(netAmount / winners.length)
-
+    // GE-8.7/decisions.md § Notifications: called after the trailing
+    // pot_prizes write above, not from inside the payout loop the way this
+    // method used to (hardening sprint, 2026-08-06 — moved for the same
+    // reason the write itself moved: keeps the invariant that a
+    // notification only ever fires once both the money AND the settlement
+    // record it describes are already durably written, matching
+    // LmsEngine.awardPrize()'s own Slice-9 placement). Best-effort — a
+    // failure here must never unwind or block a payout already written,
+    // and must never stop the loop from notifying this gameweek's
+    // remaining winners, so it's caught and logged rather than left to
+    // propagate like every other write in this method. notifyUsers()
+    // itself still throws on error (like every other GameEngine method) —
+    // the try/catch boundary belongs here, at the one call site that knows
+    // this specific write is allowed to fail silently, not inside
+    // notifyUsers() itself.
     for (const userId of winners) {
-      const { error: payoutError } = await ctx.supabase
-        .from('game_entries')
-        .update({ payout_amount: perWinnerAmount })
-        .eq('pot_id', potId)
-        .eq('gameweek_id', gameweekId)
-        .eq('user_id', userId)
-
-      if (payoutError) {
-        throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
-      }
-
-      // GE-8.7/decisions.md § Notifications: the money (pot_prizes,
-      // payout_amount) is already durably written by this point in the
-      // loop — a notification is a lower-severity, best-effort side effect
-      // of that fact, never a precondition for it. A failure here must
-      // never unwind or block settlement, and must never stop the loop
-      // from paying out this gameweek's remaining winners, so it's caught
-      // and logged rather than left to propagate like every other write in
-      // this method. notifyUsers() itself still throws on error (like
-      // every other GameEngine method) — the try/catch boundary belongs
-      // here, at the one call site that knows this specific write is
-      // allowed to fail silently, not inside notifyUsers() itself.
       try {
         await this.notifyUsers(ctx, {
           userId,

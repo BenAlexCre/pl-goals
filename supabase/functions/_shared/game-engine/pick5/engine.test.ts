@@ -602,6 +602,15 @@ interface FakeDb {
   // awardPrize() isolates that failure from the money it already wrote —
   // every other fake table always succeeds, so this is opt-in per test.
   notificationsShouldFail: boolean
+  // Hardening sprint, 2026-08-06: failure-injection flags for the two
+  // partial-write risks the architecture review identified. Patch-aware
+  // (not a blanket per-table flag) because game_entries.update() is called
+  // for three different purposes in this file (void, settle, payout) —
+  // a blanket flag would fail all three indiscriminately and make it
+  // impossible to test one step failing while the others still succeed.
+  entriesVoidShouldFail: boolean
+  picksVoidShouldFail: boolean
+  potPrizesWriteShouldFail: boolean
 }
 
 function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
@@ -616,6 +625,9 @@ function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     potPrizes: [],
     notifications: [],
     notificationsShouldFail: false,
+    entriesVoidShouldFail: false,
+    picksVoidShouldFail: false,
+    potPrizesWriteShouldFail: false,
     ...overrides,
   }
 }
@@ -623,7 +635,12 @@ function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
 // deno-lint-ignore no-explicit-any
 let fakeIdCounter = 1
 
-function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb, insertShouldFail?: () => boolean) {
+function queryBuilder(
+  getRows: () => any[],
+  embedGameEntryPick5FromDb?: FakeDb,
+  insertShouldFail?: () => boolean,
+  updateShouldFail?: (patch: Record<string, unknown>) => boolean
+) {
   // deno-lint-ignore no-explicit-any
   const filters: ((row: any) => boolean)[] = []
   let orderSpec: { col: string; ascending: boolean } | null = null
@@ -735,7 +752,11 @@ function queryBuilder(getRows: () => any[], embedGameEntryPick5FromDb?: FakeDb, 
           updateFilters.push((row) => set.has(row[col]))
           return updateBuilder
         },
-        then: (resolve: (v: { data: null; error: null }) => void) => {
+        then: (resolve: (v: { data: null; error: { message: string } | null }) => void) => {
+          if (updateShouldFail?.(patch)) {
+            resolve({ data: null, error: { message: 'Fake queryBuilder.update() simulated failure' } })
+            return
+          }
           for (const row of getRows()) {
             if (updateFilters.every((f) => f(row))) Object.assign(row, patch)
           }
@@ -784,17 +805,22 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
             }))
           )
         case 'game_entries':
-          return queryBuilder(() => db.gameEntries, db)
+          return queryBuilder(() => db.gameEntries, db, undefined, (patch) => db.entriesVoidShouldFail === true && patch.status === 'void')
         case 'entry_payments':
           return queryBuilder(() => db.entryPayments)
         case 'pick5_picks':
-          return queryBuilder(() => db.pick5Picks)
+          return queryBuilder(() => db.pick5Picks, undefined, undefined, () => db.picksVoidShouldFail === true)
         case 'game_entry_pick5':
           return queryBuilder(() => db.gameEntryPick5)
         case 'pot_standings_snapshots':
           return queryBuilder(() => db.potStandingsSnapshots)
         case 'pot_prizes':
-          return queryBuilder(() => db.potPrizes)
+          return queryBuilder(
+            () => db.potPrizes,
+            undefined,
+            () => db.potPrizesWriteShouldFail === true,
+            () => db.potPrizesWriteShouldFail === true
+          )
         case 'notifications':
           return queryBuilder(() => db.notifications, undefined, () => db.notificationsShouldFail)
         default:
@@ -839,6 +865,64 @@ Deno.test('settle voids an unpaid entry and its picks', async () => {
   assertEquals(db.gameEntries[0].settled_at, null, 'a voided entry is never marked settled')
   assertEquals(db.pick5Picks[0].result, 'void')
   assertEquals(db.pick5Picks[1].result, 'void')
+})
+
+// --- settle() partial-write retry-safety (hardening sprint, 2026-08-06) ---
+// The architecture review found that voiding entries BEFORE voiding their
+// picks meant a failure on the picks write left the entry permanently
+// 'void' with un-voided picks and no way to retry (the entries query
+// selects by status='locked', which a voided entry no longer matches).
+// Fixed by voiding picks first. These tests prove the fix from both angles.
+
+Deno.test('settle: if voiding picks fails, the entry is untouched and stays retryable', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    entryPayments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
+    pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
+  })
+  db.picksVoidShouldFail = true
+
+  await assertRejects(() => engine.settle(fakeDbContext(db), 4))
+
+  assertEquals(db.gameEntries[0].status, 'locked', 'the entry was never touched — still selectable by a retry')
+  assertEquals(db.pick5Picks[0].result, 'won', 'the pick write itself failed, so it is unchanged')
+
+  // Retry: same call, this time the write succeeds.
+  db.picksVoidShouldFail = false
+  await engine.settle(fakeDbContext(db), 4)
+  assertEquals(db.gameEntries[0].status, 'void')
+  assertEquals(db.pick5Picks[0].result, 'void')
+})
+
+Deno.test('settle: if voiding the entry fails after its picks were already voided, a retry still finds and finishes it', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    entryPayments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
+    pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
+  })
+  db.entriesVoidShouldFail = true
+
+  await assertRejects(() => engine.settle(fakeDbContext(db), 4))
+
+  // The picks write (which now runs first) already succeeded and durably
+  // stuck, even though the overall call failed and threw.
+  assertEquals(db.pick5Picks[0].result, 'void')
+  assertEquals(db.gameEntries[0].status, 'locked', 'still locked — this is the property that makes the retry below possible')
+
+  // This is the actual bug the review found: with the OLD write order
+  // (entries first), this entry would now be permanently 'void' with an
+  // un-voided pick, and this retry would silently find nothing to do
+  // (status='locked' no longer matches it). With the fix, it's still
+  // 'locked', so the retry correctly finds it, re-voids its (already-void)
+  // picks harmlessly, and this time succeeds in voiding the entry too.
+  db.entriesVoidShouldFail = false
+  await engine.settle(fakeDbContext(db), 4)
+  assertEquals(db.gameEntries[0].status, 'void')
+  assertEquals(db.pick5Picks[0].result, 'void')
 })
 
 Deno.test('settle voids an entry with no entry_payments row at all (defaults to unpaid)', async () => {
@@ -1431,6 +1515,74 @@ Deno.test('awardPrize is idempotent — a second call against an already-settled
   assertEquals(db.potPrizes.length, 1, 'must not create a second pot_prizes row')
   assertEquals(db.potPrizes[0].id, firstPrizeId)
   assertEquals(db.gameEntries[0].payout_amount, undefined, 'a no-op does not re-write the payout either')
+})
+
+// --- awardPrize() partial-write retry-safety (hardening sprint, 2026-08-06) ---
+// Same correction already applied to LmsEngine.awardPrize(): the pot_prizes
+// write (is_settled=true) now runs LAST, after the payout loop, instead of
+// first. Before this fix, a payout failing partway (or the pot_prizes write
+// itself failing right after) would leave is_settled permanently true with
+// the payout work undone/incomplete and no way to retry — every future call
+// would short-circuit at the idempotency check. These tests prove the fix.
+
+Deno.test('awardPrize: if the trailing pot_prizes write fails, the payout already written stays, and a retry finishes cleanly', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  db.potPrizesWriteShouldFail = true
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+
+  assertEquals(db.gameEntries[0].payout_amount, 10, 'the payout already landed before the trailing write failed')
+  assertEquals(db.potPrizes.length, 0, 'pot_prizes was never sealed — this is what makes the retry below possible')
+
+  // With the OLD ordering (pot_prizes written FIRST, is_settled=true before
+  // any payout), is_settled would already be true at this point, and this
+  // retry would incorrectly short-circuit as "already done" — permanently,
+  // since nothing would ever un-set it. With the fix, the idempotency check
+  // correctly finds no settled prize yet and proceeds.
+  db.potPrizesWriteShouldFail = false
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1)
+  assertEquals(db.potPrizes[0].is_settled, true)
+  assertEquals(db.gameEntries[0].payout_amount, 10, 'unchanged by the retry — the same value is safely re-applied')
+})
+
+Deno.test('awardPrize: a pot_prizes write failure throws a generic Error, not Pick5PrizePoolExceededError', async () => {
+  // Bug found while making the correction above: the update/insert error
+  // handlers used to throw Pick5PrizePoolExceededError for ANY write
+  // failure, not just the fee-exceeds-gross case that error class actually
+  // describes — a caller catching it to mean "fix this pot's fee config"
+  // would misdiagnose an unrelated database/network failure the same way.
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+  })
+  db.potPrizesWriteShouldFail = true
+  const ctx = fakeDbContext(db)
+
+  let caught: unknown
+  try {
+    await engine.awardPrize(ctx, 'pot-1')
+  } catch (err) {
+    caught = err
+  }
+
+  assertEquals(caught instanceof Error, true)
+  assertEquals(
+    caught instanceof Pick5PrizePoolExceededError,
+    false,
+    'a write failure is not a fee-configuration problem — Pick5PrizePoolExceededError is reserved for the netAmount < 0 pre-check'
+  )
 })
 
 Deno.test('awardPrize is a no-op when the pot has no settled gameweek at all', async () => {

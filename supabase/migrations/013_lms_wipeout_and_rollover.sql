@@ -1,12 +1,12 @@
--- DESIGN ONLY — NOT YET APPLIED AT TIME OF WRITING. Drafted for review ahead
--- of Milestone 5 Slice 2, per the repo owner's explicit "design it, review
--- it, do not apply it" instruction (same pattern as
--- 010_prize_pool_deductions.sql). Supersedes an earlier same-name-series
--- draft (013_lms_tie_outcome_and_rollover.sql, never applied, never
--- committed) whose payment-model assumption was overturned — see
--- docs/decisions.md § LMS: Wipeout Resolution, automatic rollover, and a
--- fixed per-competition entry fee for that history, and § the multi-
--- generation rollover review (same file) for this revision's own reasoning.
+-- Drafted for review ahead of Milestone 5 Slice 2, per the repo owner's
+-- explicit "design it, review it, do not apply it" process (same pattern as
+-- 010_prize_pool_deductions.sql) — reviewed, approved, and applied.
+-- Supersedes an earlier same-name-series draft
+-- (013_lms_tie_outcome_and_rollover.sql, never applied, never committed)
+-- whose payment-model assumption was overturned — see docs/decisions.md §
+-- LMS: Wipeout Resolution, automatic rollover, and a fixed per-competition
+-- entry fee for that history, and § the multi-generation rollover review
+-- (same file) for this revision's own reasoning.
 --
 -- Five additions, all GE-3 platform/mode-boundary-respecting (config on
 -- pots, same as predictor_cycle_mode/predictor_scorer_scope; calculated
