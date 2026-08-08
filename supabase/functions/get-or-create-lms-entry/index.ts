@@ -51,7 +51,12 @@ Deno.serve(async (req) => {
     })
   }
 
-  const body = await req.json()
+  // Production hardening sprint, 2026-08-06: a malformed/empty body used to
+  // throw here uncaught, surfacing as a bare 500 with no error detail
+  // (verified live). Falling back to {} lets the existing
+  // validateEntryRequest() below reject it cleanly as a 400 instead, same
+  // pattern settle-gameweek/index.ts already used.
+  const body = await req.json().catch(() => ({}))
   const validation = validateEntryRequest(body)
   if (!validation.ok) {
     return new Response(JSON.stringify({ error: validation.error }), {

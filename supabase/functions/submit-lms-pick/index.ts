@@ -50,7 +50,12 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'Unauthorized' }, 401)
   }
 
-  const body = await req.json()
+  // Production hardening sprint, 2026-08-06: a malformed/empty body used to
+  // throw here uncaught, surfacing as a bare 500 with no error detail
+  // (verified live). Falling back to {} lets the existing
+  // validateSubmitLmsPickRequest() below reject it cleanly as a 400
+  // instead, same pattern settle-gameweek/index.ts already used.
+  const body = await req.json().catch(() => ({}))
   const validation = validateSubmitLmsPickRequest(body)
   if (!validation.ok) {
     return jsonResponse({ error: validation.error }, 400)

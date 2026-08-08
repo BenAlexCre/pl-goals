@@ -32,7 +32,13 @@ Deno.serve(async (req) => {
     })
   }
 
-  const body = await req.json()
+  // Production hardening sprint, 2026-08-06: a malformed/empty body used to
+  // throw here uncaught, surfacing as a bare 500 with no error detail
+  // (verified live). Falling back to {} lets the existing
+  // authorization/action-switch logic below handle it the same way it
+  // already handles any other missing-field request (403/400), rather than
+  // crashing before ever reaching that logic.
+  const body = await req.json().catch(() => ({}))
   const { action, pot_id } = body
   const isAppAdmin = userData.user.app_metadata?.role === 'app_admin'
 
