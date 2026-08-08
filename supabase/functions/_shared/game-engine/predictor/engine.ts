@@ -1,8 +1,8 @@
 // Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2),
-// lockEntries (Slice 3), and calculateScore (Slice 4) are implemented —
-// every other GameEngine method still throws GameEngineNotImplementedError,
-// same "half-built mode fails loudly" pattern Pick5Engine/LmsEngine used
-// between their own early slices and later ones.
+// lockEntries (Slice 3), calculateScore (Slice 4), and settle (Slice 5) are
+// implemented — every other GameEngine method still throws
+// GameEngineNotImplementedError, same "half-built mode fails loudly" pattern
+// Pick5Engine/LmsEngine used between their own early slices and later ones.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -292,17 +292,29 @@ export class PredictorEngine implements GameEngine {
     const fixtureById = new Map<number, FixtureRow>((fixtures as FixtureRow[] | null ?? []).map((f) => [f.id, f]))
 
     const entryIds = [...new Set(pickRows.map((p) => p.game_entry_id))]
+    // Cross-slice correction, 2026-08-08 (post-Slice-5 review, see
+    // docs/decisions.md § calculateScore() must not mutate a voided entry):
+    // status is now selected alongside pot_id specifically to exclude a
+    // voided entry's picks from being resolved/aggregated below — without
+    // it, an entry settle() had already voided for non-payment could still
+    // have a not-yet-finished pick freshly scored, and its points folded
+    // into game_entry_predictor's totals, by this same method running for a
+    // later gameweek. Predictor entries never reach any status besides
+    // 'pending'/'void' at this stage (GE-4.5 — no 'locked'/'settled' until
+    // a future slice), so "pending" is exactly equivalent to "not void."
     const { data: entries, error: entriesError } = await ctx.supabase
       .from('game_entries')
-      .select('id, pot_id')
+      .select('id, pot_id, status')
       .in('id', entryIds)
 
     if (entriesError) {
       throw new Error(`Failed to look up entries: ${entriesError.message}`)
     }
 
-    type EntryRow = { id: string; pot_id: string }
-    const potIdByEntryId = new Map<string, string>((entries as EntryRow[] | null ?? []).map((e) => [e.id, e.pot_id]))
+    type EntryRow = { id: string; pot_id: string; status: string }
+    const entryRows = (entries as EntryRow[] | null) ?? []
+    const potIdByEntryId = new Map<string, string>(entryRows.map((e) => [e.id, e.pot_id]))
+    const pendingEntryIds = new Set(entryRows.filter((e) => e.status === 'pending').map((e) => e.id))
 
     const potIds = [...new Set(potIdByEntryId.values())]
     const { data: pots, error: potsError } = await ctx.supabase
@@ -368,6 +380,8 @@ export class PredictorEngine implements GameEngine {
     const affectedEntryIds = new Set<string>()
 
     for (const pick of pickRows) {
+      if (!pendingEntryIds.has(pick.game_entry_id)) continue // voided (or otherwise non-pending) entry — settle() already excluded it, never re-resolve
+
       const fixture = fixtureById.get(pick.fixture_id)
       if (!fixture || fixture.status !== 'finished') continue
 
@@ -477,8 +491,178 @@ export class PredictorEngine implements GameEngine {
     }
   }
 
-  async settle(_ctx: GameEngineContext, _gameweekId: number): Promise<void> {
-    throw new GameEngineNotImplementedError('score_predictor', 'settle')
+  // game_entries is shared across every mode (GE-4.5) — unlike
+  // predictor_fixture_picks, which lockEntries()/calculateScore() can query
+  // unfiltered because it's written only by an already-gated function, a
+  // game_entries query here needs an explicit pot filter, same reasoning
+  // Pick5Engine.getPick5PotIds() already established. Simpler than
+  // LmsEngine.getEligibleLmsPotIds(): no start_gameweek_id filter exists for
+  // Predictor pots (confirmed — Score Predictor entry-window rule remains
+  // genuinely undecided, docs/decisions.md § Score Predictor architecture
+  // review), and no "already concluded" filter is possible yet either,
+  // since PredictorEngine.awardPrize() doesn't write pot_prizes yet (it's
+  // out of scope for this slice, per the repo owner's explicit instruction)
+  // — every score_predictor pot is therefore eligible, unconditionally, for
+  // now. Revisit once awardPrize() exists, same sequencing-gap shape
+  // LmsEngine's own Slice 7→8 closed.
+  private async getPredictorPotIds(ctx: GameEngineContext): Promise<string[]> {
+    const { data: predictorPots, error } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('game_type', 'score_predictor')
+
+    if (error) {
+      throw new Error(`Failed to look up Score Predictor pots: ${error.message}`)
+    }
+
+    return (predictorPots ?? []).map((p: { id: string }) => p.id)
+  }
+
+  // GE-6: "Finalize this gameweek's outcome for the mode." Reviewed
+  // Pick5Engine.settle() and LmsEngine.settle() first — modeled on neither
+  // wholesale. Slice 5's scope is deliberately narrow, per explicit
+  // instruction: the Payment Verification payment-void rule only. No
+  // generateStandings()/determineWinner()/awardPrize()/notifyUsers() call —
+  // same "deliberately small" shape LmsEngine.settle() had in its own
+  // Slice 5, for the same underlying reason: those methods either aren't
+  // implemented yet (throw GameEngineNotImplementedError) or genuinely
+  // don't make sense to call on an ordinary gameweek for a competition that
+  // only concludes once, at season end.
+  //
+  // Five questions, answered before writing this method:
+  //
+  // 1. What constitutes a settled scoring period? Not a season/cycle
+  //    concept at all for this method's actual scope — "settled" here
+  //    means only "this gameweek's payment-void check has run," gated by
+  //    the same caller-side "are this gameweek's fixtures all finished"
+  //    check settle-gameweek/index.ts already applies uniformly to every
+  //    mode, same as Pick5/LMS. No independent period/cycle boundary is
+  //    computed or needed by this method.
+  //
+  // 2/3. Does settlement happen once per cycle or once per season, and how
+  //    does predictor_cycle_mode influence it? Neither, and not at all —
+  //    confirmed by review, not guessed. Payment Verification for
+  //    Predictor is entry_payments.scope = 'season': one flat fee for the
+  //    whole competition (GE-4.3 already anticipated this shape for a
+  //    "future Predictor payment model," flagging it "still undecided" —
+  //    this slice's review confirms it, since Predictor's game_entries is
+  //    season-scoped exactly like LMS's, GE-4.5). A flat one-time fee's
+  //    paid/unpaid status has no cycle-dependent timing, so there is
+  //    nowhere in this logic predictor_cycle_mode could apply. Its two
+  //    real, documented uses — a not-yet-enforced pick-reuse restriction,
+  //    and a not-yet-decided determineWinner()/awardPrize() payout-timing
+  //    question (does a two_halves pot pay out once or twice?) — are both
+  //    explicitly out of this slice's scope. Re-checking payment every
+  //    gameweek this method runs (rather than only once at some computed
+  //    boundary) is therefore not just simplest but correct: it mirrors
+  //    LmsEngine.settle()'s identical re-check-every-call behavior for the
+  //    identical payment shape.
+  //
+  // 4. How are unpaid entries treated after scores already exist? The
+  //    entry's game_entries.status flips to 'void' (shared entry_status
+  //    enum, same value Pick5/LMS use) — already-computed
+  //    predictor_fixture_picks.points_awarded / game_entry_predictor
+  //    totals are left untouched by this method, matching Pick5/LMS's own
+  //    settle(): neither zeroes the mode's own scoring columns, only
+  //    generateStandings() (a future slice) actually excludes a void
+  //    entry from a ranked result, by only ranking 'settled' entries.
+  //    Deliberately NOT mirrored here: Pick5Engine/LmsEngine also flip
+  //    their own picks table's per-row result to 'void'
+  //    (pick5_picks.result / lms_team_picks.result) — predictor_fixture_picks
+  //    has no equivalent column, and unlike those two tables, it never had
+  //    one before this slice either. Adding one now would be new schema
+  //    surface with no reader (calculateScore() isn't being touched this
+  //    slice, per instruction, so nothing would ever consult it) — flagged
+  //    as a real, known gap for a future slice (most likely whichever one
+  //    builds a Predictor results UI or generateStandings()) rather than
+  //    added speculatively.
+  //
+  //    A related, more consequential gap found during this review, also
+  //    flagged rather than fixed here: predictor_fixture_picks is
+  //    season-wide (one game_entries row spans every gameweek, GE-4.5),
+  //    but calculateScore() only ever resolves the ONE gameweek it's
+  //    called for and has no game_entries.status awareness at all. An
+  //    entry voided at gameweek 5's settle() could still have a
+  //    not-yet-finished gameweek 8 pick resolved and folded into
+  //    game_entry_predictor's totals once gameweek 8 finishes — settle()
+  //    never revisits or corrects that. LmsEngine has a narrower version
+  //    of the same shape (its own calculateScore() checks
+  //    game_entry_lms.competitive_status, which settle()'s void path
+  //    doesn't sync either) that has never been fixed or even flagged.
+  //    Not addressed here — this slice implements settle() only, per
+  //    instruction — but recorded explicitly so it isn't lost, unlike its
+  //    LMS analog.
+  //
+  // 5. Can settlement safely rerun indefinitely? Yes. The unpaid-entry set
+  //    is re-derived fresh from entry_payments on every call; voiding an
+  //    entry is a plain status update that naturally excludes it from the
+  //    next call's `.eq('status', 'pending')` selection (idempotent — a
+  //    retry that finds nothing new to void simply does nothing). Only one
+  //    write happens in this method (the entries update), unlike Pick5/
+  //    LMS's two-step "void picks, then void entries" sequence — there is
+  //    no picks-level write here to order relative to it (see Q4 above),
+  //    so there is no partial-failure/retry-ordering hazard to guard
+  //    against in the first place, not an omitted safeguard.
+  //
+  // Query shape: entries stay 'pending' for the whole competition, exactly
+  // like LMS (GE-4.5) — Predictor's own lockEntries() (Slice 3) locks the
+  // individual prediction, never game_entries.status, so 'pending' is the
+  // only status a live entry is ever in before this method runs. Paid
+  // entries are left untouched (still 'pending') — same as
+  // LmsEngine.settle(), which never transitions a paid entry to 'settled'
+  // either, since that only makes sense once the competition itself
+  // concludes (determineWinner()/awardPrize() territory, out of scope).
+  async settle(ctx: GameEngineContext, gameweekId: number): Promise<void> {
+    const potIds = await this.getPredictorPotIds(ctx)
+    if (potIds.length === 0) {
+      return
+    }
+
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('id, pot_id, user_id')
+      .eq('status', 'pending')
+      .in('pot_id', potIds)
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+    if (!entries?.length) {
+      return
+    }
+
+    const { data: payments, error: paymentsError } = await ctx.supabase
+      .from('entry_payments')
+      .select('pot_id, user_id, is_paid')
+      .eq('scope', 'season')
+      .in('pot_id', potIds)
+
+    if (paymentsError) {
+      throw new Error(`Failed to look up payments: ${paymentsError.message}`)
+    }
+
+    const paidKeys = new Set(
+      ((payments ?? []) as { pot_id: string; user_id: string; is_paid: boolean }[])
+        .filter((p) => p.is_paid)
+        .map((p) => `${p.pot_id}:${p.user_id}`)
+    )
+
+    const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
+      .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
+      .map((e) => e.id)
+
+    if (unpaidEntryIds.length === 0) {
+      return
+    }
+
+    const { error: voidEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'void' })
+      .in('id', unpaidEntryIds)
+
+    if (voidEntriesError) {
+      throw new Error(`Failed to void unpaid entries: ${voidEntriesError.message}`)
+    }
   }
 
   async generateStandings(_ctx: GameEngineContext, _potId: string): Promise<StandingsRow[]> {

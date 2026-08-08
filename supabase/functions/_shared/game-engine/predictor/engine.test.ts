@@ -332,7 +332,7 @@ interface FakePredictorPick {
   is_exact_score: boolean
   scorer_bonus_awarded: boolean
 }
-interface FakeCalcGameEntry { id: string; pot_id: string }
+interface FakeCalcGameEntry { id: string; pot_id: string; status: string }
 interface FakeCalcPot {
   id: string
   predictor_exact_score_points: number
@@ -423,7 +423,7 @@ function baseCalcDb(overrides: Partial<FakeCalcDb> = {}): FakeCalcDb {
   return {
     fixtures: [{ id: 500, gameweek_id: 13, status: 'finished', home_goals: 2, away_goals: 1 }],
     predictor_fixture_picks: [],
-    game_entries: [{ id: 'entry-1', pot_id: 'pot-1' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', status: 'pending' }],
     pots: [defaultPot()],
     player_fixture_goals: [],
     game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 0, exact_score_count: 0, correct_scorer_count: 0 }],
@@ -671,4 +671,245 @@ Deno.test('calculateScore does nothing when there are no picks at all for the ga
   await engine.calculateScore(ctx, 13)
 
   assertEquals(db.game_entry_predictor[0].total_points, 0)
+})
+
+// Cross-slice correction, 2026-08-08 (docs/decisions.md § calculateScore()
+// must not mutate a voided entry) — settle() never touches
+// predictor_fixture_picks, so a voided entry's not-yet-resolved pick could
+// previously still be freshly scored, and its points folded into
+// game_entry_predictor's totals, by a later calculateScore() call. These
+// two tests reproduce that and confirm the game_entries.status = 'pending'
+// filter added to calculateScore() closes it.
+Deno.test('calculateScore does not resolve a pick belonging to a voided entry', async () => {
+  const engine = new PredictorEngine()
+  const db = baseCalcDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', status: 'void' }],
+    predictor_fixture_picks: [basePick({ predicted_home_score: 2, predicted_away_score: 1 })], // exact match with the default fixture (2-1)
+  })
+  const ctx = fakeCalcContext(db)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.predictor_fixture_picks[0].points_awarded, null) // left unresolved, not scored
+  assertEquals(db.predictor_fixture_picks[0].is_exact_score, false)
+})
+
+Deno.test('calculateScore does not fold a voided entry\'s points into game_entry_predictor', async () => {
+  const engine = new PredictorEngine()
+  const db = baseCalcDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', status: 'void' }],
+    predictor_fixture_picks: [basePick({ predicted_home_score: 2, predicted_away_score: 1, points_awarded: null })],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 0, exact_score_count: 0, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeCalcContext(db)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.game_entry_predictor[0].total_points, 0) // untouched — the entry never enters affectedEntryIds
+})
+
+// --- settle() ---------------------------------------------------------
+// A small in-memory relational fake (pots/game_entries/entry_payments),
+// same in-memory-mutate-real-rows approach as the calculateScore() fake
+// above. Only these three tables — settle() (Slice 5) deliberately never
+// touches predictor_fixture_picks or game_entry_predictor at all (see the
+// method's own doc comment for why: no void-capable column exists on
+// predictor_fixture_picks, and exclusion from any ranked output is
+// generateStandings()'s job, a later slice).
+
+interface FakeSettlePot { id: string; game_type: string }
+interface FakeSettleGameEntry { id: string; pot_id: string; user_id: string; status: string }
+interface FakeSettleEntryPayment { pot_id: string; user_id: string; scope: string; is_paid: boolean }
+
+interface FakeSettleDb {
+  pots: FakeSettlePot[]
+  game_entries: FakeSettleGameEntry[]
+  entry_payments: FakeSettleEntryPayment[]
+}
+
+function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
+  // deno-lint-ignore no-explicit-any
+  function queryBuilder(getRows: () => any[]) {
+    // deno-lint-ignore no-explicit-any
+    const filters: ((row: any) => boolean)[] = []
+    let updatePatch: Record<string, unknown> | null = null
+    // deno-lint-ignore no-explicit-any
+    const builder: any = {
+      select: () => builder,
+      eq: (col: string, val: unknown) => {
+        filters.push((row) => row[col] === val)
+        return builder
+      },
+      in: (col: string, vals: unknown[]) => {
+        const set = new Set(vals)
+        filters.push((row) => set.has(row[col]))
+        return builder
+      },
+      update: (patch: Record<string, unknown>) => {
+        updatePatch = patch
+        return builder
+      },
+      // deno-lint-ignore no-explicit-any
+      then: (resolve: (v: { data: any; error: null }) => void) => {
+        const rows = getRows().filter((row) => filters.every((f) => f(row)))
+        if (updatePatch) {
+          for (const row of rows) Object.assign(row, updatePatch)
+        }
+        resolve({ data: rows, error: null })
+      },
+    }
+    return builder
+  }
+
+  const fakeSupabase = {
+    from(table: keyof FakeSettleDb) {
+      return queryBuilder(() => db[table])
+    },
+  }
+  return { supabase: fakeSupabase as unknown as GameEngineContext['supabase'], now: () => new Date('2026-06-01T00:00:00Z') }
+}
+
+function baseSettleDb(overrides: Partial<FakeSettleDb> = {}): FakeSettleDb {
+  return {
+    pots: [{ id: 'pot-1', game_type: 'score_predictor' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: true }],
+    ...overrides,
+  }
+}
+
+Deno.test('settle does nothing when there are no score_predictor pots at all', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ pots: [{ id: 'pot-1', game_type: 'pick5' }] })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'pending')
+})
+
+Deno.test('settle leaves a paid entry pending and untouched', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb()
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'pending')
+})
+
+Deno.test('settle voids an unpaid entry', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: false }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'void')
+})
+
+Deno.test('settle treats a missing entry_payments row as unpaid', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ entry_payments: [] })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'void')
+})
+
+Deno.test('settle only voids the unpaid entry in a mix of paid and unpaid entries', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [
+      { id: 'entry-paid', pot_id: 'pot-1', user_id: 'user-paid', status: 'pending' },
+      { id: 'entry-unpaid', pot_id: 'pot-1', user_id: 'user-unpaid', status: 'pending' },
+    ],
+    entry_payments: [
+      { pot_id: 'pot-1', user_id: 'user-paid', scope: 'season', is_paid: true },
+      { pot_id: 'pot-1', user_id: 'user-unpaid', scope: 'season', is_paid: false },
+    ],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-paid')?.status, 'pending')
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-unpaid')?.status, 'void')
+})
+
+Deno.test('settle never reprocesses an entry that is already void', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'void' }],
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: false }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  // status is untouched (still 'void', not re-written) — the entries query
+  // itself only ever selects status = 'pending'.
+  assertEquals(db.game_entries[0].status, 'void')
+})
+
+Deno.test('settle does nothing when there are no pending entries in any score_predictor pot', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'settled' }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries[0].status, 'settled')
+})
+
+Deno.test('settle only considers score_predictor pots, not a pick5/LMS pot sharing the same game_entries table', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [
+      { id: 'pot-predictor', game_type: 'score_predictor' },
+      { id: 'pot-pick5', game_type: 'pick5' },
+    ],
+    game_entries: [
+      { id: 'entry-predictor', pot_id: 'pot-predictor', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-pick5', pot_id: 'pot-pick5', user_id: 'user-1', status: 'pending' },
+    ],
+    entry_payments: [],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-predictor')?.status, 'void')
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-pick5')?.status, 'pending')
+})
+
+Deno.test('settle behaves identically regardless of which gameweekId triggered the call — payment is season-wide, not cycle- or gameweek-scoped', async () => {
+  const engine = new PredictorEngine()
+  const dbA = baseSettleDb({ entry_payments: [] })
+  const dbB = baseSettleDb({ entry_payments: [] })
+
+  await engine.settle(fakeSettleContext(dbA), 1)
+  await engine.settle(fakeSettleContext(dbB), 99)
+
+  assertEquals(dbA.game_entries[0].status, 'void')
+  assertEquals(dbB.game_entries[0].status, 'void')
+})
+
+Deno.test('settle is safe to call repeatedly — a second call finds nothing new to void', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: false }],
+  })
+  const ctx = fakeSettleContext(db)
+
+  await engine.settle(ctx, 13)
+  assertEquals(db.game_entries[0].status, 'void')
+
+  await engine.settle(ctx, 13)
+  assertEquals(db.game_entries[0].status, 'void')
 })

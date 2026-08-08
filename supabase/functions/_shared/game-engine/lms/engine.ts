@@ -313,9 +313,22 @@ export class LmsEngine implements GameEngine {
       return
     }
 
+    // Cross-slice correction, 2026-08-08 (post-Slice-5 review, see
+    // docs/decisions.md § calculateScore() must not mutate a voided entry):
+    // status = 'pending' excludes a voided entry from this method entirely,
+    // regardless of its own, possibly-stale game_entry_lms.competitive_status
+    // (settle() never touches that column when it voids an entry). Without
+    // this filter, a voided entry stayed in aliveEntryIds below indefinitely
+    // and a later gameweek's calculateScore() could still eliminate it (the
+    // "missing pick" branch) or overwrite an already-voided pick's result —
+    // scoring mutating state settle() had already finalized. LMS entries
+    // never reach any status besides 'pending'/'void' at this stage (never
+    // 'locked'/'settled' — GE-5.2), so this is exactly equivalent to
+    // "exclude void," not an accidental narrowing.
     const { data: potEntries, error: potEntriesError } = await ctx.supabase
       .from('game_entries')
       .select('id')
+      .eq('status', 'pending')
       .in('pot_id', potIds)
 
     if (potEntriesError) {

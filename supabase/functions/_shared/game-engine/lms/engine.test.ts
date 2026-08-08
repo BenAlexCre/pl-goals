@@ -562,6 +562,43 @@ Deno.test('calculateScore leaves a pick pending when its team has no fixture dat
   assertEquals(db.game_entry_lms[0].competitive_status, 'alive')
 })
 
+// Cross-slice correction, 2026-08-08 (docs/decisions.md §
+// calculateScore() must not mutate a voided entry) — game_entry_lms.
+// competitive_status is never touched by settle()'s void step, so a voided
+// entry could stay 'alive' there indefinitely. These two tests reproduce
+// exactly the bug found during that review and confirm the game_entries.status
+// = 'pending' filter added to calculateScore() closes it.
+Deno.test('calculateScore does not eliminate a voided entry with no pick, even though game_entry_lms still says alive', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'void' }],
+    game_entry_lms: [{ game_entry_id: 'entry-1', competitive_status: 'alive', eliminated_gameweek_id: null }],
+    lms_team_picks: [], // no pick for this gameweek — would normally eliminate an alive entry
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive') // untouched, not eliminated
+  assertEquals(db.game_entry_lms[0].eliminated_gameweek_id, null)
+})
+
+Deno.test('calculateScore does not overwrite an already-void pick belonging to a voided entry', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'void' }],
+    game_entry_lms: [{ game_entry_id: 'entry-1', competitive_status: 'alive', eliminated_gameweek_id: null }],
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'void' }],
+    fixtures: [{ gameweek_id: 13, home_team_id: 100, away_team_id: 200, status: 'finished', home_goals: 3, away_goals: 0 }],
+  })
+  const ctx = fakeCalculateScoreContext(db, AFTER_DEADLINE)
+
+  await engine.calculateScore(ctx, 13)
+
+  assertEquals(db.lms_team_picks[0].result, 'void') // not overwritten to 'won'
+  assertEquals(db.game_entry_lms[0].competitive_status, 'alive') // not eliminated either
+})
+
 // --- settle() ----------------------------------------------------------------
 // Reuses the same generic in-memory relational fake as calculateScore()'s
 // tests — settle() reads a subset of the same tables (pots, game_entries,

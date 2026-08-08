@@ -142,7 +142,30 @@ and, for the retired prototype schema, in `compute-scores`. **For Last Man Stand
 (`LmsEngine.settle()`, Milestone 5 Slice 5), the same rule reads
 `entry_payments.scope = 'season'` instead of `'gameweek'` — LMS charges one flat fee
 for the whole competition, not a weekly one — so voiding an entry voids **every** one
-of its picks, across every gameweek it's played, not just the current one.
+of its picks, across every gameweek it's played, not just the current one. **For
+Score Predictor** (`PredictorEngine.settle()`, Milestone 6 Slice 5), the same
+`scope = 'season'` flat-fee shape applies, for the same reason (one entry for the
+whole competition, GE-4.5) — an unpaid entry is excluded going forward, though its
+individual already-scored predictions are not currently marked void on their own
+row the way Pick 5's/LMS's picks tables are (a known, documented gap — see
+[decisions.md § Score Predictor settlement](./decisions.md#score-predictor-settlement)).
+
+**Late Payment Override, decided and implemented 2026-08-08.** A voided
+entry is not permanently lost — if a player pays late, a pot admin (or app
+admin) can mark the payment paid and then, as a second, separate,
+explicit action, choose to reinstate the entry. This never happens
+automatically; accepting the payment alone does not reinstate anything.
+Reinstatement re-scores everything the entry missed while voided (a
+gameweek during the void window the entry had no chance to pick for is
+still treated as a miss, same as any other missed gameweek — reinstatement
+restores the entry to the competition, it doesn't retroactively grant
+picks that were never made) and lets the pot's own normal settlement
+continue from there. **One firm limit**: reinstatement is refused outright
+once the relevant competition instance has already paid out (a gameweek's
+prize for Pick 5, or the whole competition's prize for LMS/Predictor) —
+money that's already been distributed is never clawed back or re-split.
+Applies to all three modes, including Pick 5. Full reasoning:
+[decisions.md § Late Payment Override](./decisions.md#late-payment-override).
 
 **Implemented, 2026-08-05**: a pot admin (or app admin) can now actually verify
 payments, both ways, through `/admin/payments` — `pages/AdminPayments.jsx`. Single
@@ -347,18 +370,26 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-4: entry creation, pick submission,
-locking, scoring).** Winner determination and prize awarding are not
-built yet — see
+decided and shipped so far (Slices 1-5: entry creation, pick submission,
+locking, scoring, settlement).** Standings, winner determination, and prize
+awarding are not built yet — see
 [decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
 [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
 [§ Score Predictor locking](./decisions.md#score-predictor-locking),
-and [§ Score Predictor scoring](./decisions.md#score-predictor-scoring)
+[§ Score Predictor scoring](./decisions.md#score-predictor-scoring),
+and [§ Score Predictor settlement](./decisions.md#score-predictor-settlement)
 for the full reasoning and everything still genuinely undecided.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
 unlike Pick 5's per-gameweek entries) — cumulative points accrue across
 every gameweek's prediction, so there's no separate entry per week.
+
+**Payment.** One entry fee per competition, paid once — never a recurring
+weekly charge, same shape as Last Man Standing's and for the same reason
+(one entry for the whole season). An entry that isn't verified as paid is
+excluded going forward — see [§ Payment verification rules](#payment-verification-rules)
+for the shared mechanics and Predictor's one known gap (no per-pick void
+marker yet).
 
 **Predicting a fixture.** Each gameweek, an entrant chooses exactly one
 fixture from that gameweek and predicts its exact scoreline (e.g. 2-1).

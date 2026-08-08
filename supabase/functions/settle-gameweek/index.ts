@@ -3,9 +3,15 @@ import { corsHeaders } from '../_shared/cors.ts'
 import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
 // Side-effecting imports — register each mode with the dispatcher (GE-7/
-// GE-18). Same pattern as compute-deadlines/compute-scores.
+// GE-18). Same pattern as compute-deadlines/compute-scores. Milestone 6
+// Slice 5: added the predictor import below — ALL_GAME_TYPES already
+// listed 'score_predictor' and the dispatch loop already called it
+// unconditionally, same registration-only gap already fixed in
+// compute-deadlines (Slice 3) and compute-scores (Slice 4), not a new
+// discovery bug.
 import '../_shared/game-engine/pick5/index.ts'
 import '../_shared/game-engine/lms/index.ts'
+import '../_shared/game-engine/predictor/index.ts'
 
 // Milestone 4, Slice 5 — docs/game-engine.md § GE-6 (settle) / GE-8.4
 // (Settlement flow). The "all fixtures finished" check and everything

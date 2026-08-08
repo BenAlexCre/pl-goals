@@ -2244,3 +2244,485 @@ score + correct goalscorer, correct result only, wrong result entirely)
 across two real calls. All test data (1 pot, 3 users, 1 seeded
 `fixture_events` row) removed by exact ID, re-verified as zero rows across
 every table touched, independently of the script's own cleanup report.
+
+## Score Predictor settlement
+
+**Decided 2026-08-08**, Milestone 6 Slice 5, per the repo owner's explicit
+"review `Pick5Engine.settle()` and `LmsEngine.settle()` first, don't copy
+either, justify every similarity and difference" — five product questions
+were posed up front and answered by review, not invention, before any code
+was written.
+
+**Decision:** `PredictorEngine.settle()` implements the Payment
+Verification payment-void rule only — the same "deliberately small" shape
+`LmsEngine.settle()`'s own Slice 5 had, for the same underlying reason
+(`generateStandings()`/`determineWinner()`/`awardPrize()` either aren't
+implemented yet or genuinely don't make sense on an ordinary gameweek).
+Every `score_predictor` pot's `status = 'pending'` entries are re-checked
+against `entry_payments` (`scope = 'season'`) on every call; an entry with
+no verified payment flips to `game_entries.status = 'void'`; a paid entry
+is left untouched, still `'pending'` (the competition hasn't concluded —
+`'settled'` only makes sense once it has, `determineWinner()`/
+`awardPrize()` territory, out of scope here).
+
+**Context — the five questions asked before coding, and their answers:**
+
+1. **What constitutes a settled scoring period?** Not a season/cycle
+   concept at all, for this method's actual scope. "Settled" here means
+   only "this gameweek's payment-void check has run" — gated by the same
+   caller-side "are this gameweek's fixtures all finished" check
+   `settle-gameweek/index.ts` already applies uniformly to every mode, same
+   as Pick 5/LMS. No independent period or cycle boundary is computed by
+   this method.
+2. **Does settlement happen once per cycle or once per season?** Neither —
+   once per gameweek, same cadence as every other mode's `settle()`,
+   because Payment Verification (the only thing this method actually does)
+   is a flat, one-time, whole-competition fee (`entry_payments.scope =
+   'season'`) whose paid/unpaid status has no cycle-dependent timing.
+   Re-checking it redundantly every gameweek is safe (idempotent) and
+   needs no boundary concept — confirmed the same conclusion
+   `LmsEngine.settle()` already reached independently, for the identical
+   payment shape (GE-4.5: both modes' `game_entries` are season-scoped).
+3. **How does `predictor_cycle_mode` influence settlement?** Not at all —
+   confirmed by review, not guessed. Its two real, documented uses (a
+   not-yet-enforced pick-reuse restriction; a not-yet-decided
+   `determineWinner()`/`awardPrize()` payout-timing question — does a
+   `two_halves` pot pay out once or twice?) are both explicitly out of
+   this slice's scope, and neither touches a flat one-time fee's voiding
+   logic. `predictor_cycle_mode` is read nowhere in `settle()`.
+4. **How are unpaid entries treated after scores already exist?** The
+   entry's `game_entries.status` flips to `'void'` (shared `entry_status`
+   enum, same value Pick 5/LMS use); already-computed
+   `predictor_fixture_picks.points_awarded`/`game_entry_predictor` totals
+   are left untouched, matching Pick 5/LMS's own `settle()` — neither
+   zeroes the mode's own scoring columns; actual exclusion from a ranked
+   result is `generateStandings()`'s job (a future slice), by only
+   ranking `'settled'` entries. **Deliberately not mirrored**: Pick 5/LMS
+   also flip their own picks table's per-row result to `'void'`
+   (`pick5_picks.result`/`lms_team_picks.result`) — `predictor_fixture_picks`
+   has no equivalent column, and never had one before this slice either;
+   adding one now would be new schema surface with no reader, since
+   `calculateScore()` isn't touched this slice and nothing else would ever
+   consult it. Flagged as a real, known gap for whichever future slice
+   builds a Predictor results UI or `generateStandings()`, not added
+   speculatively.
+
+   **A more consequential gap found during this review, also flagged
+   rather than fixed:** `game_entries` is season-wide for Predictor
+   (GE-4.5), but `calculateScore()` only ever resolves the one gameweek
+   it's called for and has no `game_entries.status` awareness at all. An
+   entry voided at gameweek 5's `settle()` could still have a
+   not-yet-finished gameweek 8 pick resolved and folded into
+   `game_entry_predictor`'s totals once gameweek 8 finishes —
+   `settle()` never revisits or corrects that. `LmsEngine` has a
+   narrower version of the same shape (its own `calculateScore()` checks
+   `game_entry_lms.competitive_status`, which its `settle()`'s void path
+   never syncs either) that has never been fixed or even previously
+   flagged in this document. Not addressed here — this slice implements
+   `settle()` only, per explicit instruction — but recorded so it isn't
+   lost the way its LMS analog was.
+5. **Can settlement safely rerun indefinitely?** Yes. The unpaid-entry set
+   is re-derived fresh from `entry_payments` on every call; voiding is a
+   plain status update that naturally excludes that entry from the next
+   call's `.eq('status', 'pending')` selection — a retry that finds
+   nothing new to void simply does nothing. Only one write happens in this
+   method (the entries update), unlike Pick 5/LMS's two-step "void picks,
+   then void entries" sequence — there is no picks-level write here to
+   order relative to it (per Q4 above), so there is no partial-failure/
+   retry-ordering hazard to guard against in the first place, not an
+   omitted safeguard.
+
+**Reason:** Payment Verification is shared-platform, mode-agnostic logic
+(GE-3/GE-4.3) — Predictor's own payment model was left "still undecided"
+in GE-4.3's own text pending a mode that actually needed it confirmed.
+This slice confirms it: structurally forced by `entry_scope = 'season'`
+(GE-4.5, same as LMS) and `pot_scope`'s only two values, `scope = 'season'`
+is the only shape that fits, resolving GE-4.3's hedge rather than leaving
+it open indefinitely.
+
+**Alternatives considered:**
+- **Wiring `generateStandings()`/`determineWinner()`/`awardPrize()` in
+  now, mirroring Pick 5/LMS's own `settle()` structure** — rejected
+  directly by the repo owner's explicit scope list ("Do not implement:
+  standings, determineWinner(), awardPrize(), notifications").
+- **Adding a `void`/`result` column to `predictor_fixture_picks` to mirror
+  Pick 5/LMS's picks-level voiding** — considered, rejected for this
+  slice: no existing reader, so it would be speculative schema surface: see
+  Q4 above.
+- **Gating settlement on a computed `predictor_cycle_mode` boundary**
+  (half-season vs. season) — rejected: the boundary computation itself is
+  a separately unresolved question (`docs/game-engine.md` § GE-15,
+  "half_cycle boundary computation... needs resolving before Milestone
+  6"), and Q2/Q3's review found no place in the payment-void logic where
+  it would even apply. Inventing one here would answer an unasked, still-
+  open question through the back door of an unrelated method.
+
+**Consequences:**
+- `PredictorEngine.settle()` is now implemented, but two real gaps are
+  formally on record rather than silently absent: no pick-level void
+  marker (Q4), and no protection against a later gameweek's
+  `calculateScore()` re-scoring an already-voided entry's future picks
+  (Q4, the more consequential one). Both need addressing before Predictor
+  is genuinely launch-ready — likely together, in whichever future slice
+  revisits `calculateScore()`/`generateStandings()`.
+- `settle-gameweek/index.ts` needed the same one-line registration-import
+  fix already applied to `compute-deadlines` (Slice 3) and `compute-scores`
+  (Slice 4) — its dispatch loop already listed `score_predictor`
+  unconditionally.
+- `PredictorEngine.settle()`'s own `getPredictorPotIds()` helper is
+  simpler than `LmsEngine.getEligibleLmsPotIds()`: no `start_gameweek_id`
+  filter exists for Predictor pots (the entry-window rule remains
+  genuinely undecided), and no "already concluded" filter is possible yet
+  either, since `awardPrize()` doesn't write `pot_prizes` for this mode
+  yet — every `score_predictor` pot is unconditionally eligible for now,
+  the same kind of sequencing gap `LmsEngine`'s own Slice 7→8 later closed,
+  flagged here rather than pre-solved for a method that doesn't exist yet.
+
+**Verified:** 10 new unit tests (258/258 across `supabase/functions/`, no
+regressions). Live, through the real `settle-gameweek` Edge Function (not a
+bypass script): gameweek 9's real, single fixture (id 104, no other
+gameweek in this dev database had every fixture already finished) was
+temporarily flipped to `'finished'` — `settle()` itself never reads
+fixture data, only the caller's own "is this gameweek ready" gate needed
+it — two real entries (one with a verified `entry_payments` row, one with
+none at all) were created in a real `score_predictor` pot; one real
+`settle-gameweek` call correctly left the paid entry `'pending'` and
+voided the unpaid one, and flipped gameweek 9 to `'completed'` as its own
+documented side effect; the gameweek was then reopened and a second real
+call confirmed the already-void entry was left alone, not reprocessed or
+errored — 10 checks, all passing. All test data (1 pot, 3 users) removed
+by exact ID; fixture 104 and gameweek 9 were reverted to their exact
+original status (`'scheduled'`/`'upcoming'`) as part of cleanup; an
+independent residue check (separate from the script's own report)
+confirmed zero rows remain and both reverted statuses hold.
+
+## calculateScore() must not mutate a voided entry
+
+**Investigated and fixed 2026-08-08**, ahead of Milestone 6 Slice 6, per
+the repo owner's explicit instruction to investigate the interaction
+between `calculateScore()`, settlement, and voided entries for both LMS
+and Score Predictor before continuing, and to implement the smallest
+shared correction necessary if scoring could still mutate a voided entry.
+
+**Finding: confirmed, for both modes, not hypothetical.** `settle()`
+(Slice 5 for Predictor; Milestone 5 Slice 5 for LMS) voids an unpaid
+entry by writing `game_entries.status = 'void'` — but neither mode's
+`calculateScore()` reads that column at all:
+
+- **LMS**: `calculateScore()` selects the entries to process via
+  `game_entry_lms.competitive_status = 'alive'`, a column `settle()`'s
+  void step never touches. A voided entry therefore stays `'alive'`
+  there indefinitely. On the very next gameweek where it has no pick
+  (the common case, since a voided entry is presumably no longer an
+  engaged player, and `validateEntry()` already rejects any *new*
+  submission once `entry.status !== 'pending'`), the "missing pick
+  eliminates" branch fires and flips it to `'eliminated'` — a real
+  mutation to state `settle()` had already finalized, reachable with no
+  unusual precondition at all. If the entry *does* still have an
+  already-submitted, not-yet-resolved pick for a later gameweek (equally
+  possible — nothing stops picking several open gameweeks ahead of time),
+  that pick's `result` gets freshly overwritten from whatever `settle()`
+  itself hadn't touched (its void step voids picks for every gameweek at
+  the moment of voiding, but only picks that already existed then).
+- **Score Predictor**: `calculateScore()` has no `game_entries.status`
+  awareness of any kind — flagged as a real, deferred gap during Slice
+  5's own review, now confirmed and closed. A voided entry's
+  not-yet-finished pick for a future gameweek would be freshly resolved
+  and its points folded into `game_entry_predictor`'s cumulative totals
+  by a later `calculateScore()` call, exactly as flagged.
+
+**Pick 5 is unaffected** — its own `calculateScore()` already filters
+`game_entries.status = 'locked'`, so a voided entry (which can never be
+`'locked'` again) is naturally excluded. No change needed there; confirmed
+by re-reading it, not assumed.
+
+**Decision — the smallest shared correction:** both `LmsEngine.calculateScore()`
+and `PredictorEngine.calculateScore()` now additionally filter their
+`game_entries` lookup to `status = 'pending'`. Both modes' entries only
+ever sit in `'pending'` or `'void'` at this stage (LMS/Predictor entries
+never reach `'locked'`/`'settled'`, per GE-4.5/GE-5.2/GE-5.3), so
+`status = 'pending'` is exactly equivalent to "not voided" — a one-line
+change in each engine (LMS: added to the existing `game_entries` select
+that builds `entryIds`; Predictor: added `status` to the existing
+`game_entries` select and skip a pick in the main loop when its entry
+isn't in the resulting pending set). No schema change, no change to
+`settle()` itself in either mode, no change to Pick 5.
+
+**Alternatives considered:**
+- **Have `settle()` also sync `game_entry_lms.competitive_status`** (e.g.
+  to a value meaning "voided") — rejected as larger than necessary: it
+  would need a new status value (the enum is `alive`/`eliminated` only,
+  GE-5.2's own deliberate two-value design) or overload `eliminated`
+  incorrectly, and wouldn't help Predictor at all (no competitive-status
+  concept exists there). The one-line `game_entries.status` filter fixes
+  both modes with the same shape and no schema change.
+- **Add a pick-level void marker to `predictor_fixture_picks`** (closing
+  Slice 5's other flagged gap at the same time) — rejected as out of
+  scope for "the smallest shared correction necessary": that gap is about
+  a voided entry's *display* state, not about scoring *mutating* a voided
+  entry, which is what was actually asked to be investigated and fixed.
+  Still open, still tracked in `project-board.md`.
+
+**Consequences:**
+- `pot_standings_snapshots`/`generateStandings()` still has a related,
+  narrower, previously-**unflagged** issue found during this same
+  investigation: `LmsEngine.generateStandings()` ranks entries purely by
+  `game_entry_lms.competitive_status`, with no `game_entries.status`
+  filter at all — a voided entry with a stale `'alive'` status would
+  still render in the "alive" tier of a standings snapshot. This is a
+  *read*-side bug, not `calculateScore()` mutating anything, so it's
+  outside this fix's actual scope ("if scoring can still mutate a voided
+  entry") — flagged here for the record, not fixed, since generating
+  standings isn't part of what was asked to be investigated.
+- Both engines' existing test fakes needed their `game_entries` default
+  fixture updated to include `status: 'pending'`, since the new filter
+  means a fake row with no `status` field at all would previously have
+  been silently excluded by the added `.eq()`/set-membership check —
+  this surfaced as 11 failing Predictor tests on the first run (LMS's own
+  fake already defaulted to `status: 'pending'`), fixed by updating the
+  fake, not the production code.
+
+**Verified:** 4 new unit tests (2 per mode — reproducing the exact
+stale-`'alive'`-with-no-pick scenario for LMS, and the
+unresolved-pick-on-a-voided-entry scenario for Predictor), 262/262 across
+`supabase/functions/`, no regressions once the test fakes were corrected.
+Live, through the real `compute-scores` Edge Function (not a bypass
+script): a real voided LMS entry with a stale-`'alive'` extension row and
+no pick for gameweek 9, and a real voided Predictor entry with one
+unresolved pick against gameweek 2's real, already-finished fixture 26 —
+one real call confirmed neither was touched (LMS entry still `'alive'`,
+not eliminated; Predictor pick still unresolved, `points_awarded` still
+null) — 3 checks, all passing. All test data removed by exact ID,
+independently re-verified as zero residue rows.
+
+## Late Payment Override
+
+**Decided 2026-08-08**, a prerequisite correction ahead of Milestone 6
+Slice 6, per the repo owner's explicit "review the payment lifecycle
+across all three modes, re-read game-engine.md/business-rules.md/
+decisions.md/current-state.md, review Pick5Engine.settle()/
+LmsEngine.settle()/PredictorEngine.settle()/admin-actions/
+generateStandings() — do not assume the implementation, first determine
+the cleanest architecture" instruction.
+
+**New business rule:** an organiser/admin may explicitly accept a late
+payment and reinstate an entry that settlement already voided for
+non-payment. This must never happen automatically — accepting the
+payment (`mark_paid`) and reinstating the entry are two separate,
+independently-explicit admin actions.
+
+**Investigation, in the order the task asked for it:**
+
+1. **Should reinstatement simply set `game_entries.status = 'pending'`,
+   or does it need a dedicated flow?** A dedicated flow — a bare status
+   flip is necessary but not sufficient. Reason: once a gameweek's
+   `settle-gameweek` run flips `gameweeks.status` to `'completed'`
+   (which happens in the same invocation that first voids the entry),
+   `compute-scores` permanently stops calling `calculateScore()` for
+   that gameweek (`compute-scores` only ever queries gameweeks with
+   `status in ('upcoming','live')`). A voided entry's picks for every
+   gameweek that occurred during the void window were never resolved
+   (the cross-slice correction above deliberately excludes non-`'pending'`
+   entries from `calculateScore()`), so nothing in the normal cron
+   pipeline will ever catch them up on its own, regardless of the status
+   flip. Reinstatement must explicitly trigger the catch-up itself.
+2. **What happens to previously-voided picks / LMS `competitive_status` /
+   Predictor cumulative scores / standings / winner determination?**
+   - **Previously-voided picks (Pick 5/LMS)** self-correct for free once
+     `calculateScore()` is re-invoked with the entry back in scope —
+     that method already overwrites whatever's currently stored
+     (including `'void'`) with a freshly computed result whenever they
+     differ; no explicit "un-void" step is needed.
+   - **LMS `competitive_status`** is untouched by voiding in the first
+     place (confirmed by the cross-slice correction above) — reinstatement
+     doesn't need to touch it either; `calculateScore()`'s own
+     `aliveEntryIds` filter does the right thing once the entry is back
+     in `status = 'pending'` scope, including correctly eliminating it
+     for any gameweek during the void window it genuinely has no pick
+     for (the existing "a missed pick eliminates" rule, replayed
+     honestly, not bypassed).
+   - **Predictor cumulative scores** stay frozen (as designed in Slice 5)
+     until `calculateScore()` re-resolves the skipped gameweeks, at which
+     point `game_entry_predictor`'s existing full-recompute design
+     (Slice 4) picks them up automatically — no reinstatement-specific
+     aggregation logic needed.
+   - **Standings** are refreshed by re-running the normal `settle()`
+     pipeline, below (which already calls `generateStandings()`).
+   - **Winner determination** is not specially triggered — it's a normal
+     consequence of re-running `settle()` (below), gated by the same
+     "already concluded" guard that prevents reopening a real payout.
+3. **Does reinstatement require recalculation? Which `GameEngine`
+   methods, without duplicating logic?** Yes (per point 1). Exactly two,
+   both already implemented, called directly rather than reimplemented:
+   `calculateScore()` for every gameweek that may have been skipped, then
+   `settle()` once, reusing 100% existing, already-tested logic. For
+   Pick 5 (gameweek-scoped entry, GE-4.5) that's exactly one gameweek. For
+   LMS/Predictor (season-scoped entry) that's every gameweek in the pot's
+   own season, in ascending order — replaying the same sequence they'd
+   have originally occurred in, required for LMS's elimination logic to
+   reach the same conclusion it would have reached had the entry never
+   been voided. `calculateScore()` cheaply no-ops for a gameweek that
+   hasn't started or is already correctly resolved, so looping over the
+   whole season (not attempting to compute a narrower "affected" range)
+   is simple and safe, not wasteful in any way that matters for a rare,
+   admin-triggered action.
+
+   **Does re-running `settle()` risk automatically re-triggering
+   `awardPrize()`/`determineWinner()` — the exact thing "must never
+   happen automatically" forbids?** No, because of the guard in point 5
+   below: reinstatement first refuses to proceed at all if the relevant
+   competition instance has already concluded (a settled `pot_prizes`
+   row already exists). Once past that guard, letting the pot's own
+   normal, already-idempotent `settle()` pipeline run its natural course
+   on now-correct data is the *intended*, not an incidental, outcome —
+   it's exactly what would have happened on the next ordinary cron tick
+   had the entry never been wrongly voided, just triggered immediately by
+   the explicit reinstatement action instead of waiting for one. The rule
+   the repo owner stated is about the *entry's reinstatement* being a
+   deliberate, explicit act — not about suppressing every normal,
+   already-established downstream consequence of correctly-scored data.
+   Live-verified this is genuinely reachable, not just theorized: a
+   single-entry LMS pot's reinstatement correctly ran all the way through
+   to a real, paid conclusion in one call.
+4. **Should Payment Verification gain `reinstate_entry`, or should
+   `mark_paid` optionally reinstate?** A new, dedicated `reinstate_entry`
+   admin action — folding it into `mark_paid` would make reinstatement an
+   automatic side effect of marking paid, directly violating "this must
+   never happen automatically." Lives in `admin-actions` (a new file,
+   `reinstate.ts`, mirroring `bulkPayments.ts`'s existing split of a pure,
+   unit-tested decision function from DB-orchestration code), not as a
+   9th `GameEngine` contract method — this is cross-mode, shared
+   Payment-Verification-adjacent admin tooling (GE-16's "Admin Service"
+   category), the same category `mark_paid`/`mark_unpaid`/
+   `bulk_verify_payments` already occupy, not mode-specific game logic.
+   Gets the existing single-`pot_id` `isPotAdmin || isAppAdmin`
+   authorization gate for free, same as `mark_paid`/`mark_unpaid`/
+   `add_member`/`remove_member` — no special-casing needed, unlike
+   `bulk_verify_payments`'s own multi-pot authorization.
+5. **Should Pick 5 also support late payment overrides?** Yes — the repo
+   owner explicitly warned not to assume otherwise, and the review
+   confirmed the underlying problem is symmetric: any mode's `settle()`
+   can void an entry for non-payment, so any mode's admin should be able
+   to reverse that after a late payment, for the same reason. Pick 5's
+   narrower, gameweek-scoped entry actually makes its "already concluded"
+   guard trigger *more* often in practice, not less — `Pick5Engine.settle()`
+   calls `awardPrize()` unconditionally every gameweek (a new payable
+   instance concludes weekly for Pick 5), so by the time an admin gets
+   around to accepting a late payment, that gameweek's prize has very
+   often already been paid out. This isn't a Pick-5-specific special
+   case: it's the *same* shared guard (a settled `pot_prizes` row for the
+   relevant instance — `scope='gameweek'`+`gameweek_id` for Pick 5,
+   `scope='season'` for LMS/Predictor) simply triggering at a different
+   natural rate because Pick 5's competition instances conclude weekly
+   instead of at season end.
+
+**The "already concluded" guard, precisely:** before writing anything,
+`reinstate_entry` looks up `pot_prizes` for the entry's own competition
+instance (Pick 5: `pot_id`+`gameweek_id`+`scope='gameweek'`; LMS/Predictor:
+`pot_id`+`scope='season'`) and refuses outright if `is_settled = true` —
+real money has already been distributed for that instance, and
+reinstating past that point would mean either clawing back an award or
+creating a second, conflicting outcome. Not merely undesirable to allow
+silently — refused with a clear, explicit rejection reason, matching the
+same "the organiser must explicitly decide" spirit for the one case this
+correction won't let them override at all (the money's already gone out
+the door).
+
+**Investigation into `admin-actions` surfaced a real, blocking, unrelated
+bug, fixed as part of this correction because `reinstate_entry` cannot be
+exercised for LMS/Predictor without it:** `mark_paid`/`mark_unpaid` both
+upserted `entry_payments` with `onConflict: 'pot_id,user_id,gameweek_id'`
+unconditionally. That target matches the full 3-column unique constraint
+— correct for Pick 5's `scope='gameweek'` rows — but a season-scoped row
+(LMS/Predictor, `gameweek_id` null) is actually deduplicated by a
+*different*, partial unique index (`entry_payments_pot_user_season_key`,
+unique on `(pot_id, user_id)` `WHERE gameweek_id IS NULL`), which
+PostgREST's `onConflict` cannot target this way — the same class of gap
+GE-4.6 already documents for `pot_standings_snapshots`/`pot_prizes`.
+Confirmed live, not theoretical: a second write to the same season-scoped
+key hard-failed with `duplicate key value violates unique constraint
+"entry_payments_pot_user_season_key"`. This means marking a season-scoped
+entry paid or unpaid more than once — routine, and exactly the
+mark-paid-then-reinstate sequence this feature itself depends on — was
+completely broken for LMS/Predictor. This **corrects** GE-4.3's own prior
+claim ("No Payment Verification code changes of any kind are needed for
+LMS") — that claim asserted the shape was correct without ever exercising
+a second write against it. Fixed with the same get-or-create-by-id
+workaround already established for the other partial-unique-index tables:
+look up the existing row by its natural key first, then `UPDATE` by `id`
+if found or `INSERT` if not. `bulk_verify_payments` is unaffected —
+`gameweek_id` is a required, non-null parameter there, so it never
+reaches the partial index.
+
+**Schema change — `020_reinstatement_audit.sql`:** two new nullable
+`game_entries` columns, `reinstated_at timestamptz` / `reinstated_by uuid
+references profiles(id)`. Justified individually:
+- `reinstated_at` — the durable audit timestamp "preserve auditability"
+  requires, mirroring `entry_payments.marked_by`/`marked_at`'s own
+  precedent for the *payment* decision; this records the *reinstatement*
+  decision specifically, a genuinely distinct fact (an entry can be
+  marked paid at any time independent of whether an admin has since also
+  chosen to reinstate a voided row) that can't be folded into
+  `entry_payments` without conflating two different decisions. A single
+  nullable timestamp also doubles as the retry-safety signal
+  `reinstate.ts` needs to distinguish "never voided" from "reinstatement
+  in progress/retried" (see below) — not a second, redundant boolean
+  alongside it, the exact "settled boolean alongside status" mistake this
+  schema already removed once (GE-4.5).
+- `reinstated_by` — accountability, directly mirroring
+  `entry_payments.marked_by`.
+
+No client grant on either column (verified live, not assumed): `anon`
+inherited the same broad-but-RLS-blocked grants every other
+`game_entries` column already had (harmless — `game_entries` has RLS
+enabled with zero `anon`-role policies, confirmed live); `authenticated`'s
+existing `UPDATE` grant is already narrowed to `updated_at` only via an
+explicit column-level `GRANT` (GE-11), which does not automatically
+extend to new columns, so no `REVOKE` was needed to keep these two out of
+an ordinary user's reach — confirmed empirically after applying the
+migration, not assumed. `service_role`'s own table-level access covers
+the new columns automatically, also confirmed live, no explicit grant
+needed.
+
+**Retry-safety design, satisfying "remain fully idempotent"/"remain
+retry-safe":** `decideReinstatement()` (a pure function, `reinstate.ts`,
+unit-tested in isolation — the same split `bulkPayments.ts`'s
+`classifyBulkPaymentRows()` already established) distinguishes four
+non-write outcomes (`no_entry`, `not_void`, `payment_not_verified`,
+`already_concluded`) from the one write outcome (`reinstate`). Critically,
+`reinstate` itself carries a `writeStatus` flag: `true` for a fresh
+void→reinstate transition, `false` when the entry is already non-`'void'`
+but `reinstated_at` is already set — a retry of a previously-started
+reinstatement whose status write landed but whose recompute pass may not
+have finished. Both cases fall through to the *same* recompute step
+unconditionally (re-running `calculateScore()`/`settle()` is itself
+already idempotent, so simply always doing it again on a retry is
+correct, not wasteful in a way that matters). This is why `reinstated_at`
+being non-null-but-status-non-void is treated as "retry the recompute,"
+not "nothing to do" — the alternative (treating any non-`'void'` status
+as a no-op) would silently strand an incomplete recompute forever after
+any partial failure.
+
+**Verified:** 12 new unit tests for `decideReinstatement()` (every branch:
+no entry, not-void-never-reinstated, unpaid, already-concluded, priority
+between the last two, reinstate for each of the three game types with the
+correct target status, retry for both LMS-shaped and Pick5-shaped
+entries, an unpaid retry still rejected, an already-settled entry never
+falsely reinstated) — 274/274 across `supabase/functions/`, no
+regressions. Live, through the real `admin-actions` Edge Function (not a
+bypass script): a non-admin pot member correctly forbidden (403);
+reinstate-before-payment-verified rejected; the season-scope `mark_paid`
+upsert fix exercised directly (a second real write, which previously
+500'd, now succeeds); a manually-seeded settled `pot_prizes` row
+correctly blocks reinstatement; a real LMS reinstatement correctly
+re-resolved a previously-void pick to its true result and ran the
+competition through to a genuine, paid conclusion (a single-entry pot in
+a fully-historical season inevitably reaches one, which is the correct,
+intended outcome, not a test artifact); a further reinstate call on that
+now-genuinely-concluded pot was correctly blocked, without needing a
+manually-seeded guard row this time; a normal, never-voided entry
+produced a harmless no-op; a real Score Predictor reinstatement correctly
+re-resolved a previously-unresolved pick and updated `game_entry_predictor`'s
+totals — 18 checks, all passing. All test data (4 pots' worth of
+users/entries/picks/payments) removed by exact ID, independently
+re-verified as zero residue rows across pots, users, and entries.
