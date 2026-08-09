@@ -2934,3 +2934,309 @@ freshly-reinstated one, `rank 3` shared by the two 3-point entries,
 unchanged rather than duplicating or incrementing anything — 15 checks,
 all passing. All test data removed by exact ID, independently
 re-verified as zero residue.
+
+## Score Predictor winner determination
+
+**Decided 2026-08-08**, Milestone 6 Slice 7, per the repo owner's explicit
+"review Pick5Engine.determineWinner() and LmsEngine.determineWinner()
+first, do not assume Predictor should follow either, justify every
+similarity and difference" instruction, continuing directly from Slice 6's
+own standings work.
+
+**Decision:** `PredictorEngine.determineWinner()` recomputes directly from
+`game_entries`/`game_entry_predictor` (never `pot_standings_snapshots`),
+returns every non-void entry tied for the highest cumulative
+`total_points` once the pot's `end_gameweek_id` deadline has passed, and
+returns `[]` otherwise. Purely a read — no writes of any kind.
+
+**Architecture review, the eight questions, in order:**
+
+1. **What constitutes a completed Predictor competition?** The pot's
+   designated final gameweek (`pots.end_gameweek_id` — a shared,
+   mode-agnostic column, GE-4.1, not an LMS-specific concept borrowed
+   without justification) has actually passed its deadline. Same
+   mechanism `LmsEngine`'s own `classifyOutcome()` already uses for its
+   `season_end` case, reused for the identical reason: nothing about "has
+   this season's real-world calendar end been reached" differs between
+   the two modes. This is Predictor's *only* conclusion path, unlike
+   LMS's four — no elimination concept means no earlier-than-end-gameweek
+   conclusion is structurally possible (confirmed by re-reading
+   `validateEntry()`/`calculateScore()`: `game_entry_predictor` has no
+   status column analogous to `competitive_status`, exactly as the Slice
+   1 architecture review already established).
+2. **How does `predictor_cycle_mode` affect this?** Not at all — confirmed
+   by reasoning, not assumed silently. GE-6's fixed
+   `determineWinner(ctx, potId)` signature has no way to express "which
+   half," so it can only ever answer one question: who has the most
+   cumulative points once the season ends. That computation is identical
+   regardless of `predictor_cycle_mode` — a `two_halves` pot's season-end
+   winner is still whoever has the most points across the *whole* season,
+   exactly like a `single_cycle` pot's. The genuinely open, still-
+   unresolved question — whether a `two_halves` pot ALSO needs a
+   separate, earlier determination at its half-cycle boundary
+   (§ Score Predictor architecture review, above; GE-15's "half_cycle
+   boundary computation... needs resolving") — is a question about a
+   different, not-yet-designed invocation this method has no part of. Not
+   guessed at, not blocked on.
+3. **Once per season, once per half, or both?** Once per season only —
+   the only concept the fixed interface can express (see Q2). "Once per
+   half" would need a different method signature, not something to
+   invent under "implement `determineWinner()` only."
+4. **How are ties handled?** Every entry tied for the highest
+   `total_points` is a winner — the same "every rank-1 entry wins"
+   philosophy already used everywhere in this codebase (Pick 5's
+   `rankWithTies()`-driven standings; LMS's wipeout/season-end groups),
+   not reinvented here. No Predictor-specific secondary tiebreak — nothing
+   documents one, and inventing one would repeat the exact mistake
+   `ISSUE-17` already taught this codebase to avoid.
+5. **Standings snapshots, or recompute from source?** Recompute directly
+   from `game_entries`/`game_entry_predictor` — explicitly required
+   ("never depend on cached state, recompute from authoritative data"),
+   and matches `LmsEngine.classifyOutcome()`'s own choice, not
+   `Pick5Engine.determineWinner()`'s (which *does* read
+   `pot_standings_snapshots` — safe for Pick 5 only because a settled
+   gameweek's snapshot can never change retroactively; a Predictor
+   season-end snapshot could in principle be stale if `generateStandings()`
+   hasn't been re-run since the last score change, so trusting it here
+   would be trusting a cache, not the source of truth).
+6. **How do reinstated entries interact with winner determination?**
+   Included automatically, no special-case code — this method has no
+   memory of any previous call, reads `game_entries.status` and
+   `game_entry_predictor` fresh every time, and a successful
+   reinstatement (§ Late Payment Override, above) already leaves both
+   correctly updated by the time this runs.
+7. **Can a void entry ever become eligible again?** Yes, via the same
+   reinstatement flow — this method excludes `status = 'void'` entries at
+   read time (the identical `.neq('status', 'void')` filter
+   `generateStandings()` uses), but remembers nothing about that
+   exclusion between calls; once reinstated, an entry is simply no longer
+   void the next time this runs.
+8. **Is repeated execution completely idempotent?** Yes, trivially — no
+   writes of any kind, same "only determine the outcome" discipline
+   already required of `LmsEngine.determineWinner()`. A pure read of
+   current state is idempotent by construction.
+
+**Reason:** Symmetric with `LmsEngine`'s own design decision for the
+identical underlying reason (real money, no room for a stale or cached
+"who won" answer), plus a hard, explicit requirement in this slice's own
+task ("never depend on cached state, recompute from authoritative data")
+that further confirms rather than merely permits this choice.
+
+**Alternatives considered:**
+- **Modeling on `Pick5Engine.determineWinner()`'s one-line
+  `pot_standings_snapshots` lookup** — rejected. Simpler, but reads a
+  derived cache rather than the source of truth, and the explicit
+  requirement above rules it out directly, not just by preference.
+- **A rich `PredictorOutcome` union with more than two cases, mirroring
+  LMS's four-way `classifyOutcome()` return type** — considered, reduced
+  to two (`in_progress` | `season_end`) once confirmed Predictor
+  genuinely has no elimination-driven early-conclusion case at all;
+  copying LMS's shape wholesale here would have been assuming a
+  structural similarity that isn't actually true.
+- **Throwing a `PredictorTwoHalvesNotImplementedError`-style guard for
+  `two_halves` pots**, mirroring `LmsFinalPredictionNotImplementedError`
+  — rejected once Q2's reasoning showed the season-end computation itself
+  never differs by cycle mode; there is nothing here to guard against,
+  unlike LMS's Final Prediction path, which genuinely cannot compute a
+  result without a feature that doesn't exist yet.
+
+**Consequences:**
+- A private `classifyOutcome()` helper (mirroring `LmsEngine`'s own
+  split) is reusable by a future `awardPrize()` slice exactly the way
+  LMS's `awardPrize()` already reuses its own — "remain compatible with
+  `awardPrize()`" satisfied by construction, not merely stated.
+- The `two_halves` payout-timing question remains exactly as open as it
+  already was — this slice neither resolves nor blocks on it, consistent
+  with every prior slice's "flag, don't guess" handling of the same gap.
+
+**Verified:** 9 new unit tests (296/296 across `supabase/functions/`, no
+regressions — the shared `settle()` test fake needed `.maybeSingle()`
+support and a `gameweeks` table added, since `determineWinner()` is the
+first Predictor method to need either). Live, calling the real, shipped
+`PredictorEngine` class directly against real database state produced
+entirely through real Edge Function calls (`compute-scores` for scoring,
+`admin-actions` for `mark_paid`/`reinstate_entry`) — not through an HTTP
+endpoint, since `determineWinner()` isn't wired into any Edge Function
+yet, the same "standalone, read-only method" shape Pick5's and LMS's own
+Slice 7 had: a real pot with a real, already-passed `end_gameweek_id`
+deadline, four real entries (two tied at the top with an exact-score
+prediction, one lower, one starting void) — the two tied, paid entries
+were correctly identified as winners, the voided entry correctly
+excluded despite matching their score; reinstating the voided entry via
+the real `admin-actions` Edge Function correctly grew the tie to three,
+with no code change needed to make that happen; repeated calls returned
+identical results and wrote nothing to `pot_standings_snapshots`; a
+second, single-entry pot correctly produced exactly one winner — 13
+checks, all passing. All test data removed by exact ID, independently
+re-verified as zero residue.
+
+## Score Predictor prize awarding
+
+**Decided 2026-08-08/09**, Milestone 6 Slice 8, per the repo owner's
+explicit "review Pick5Engine.determineWinner()/awardPrize() and
+LmsEngine.awardPrize() first, do not assume Predictor should follow
+either, justify every similarity and difference" instruction.
+
+### A product-rule mix-up, caught before writing any code
+
+The task arrived with a stated "NEW PRODUCT RULE (Pick 5)": winner
+hierarchy of highest points, then "most exact score predictions," then
+"most correct goalscorer predictions," then a full split. Before
+implementing it, Pick 5's actual data model was checked
+(`pick5_picks`: `player_id`, `goal_threshold`, `goals_scored`, `result` —
+a pick wins if `goals_scored >= goal_threshold`) and cross-referenced
+against `business-rules.md`/`decisions.md`: Pick 5 has no concept of an
+"exact score" or a "goalscorer prediction" at all — that vocabulary
+exists nowhere in Pick 5's schema or documented rules, only in Score
+Predictor's own (`predictor_fixture_picks.is_exact_score`,
+`game_entry_predictor.exact_score_count`/`correct_scorer_count`, Slice
+4). Per the task's own explicit instruction — "if any product rule is
+genuinely missing, stop and ask instead of inventing behaviour" — this
+was raised directly rather than guessed at (silently applying it to Pick
+5's `goals_scored`/`goal_threshold` fields under an invented
+reinterpretation, or silently assuming it was a mistake and doing
+nothing, would each have been inventing behaviour in a different
+direction). **Confirmed by the repo owner: the rule was meant for Score
+Predictor, not Pick 5.** Pick 5's `determineWinner()`/`awardPrize()` are
+therefore **entirely unchanged** by this slice — the tiebreak hierarchy
+applies to `PredictorEngine.determineWinner()` instead, revising Slice
+7's own "no secondary tiebreak — nothing documents one" conclusion, which
+was correct at the time (no rule existed yet) and is now superseded by an
+explicit one, the same way several other slices in this project have
+revised their own prior, correctly-reasoned-at-the-time conclusions once
+a real product decision changed the premise.
+
+### Predictor's revised tiebreak (Slice 8)
+
+`PredictorEngine`'s private `classifyOutcome()` (Slice 7) now narrows its
+`season_end` winner set through three levels, only when the level above is
+tied: highest `total_points`, then highest `exact_score_count`, then
+highest `correct_scorer_count`; whatever remains after all three
+genuinely ties and splits equally at `awardPrize()`, unchanged mechanism.
+Deliberately **not** applied to `PredictorEngine.generateStandings()`'s
+own ranking (Slice 6) — the repo owner's own instruction for this
+correction said "no changes to standings unless genuinely required," and
+awarding the actual prize doesn't require the ongoing leaderboard display
+to adopt the same tiebreak; that leaderboard still uses the shared "every
+rank-1 entry ties, no further tiebreak" rule every other standings view
+in this codebase uses.
+
+### Architecture review — the seven Score Predictor questions, in order
+
+1. **How does `predictor_cycle_mode` affect prize awarding?** Not at all
+   — same reasoning as `determineWinner()` (Slice 7): the fixed
+   `awardPrize(ctx, potId)` signature can only ever award the one
+   season-end outcome `determineWinner()` identified, and that
+   computation and payout are both unchanged by cycle mode. The still-open
+   "does `two_halves` need a *separate*, earlier payout at its half-cycle
+   boundary" question is not resolved or guessed at here.
+2. **One `pot_prizes` row, or multiple?** One — `scope='season'`,
+   matching `LmsEngine`'s shape exactly, not `Pick5Engine`'s (which
+   legitimately creates a new `scope='gameweek'` row every week because a
+   new payable instance — a weekly jackpot — concludes weekly for Pick
+   5). Predictor has exactly one conclusion, ever, per pot (GE-5.3, no
+   elimination, no recurring weekly payout) — the identical structural
+   fact that already made LMS a single-row mode.
+3. **How are tied winners paid?** Equally, via the same `floorToCents`
+   split every mode already uses — the tiebreak hierarchy above narrows
+   `determineWinner()`'s output as far as points/exact-score/scorer-count
+   can resolve it; whatever's left after that genuinely ties and splits,
+   same as Pick 5's/LMS's own remaining-tie handling. No tied recipient is
+   ever favored by rounding — the remainder (at most `winnerCount - 1`
+   cents) is never paid to anyone, identical rule platform-wide.
+4. **Does Predictor use prize deductions identically to Pick 5/LMS?** Yes
+   — `admin_fee_*`/`charity_fee_*` are shared, mode-agnostic `pots`
+   columns (GE-4.1), calculated with the identical `roundToCents`/fee-
+   percentage math (a private duplicate, per GE-18). One genuine
+   divergence: `gross_amount` has no `carry_over_amount` term the way
+   `LmsEngine`'s does — LMS's carry-over exists specifically for its own
+   rollover-pot mechanism (a wipeout resolving as `roll_prize`, GE-5.2), a
+   structurally LMS-only concept with no Predictor equivalent (Predictor
+   pots' own `carry_over_amount` is always 0, since nothing ever sets it
+   for this `game_type`) — including an always-zero term would be dead
+   code, not a faithful port.
+5. **Should `awardPrize()` consume `determineWinner()` directly?** Yes —
+   unlike `LmsEngine.awardPrize()` (which calls `classifyOutcome()`
+   directly, because it genuinely needs the richer outcome type to
+   distinguish wipeout/season_end/single_survivor's different payout
+   groups and the wipeout-only rollover branch), Predictor's
+   `classifyOutcome()` carries no information `determineWinner()` doesn't
+   already flatten faithfully — there is only one non-trivial outcome
+   shape, `season_end`, and no further branching by outcome type. Calling
+   `determineWinner()` directly matches `Pick5Engine.awardPrize()`'s own
+   choice, for the same reason: nothing richer to lose by using the thin
+   wrapper instead of the private helper. This also confirms, rather than
+   duplicates, `determineWinner()`'s own tiebreak logic — the entire
+   reason this question was asked was to avoid re-implementing that
+   hierarchy a second time here.
+6. **Does repeated execution remain fully idempotent?** Yes — identical
+   mechanism to `Pick5Engine`'s/`LmsEngine`'s own: an existing, settled
+   `pot_prizes` row (`scope='season'`) short-circuits the whole method
+   before any classification or writes happen.
+7. **Any additional transaction-ordering risks?** Simpler than LMS's, not
+   riskier — Predictor has no rollover-pot-creation step (an LMS-only
+   wipeout mechanism), so there are only three writes: settle entries to
+   `'settled'` (idempotent UPDATE), write payouts (idempotent UPDATE),
+   then the `pot_prizes` row LAST — applying the hardening-sprint's
+   write-ordering lesson from the start rather than retrofitting it later,
+   the way both `Pick5Engine`/`LmsEngine` originally had to. `is_settled
+   = true` is written only once every other write has already succeeded,
+   so a failure anywhere above it leaves the pot safely retryable with no
+   compensating-rollback logic needed (unlike LMS's own rollover step).
+
+**Silent no-op on zero winners** — deliberately matching
+`LmsEngine.awardPrize()`'s philosophy, not `Pick5Engine`'s (which throws
+`Pick5NoEligibleWinnersError` when `winners.length === 0` despite settled
+entries existing — genuinely anomalous there, since Pick 5's `settle()`
+has already confirmed real, paid, settled entries exist by that point).
+For Predictor, "season not concluded yet" is the overwhelmingly common
+state (this method runs every `settle()` tick, same as LMS), and a
+genuinely-concluded pot with zero eligible entries has zero money to
+award either (`gross_amount` computes to 0) — internally consistent, not
+an anomaly worth failing loudly for.
+
+**`settle()` wiring:** `PredictorEngine.settle()`'s existing per-pot loop
+(Slice 6, `generateStandings()` only) now also calls `awardPrize()` — the
+same revision Pick5Engine's/LmsEngine's own `settle()` needed when each
+shipped `awardPrize()` for the first time (their own Slice 8s). Most calls
+find the season still in progress and `awardPrize()` silently no-ops,
+exactly like `generateStandings()` being idempotent/harmless on an
+ordinary gameweek.
+
+**Consequences:**
+- A new error class, `PredictorPrizePoolExceededError`, mirrors
+  `Pick5PrizePoolExceededError`/`LmsPrizePoolExceededError` exactly — fee
+  configuration that would drive `net_amount` negative fails loudly
+  before any write, never silently clamped.
+- No schema change — every column used (`pot_prizes.gross_amount`/
+  `admin_fee_amount`/`charity_fee_amount`/`is_settled`, `game_entries.
+  payout_amount`/`status`, `game_entry_predictor.exact_score_count`/
+  `correct_scorer_count`) already existed.
+
+**Verified:** 13 new unit tests for `awardPrize()` (sole winner, tied
+split, percentage + fixed fee deductions together, prize-pool-exceeded
+error, idempotent re-call, retry after an injected mid-method failure —
+a dedicated fake-level failure-injection flag, same purpose as the LMS
+fake's own `entriesVoidShouldFail`/`picksVoidShouldFail`) plus 3 revised/
+new `determineWinner()` tests for the tiebreak hierarchy itself (exact-
+score tiebreak, scorer-count tiebreak, a genuine complete tie still
+splitting) — 305/305 across `supabase/functions/`, including Pick 5's own
+full, entirely unmodified test suite (a direct regression check: zero
+changes to `pick5/engine.ts`, confirmed by `git diff`, and its existing
+tests passing unchanged). Live, through the real `settle-gameweek` and
+`compute-scores` Edge Functions (not a bypass script), using the same
+"gameweek 9 triggers the call, a separate pot's own `end_gameweek_id`
+marks the season concluded" technique Slice 5 established: a sole winner
+with 10%-admin-fee + fixed-charity-fee deductions correctly received the
+entire net prize while the non-winning (but still-participating, still-
+settled) entry received nothing; a genuine complete tie split the net
+prize evenly; a second real `settle-gameweek` call left every payout and
+`pot_prizes` row unchanged (idempotent, not doubled); a third pot proved
+retry-safety against a real, client-side-intercepted write failure (no
+persistent database mutation, unlike a schema-level constraint injection
+would risk on a shared local dev database) — the first attempt correctly
+left no `pot_prizes` row and no payout behind, and a plain retry, with no
+special recovery step, completed correctly — 24 checks, all passing. All
+test data removed by exact ID, independently re-verified as zero
+residue; the temporarily-flipped fixture/gameweek status both correctly
+reverted.

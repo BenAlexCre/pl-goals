@@ -370,15 +370,17 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-6: entry creation, pick submission,
-locking, scoring, settlement, standings).** Winner determination and prize
-awarding are not built yet — see
+decided and shipped so far (Slices 1-8: entry creation, pick submission,
+locking, scoring, settlement, standings, winner determination, prize
+awarding).** Notifications are not built yet — see
 [decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
 [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
 [§ Score Predictor locking](./decisions.md#score-predictor-locking),
 [§ Score Predictor scoring](./decisions.md#score-predictor-scoring),
 [§ Score Predictor settlement](./decisions.md#score-predictor-settlement),
-and [§ Score Predictor standings](./decisions.md#score-predictor-standings)
+[§ Score Predictor standings](./decisions.md#score-predictor-standings),
+[§ Score Predictor winner determination](./decisions.md#score-predictor-winner-determination),
+and [§ Score Predictor prize awarding](./decisions.md#score-predictor-prize-awarding)
 for the full reasoning and everything still genuinely undecided.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
@@ -461,12 +463,34 @@ window still counts as a miss, the same as any other missed gameweek.
 Reinstatement is refused once the pot's prize has already been paid out.
 Full reasoning: [decisions.md § Late Payment Override](./decisions.md#late-payment-override).
 
+**Winner determination.** The competition concludes once the pot's
+designated final gameweek has actually kicked off (passed its deadline).
+The winner is decided by, in order: highest cumulative points; if tied,
+most exact-scoreline predictions; if still tied, most correct-goalscorer
+predictions; if still tied after all of that, every remaining entrant
+wins jointly and splits the prize equally. A voided entry can never win,
+even briefly; a reinstated entry becomes eligible again immediately, with
+no separate step needed. This determination doesn't distinguish a
+`two_halves` pot from a `single_cycle` one — both are judged purely on
+the same hierarchy across the whole season; whether a `two_halves` pot
+should *also* have an earlier, mid-season winner at its halfway point is
+a separate, still-undecided question (below).
+
+**Prize awarding.** Once a winner (or tied group) is determined, the net
+prize pool — entry fees collected minus any configured admin/charity
+deductions, the same shared deduction rules every mode uses — is paid
+out: the whole amount to a sole winner, or split equally among a tied
+group (any leftover fraction of a cent is never paid to anyone). Every
+participating entrant's entry is marked settled at this point, not just
+the winner's.
+
 **Not yet decided, deliberately not guessed at:** whether predicting the
 same scoreline or the same goalscorer more than once across a season is
 restricted in any way (`predictor_cycle_mode`'s "two_halves"/"single_cycle"
 setting is confirmed to govern some such restriction, but not which
-predictions or how); how the season winner is determined and the prize
-paid out; whether there's any restriction on when an entrant may join a
+predictions or how); whether a `two_halves` pot pays out once (season end
+only) or twice (also at the half-cycle boundary); whether there's any
+restriction on when an entrant may join a
 Score Predictor pot.
 
 ## Admin permissions

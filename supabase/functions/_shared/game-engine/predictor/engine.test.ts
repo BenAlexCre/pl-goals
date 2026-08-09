@@ -8,7 +8,7 @@ import { assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/asser
 import type { GameEngineContext } from '../contracts.ts'
 import type { GameEntry } from '../types.ts'
 import { PredictorEngine } from './engine.ts'
-import { PredictorValidationError } from './errors.ts'
+import { PredictorPrizePoolExceededError, PredictorValidationError } from './errors.ts'
 
 interface FakeState {
   gameweekExists?: boolean // defaults to true
@@ -717,11 +717,37 @@ Deno.test('calculateScore does not fold a voided entry\'s points into game_entry
 // predictor_fixture_picks, and exclusion from any ranked output is
 // generateStandings()'s job, a later slice).
 
-interface FakeSettlePot { id: string; game_type: string }
-interface FakeSettleGameEntry { id: string; pot_id: string; user_id: string; status: string }
+interface FakeSettlePot {
+  id: string
+  game_type: string
+  end_gameweek_id?: number | null
+  // awardPrize() (Slice 8) fee/entry-fee configuration — same shared,
+  // mode-agnostic pots columns Pick5Engine's/LmsEngine's own awardPrize()
+  // already read (GE-4.1).
+  entry_fee?: number
+  admin_fee_type?: 'none' | 'fixed' | 'percentage'
+  admin_fee_amount?: number | null
+  admin_fee_percentage?: number | null
+  charity_fee_type?: 'none' | 'fixed' | 'percentage'
+  charity_fee_amount?: number | null
+  charity_fee_percentage?: number | null
+}
+interface FakeSettleGameEntry { id: string; pot_id: string; user_id: string; status: string; payout_amount?: number; settled_at?: string | null }
 interface FakeSettleEntryPayment { pot_id: string; user_id: string; scope: string; is_paid: boolean }
 interface FakeSettleGameEntryPredictor { game_entry_id: string; total_points: number; exact_score_count: number; correct_scorer_count: number }
 interface FakeSettleSnapshot { id: number; pot_id: string; gameweek_id: number | null; user_id: string; rank: number; score: number; meta?: unknown }
+interface FakeSettleGameweek { id: number; deadline_utc: string | null }
+interface FakeSettlePrize {
+  id: number
+  pot_id: string
+  scope: string
+  gameweek_id: number | null
+  gross_amount?: number
+  admin_fee_amount?: number
+  charity_fee_amount?: number
+  is_settled: boolean
+  settled_at?: string | null
+}
 
 interface FakeSettleDb {
   pots: FakeSettlePot[]
@@ -731,11 +757,21 @@ interface FakeSettleDb {
   // (Slice 6) — these two tables are what that method reads/writes.
   game_entry_predictor: FakeSettleGameEntryPredictor[]
   pot_standings_snapshots: FakeSettleSnapshot[]
+  // determineWinner() (Slice 7) reads a pot's own end_gameweek_id and
+  // that gameweek's deadline_utc to decide whether the season has
+  // concluded.
+  gameweeks: FakeSettleGameweek[]
+  // awardPrize() (Slice 8) reads/writes this — settle() now calls it
+  // unconditionally per pot too.
+  pot_prizes: FakeSettlePrize[]
+  // Failure injection for the retry-safety test, below — same purpose as
+  // the LMS fake's own entriesVoidShouldFail/picksVoidShouldFail flags.
+  payoutShouldFail?: boolean
 }
 
 function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
   // deno-lint-ignore no-explicit-any
-  function queryBuilder(table: keyof FakeSettleDb, getRows: () => any[]) {
+  function queryBuilder(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail'>, getRows: () => any[]) {
     // deno-lint-ignore no-explicit-any
     const filters: ((row: any) => boolean)[] = []
     let updatePatch: Record<string, unknown> | null = null
@@ -764,6 +800,16 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
         return builder
       },
       // deno-lint-ignore no-explicit-any
+      maybeSingle: () => {
+        const rows = getRows().filter((row) => filters.every((f) => f(row)))
+        return Promise.resolve({ data: rows[0] ?? null, error: null })
+      },
+      // deno-lint-ignore no-explicit-any
+      single: () => {
+        const rows = getRows().filter((row) => filters.every((f) => f(row)))
+        return Promise.resolve({ data: rows[0] ?? null, error: null })
+      },
+      // deno-lint-ignore no-explicit-any
       upsert: (rows: Record<string, unknown>[]) => {
         const table_ = db[table] as unknown as { id: unknown }[]
         for (const row of rows) {
@@ -774,16 +820,30 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
         return Promise.resolve({ data: rows, error: null })
       },
       // deno-lint-ignore no-explicit-any
-      insert: (rows: Record<string, unknown>[]) => {
+      insert: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+        // Real supabase-js accepts either a single row object or an array
+        // — PredictorEngine.awardPrize()'s pot_prizes insert passes a
+        // single object, unlike generateStandings()' batched array insert.
+        const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows]
         const table_ = db[table] as unknown as Record<string, unknown>[]
         let nextId = table_.reduce((max, r) => Math.max(max, (r.id as number) ?? 0), 0) + 1
         for (const row of rows) {
-          table_.push(table === 'pot_standings_snapshots' ? { id: nextId++, ...row } : row)
+          table_.push(table === 'pot_standings_snapshots' || table === 'pot_prizes' ? { id: nextId++, ...row } : row)
         }
         return Promise.resolve({ data: rows, error: null })
       },
       // deno-lint-ignore no-explicit-any
-      then: (resolve: (v: { data: any; error: null }) => void) => {
+      then: (resolve: (v: { data: any; error: null } | { data: null; error: { message: string } }) => void) => {
+        // Failure injection, same purpose as the LMS fake's own
+        // entriesVoidShouldFail/picksVoidShouldFail flags — proves
+        // awardPrize()'s retry-safety against a real mid-method write
+        // failure, not just its happy path. Fires once (self-resets), so
+        // a retry's identical call succeeds.
+        if (table === 'game_entries' && updatePatch && 'payout_amount' in updatePatch && db.payoutShouldFail) {
+          db.payoutShouldFail = false
+          resolve({ data: null, error: { message: 'simulated failure' } })
+          return
+        }
         let rows = getRows().filter((row) => filters.every((f) => f(row)))
         // game_entries' own select('user_id, game_entry_predictor(...)')
         // needs the embedded shape generateStandings() expects — joined
@@ -805,7 +865,7 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
   }
 
   const fakeSupabase = {
-    from(table: keyof FakeSettleDb) {
+    from(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail'>) {
       return queryBuilder(table, () => db[table])
     },
   }
@@ -819,6 +879,8 @@ function baseSettleDb(overrides: Partial<FakeSettleDb> = {}): FakeSettleDb {
     entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: true }],
     game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 0, exact_score_count: 0, correct_scorer_count: 0 }],
     pot_standings_snapshots: [],
+    gameweeks: [],
+    pot_prizes: [],
     ...overrides,
   }
 }
@@ -1176,4 +1238,433 @@ Deno.test('settle writes standings even when nobody needs voiding — the common
   assertEquals(db.game_entries[0].status, 'pending') // nobody was voided
   assertEquals(db.pot_standings_snapshots.length, 1) // but standings were still (re)generated
   assertEquals(db.pot_standings_snapshots[0].score, 9)
+})
+
+// --- determineWinner() --------------------------------------------------
+// Reuses fakeSettleContext/baseSettleDb — already supports every table
+// this method needs (pots.end_gameweek_id, gameweeks.deadline_utc,
+// game_entries + the embedded game_entry_predictor read).
+
+const SEASON_NOT_YET_ENDED = new Date('2026-01-01T00:00:00Z')
+const SEASON_ENDED = new Date('2026-06-02T00:00:00Z')
+
+function fakeSettleContextAt(db: FakeSettleDb, now: Date): GameEngineContext {
+  const ctx = fakeSettleContext(db)
+  return { ...ctx, now: () => now }
+}
+
+Deno.test('determineWinner returns [] when the pot has no designated end_gameweek_id at all', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: null }] })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, [])
+})
+
+Deno.test('determineWinner returns [] before the pot\'s final gameweek deadline has passed', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_NOT_YET_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, [])
+})
+
+Deno.test('determineWinner identifies a single winner once the season has concluded', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 40, exact_score_count: 4, correct_scorer_count: 2 },
+      { game_entry_id: 'entry-2', total_points: 25, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-1'])
+})
+
+// --- Tiebreak hierarchy (Slice 8) ---------------------------------------
+// Winner hierarchy: total_points, then exact_score_count, then
+// correct_scorer_count, then a genuine split. Confirmed with the repo
+// owner directly before implementing — the rule as originally stated was
+// labelled a Pick 5 change but its vocabulary ("exact score predictions,"
+// "correct goalscorer predictions") matches nothing in Pick 5's own pick
+// model, only Predictor's game_entry_predictor columns — see
+// docs/decisions.md § Score Predictor prize awarding.
+
+Deno.test('determineWinner: equal points, tiebreak resolves by exact_score_count — no split', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-3', pot_id: 'pot-1', user_id: 'user-3', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 30, exact_score_count: 3, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 30, exact_score_count: 2, correct_scorer_count: 2 },
+      { game_entry_id: 'entry-3', total_points: 12, exact_score_count: 1, correct_scorer_count: 0 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  // entry-1 and entry-2 are tied at 30 points, but entry-1 has more exact
+  // scores (3 vs 2) — the tiebreak resolves it to a sole winner, not a split.
+  assertEquals(winners, ['user-1'])
+})
+
+Deno.test('determineWinner: equal points and equal exact scores, tiebreak resolves by correct_scorer_count — no split', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 30, exact_score_count: 2, correct_scorer_count: 4 },
+      { game_entry_id: 'entry-2', total_points: 30, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  // Tied on points AND exact scores — the third tiebreak level (correct
+  // goalscorer count) resolves it to entry-1 alone.
+  assertEquals(winners, ['user-1'])
+})
+
+Deno.test('determineWinner: a genuine complete tie (points, exact scores, AND scorer counts all equal) returns every tied entry', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-3', pot_id: 'pot-1', user_id: 'user-3', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 30, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 30, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-3', total_points: 12, exact_score_count: 5, correct_scorer_count: 9 }, // lower points — never reached, tiebreak only narrows the top tier
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners.sort(), ['user-1', 'user-2']) // nothing left to break the tie with — both win, split at awardPrize()
+})
+
+Deno.test('determineWinner excludes a voided entry even if it would otherwise have the highest score', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-voided', pot_id: 'pot-1', user_id: 'user-voided', status: 'void' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 15, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-voided', total_points: 99, exact_score_count: 9, correct_scorer_count: 9 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, ['user-1'])
+})
+
+Deno.test('determineWinner includes a reinstated entry (status back to pending, points recomputed) with no special-case code', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'void' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 10, exact_score_count: 1, correct_scorer_count: 0 },
+      { game_entry_id: 'entry-2', total_points: 25, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const before = await engine.determineWinner(ctx, 'pot-1')
+  assertEquals(before, ['user-1']) // user-2 is void, excluded despite the higher score
+
+  // Reinstatement (docs/decisions.md § Late Payment Override): status
+  // flips back to pending, points already recomputed by that flow.
+  db.game_entries[1].status = 'pending'
+
+  const after = await engine.determineWinner(ctx, 'pot-1')
+  assertEquals(after, ['user-2']) // now included, and now the sole winner on its own higher score
+})
+
+Deno.test('determineWinner returns [] when there are no entries at all', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [],
+    game_entry_predictor: [],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, [])
+})
+
+Deno.test('determineWinner is idempotent — repeated calls with no state change return the same result, performs no writes', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 18, exact_score_count: 2, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  const first = await engine.determineWinner(ctx, 'pot-1')
+  const second = await engine.determineWinner(ctx, 'pot-1')
+  const third = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(first, ['user-1'])
+  assertEquals(second, ['user-1'])
+  assertEquals(third, ['user-1'])
+  assertEquals(db.pot_standings_snapshots.length, 0) // no writes of any kind — pure read
+  assertEquals(db.game_entries[0].status, 'pending') // unchanged
+})
+
+Deno.test('predictor_cycle_mode has no bearing on determineWinner() — same winner regardless of the pot\'s configured cycle mode', async () => {
+  const engine = new PredictorEngine()
+  const dbTwoHalves = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 33, exact_score_count: 3, correct_scorer_count: 1 }],
+  })
+  const dbSingleCycle = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', end_gameweek_id: 38 }],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 33, exact_score_count: 3, correct_scorer_count: 1 }],
+  })
+
+  // predictor_cycle_mode isn't even part of the fake's pot shape — this
+  // test's real point is that determineWinner() never reads it at all,
+  // so two otherwise-identical pots produce the identical winner
+  // regardless of what that column would say in a real database.
+  const winnersA = await engine.determineWinner(fakeSettleContextAt(dbTwoHalves, SEASON_ENDED), 'pot-1')
+  const winnersB = await engine.determineWinner(fakeSettleContextAt(dbSingleCycle, SEASON_ENDED), 'pot-1')
+
+  assertEquals(winnersA, ['user-1'])
+  assertEquals(winnersB, ['user-1'])
+})
+
+// --- awardPrize() --------------------------------------------------------
+// Reuses fakeSettleContext(At)/baseSettleDb — already supports every
+// table this method needs (pots' fee columns, pot_prizes, game_entries).
+
+function basePrizePot(overrides: Partial<FakeSettlePot> = {}): FakeSettlePot {
+  return {
+    id: 'pot-1',
+    game_type: 'score_predictor',
+    end_gameweek_id: 38,
+    entry_fee: 10,
+    admin_fee_type: 'none',
+    admin_fee_amount: null,
+    admin_fee_percentage: null,
+    charity_fee_type: 'none',
+    charity_fee_amount: null,
+    charity_fee_percentage: null,
+    ...overrides,
+  }
+}
+
+Deno.test('awardPrize does nothing while the season is still in progress', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_NOT_YET_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.pot_prizes.length, 0)
+  assertEquals(db.game_entries[0].status, 'pending')
+})
+
+Deno.test('awardPrize: a sole winner gets the entire net prize; every non-void entry is settled', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 40, exact_score_count: 4, correct_scorer_count: 2 },
+      { game_entry_id: 'entry-2', total_points: 25, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // gross = 10 * 2 entries = 20, no fees -> net = 20, sole winner gets it all
+  const winner = db.game_entries.find((e) => e.user_id === 'user-1')!
+  const loser = db.game_entries.find((e) => e.user_id === 'user-2')!
+  assertEquals(winner.payout_amount, 20)
+  assertEquals(winner.status, 'settled')
+  assertEquals(loser.payout_amount ?? 0, 0) // never touched — not a winner
+  assertEquals(loser.status, 'settled') // every non-void entry settles, not just winners
+
+  assertEquals(db.pot_prizes.length, 1)
+  assertEquals(db.pot_prizes[0].gross_amount, 20)
+  assertEquals(db.pot_prizes[0].is_settled, true)
+})
+
+Deno.test('awardPrize: tied winners (after the tiebreak hierarchy still tied) split the net prize equally, floored to cents', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot({ entry_fee: 10 })],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-3', pot_id: 'pot-1', user_id: 'user-3', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 30, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 30, exact_score_count: 2, correct_scorer_count: 1 }, // genuine complete tie with entry-1
+      { game_entry_id: 'entry-3', total_points: 10, exact_score_count: 0, correct_scorer_count: 0 },
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // gross = 10 * 3 = 30, net = 30, split 2 ways = 15 each (divides evenly here)
+  const winner1 = db.game_entries.find((e) => e.user_id === 'user-1')!
+  const winner2 = db.game_entries.find((e) => e.user_id === 'user-2')!
+  const loser = db.game_entries.find((e) => e.user_id === 'user-3')!
+  assertEquals(winner1.payout_amount, 15)
+  assertEquals(winner2.payout_amount, 15)
+  assertEquals(loser.payout_amount ?? 0, 0)
+})
+
+Deno.test('awardPrize correctly applies percentage admin fee and fixed charity fee before splitting', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot({ entry_fee: 20, admin_fee_type: 'percentage', admin_fee_percentage: 10, charity_fee_type: 'fixed', charity_fee_amount: 5 })],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 12, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // gross = 20 * 1 = 20; admin fee = 10% of 20 = 2; charity fee = 5 (fixed);
+  // net = 20 - 2 - 5 = 13
+  assertEquals(db.pot_prizes[0].gross_amount, 20)
+  assertEquals(db.pot_prizes[0].admin_fee_amount, 2)
+  assertEquals(db.pot_prizes[0].charity_fee_amount, 5)
+  assertEquals(db.game_entries[0].payout_amount, 13)
+})
+
+Deno.test('awardPrize throws PredictorPrizePoolExceededError rather than clamping fees that exceed the gross pool', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot({ entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 8, charity_fee_type: 'fixed', charity_fee_amount: 5 })],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  // gross = 10; fees = 8 + 5 = 13 > gross -> net would be negative
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), PredictorPrizePoolExceededError)
+  assertEquals(db.pot_prizes.length, 0) // nothing written — fails before any write
+  assertEquals(db.game_entries[0].status, 'pending') // entry left untouched too
+})
+
+Deno.test('awardPrize is idempotent — a second call on an already-settled pot is a silent no-op', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.pot_prizes.length, 1)
+  const firstPayout = db.game_entries[0].payout_amount
+
+  // Mutate the source data as if a later, unrelated call to
+  // calculateScore() somehow changed it — an already-settled pot must
+  // never re-derive or re-pay from it.
+  db.game_entry_predictor[0].total_points = 999
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.pot_prizes.length, 1) // still exactly one prize row
+  assertEquals(db.game_entries[0].payout_amount, firstPayout) // unchanged, not re-derived
+})
+
+Deno.test('awardPrize: retry after an injected failure does not double-pay and completes correctly on the next call', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+    payoutShouldFail: true,
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  // First call: the payout write fails partway through (simulating a
+  // transient DB/network error), same "one write fails, confirm nothing
+  // partial was left behind, then retry" shape the hardening sprint's own
+  // Pick5Engine/LmsEngine tests use.
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+  assertEquals(db.pot_prizes.length, 0) // the trailing pot_prizes write never happened
+  assertEquals(db.game_entries[0].status, 'settled') // settling itself (before the failed payout) already landed — naturally idempotent, safe to leave as-is
+  assertEquals(db.game_entries[0].payout_amount ?? 0, 0) // the failed payout write never landed
+
+  // Retry — same call, no special recovery action needed; the injected
+  // failure flag already reset itself after firing once.
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.pot_prizes.length, 1)
+  assertEquals(db.pot_prizes[0].is_settled, true)
+  assertEquals(db.game_entries[0].payout_amount, 10) // gross = entry_fee 10 * 1 entry, no fees, sole winner
 })

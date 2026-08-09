@@ -1,9 +1,10 @@
 // Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2),
-// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5), and
-// generateStandings (Slice 6) are implemented — determineWinner/awardPrize/
-// notifyUsers still throw GameEngineNotImplementedError, same "half-built
-// mode fails loudly" pattern Pick5Engine/LmsEngine used between their own
-// early slices and later ones.
+// lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5),
+// generateStandings (Slice 6), determineWinner (Slice 7), and awardPrize
+// (Slice 8) are implemented — notifyUsers still throws
+// GameEngineNotImplementedError, same "half-built mode fails loudly"
+// pattern Pick5Engine/LmsEngine used between their own early slices and
+// later ones.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -36,7 +37,7 @@
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import { GameEngineNotImplementedError } from '../errors.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
-import { PredictorValidationError } from './errors.ts'
+import { PredictorPrizePoolExceededError, PredictorValidationError } from './errors.ts'
 
 export interface PredictorPickInput {
   gameweekId: number
@@ -95,6 +96,38 @@ function rankWithTies(entries: { userId: string; score: number }[]): { userId: s
     ranked.push({ ...sorted[index], rank })
   }
   return ranked
+}
+
+// Money helpers — same rounding rules as Pick5Engine's/LmsEngine's own
+// (docs/decisions.md § Prize pool deductions): roundToCents (standard
+// round-half-up) for the gross/fee/net calculation itself; floorToCents
+// (always down) when splitting the net pool across multiple recipients,
+// so no tied recipient is ever favored by rounding. Genuinely shared-
+// platform money math, not Predictor-specific — reimplemented privately
+// here rather than imported (GE-18 forbids cross-mode imports), same
+// acknowledged-duplication category as rankWithTies()/
+// upsertOverallStandings() above.
+function roundToCents(amount: number): number {
+  return Math.round(amount * 100) / 100
+}
+
+function floorToCents(amount: number): number {
+  return Math.floor(amount * 100) / 100
+}
+
+function calculatePredictorFeeAmount(
+  type: 'none' | 'fixed' | 'percentage',
+  fixedAmount: number | null,
+  percentage: number | null,
+  grossAmount: number
+): number {
+  if (type === 'fixed') {
+    return fixedAmount ?? 0
+  }
+  if (type === 'percentage') {
+    return roundToCents((grossAmount * (percentage ?? 0)) / 100)
+  }
+  return 0
 }
 
 export class PredictorEngine implements GameEngine {
@@ -697,14 +730,22 @@ export class PredictorEngine implements GameEngine {
 
     // Same per-pot failure isolation Pick5Engine.settle()/LmsEngine.settle()
     // already established (production hardening sprint, 2026-08-06) — one
-    // pot's generateStandings() failure must never block another
-    // unrelated pot's, or the payment-void work above (already durably
-    // written). Collected and raised together, after every pot's had its
-    // chance, rather than on the first failure.
+    // pot's generateStandings()/awardPrize() failure must never block
+    // another unrelated pot's, or the payment-void work above (already
+    // durably written). Collected and raised together, after every pot's
+    // had its chance, rather than on the first failure.
+    //
+    // awardPrize() wired in here as of Slice 8 — the same revision
+    // Pick5Engine's/LmsEngine's own settle() needed when each shipped
+    // awardPrize() for the first time (their own Slice 8s). Most calls
+    // will find the season still in progress and awardPrize() will
+    // silently no-op, exactly like generateStandings() being idempotent/
+    // harmless on an ordinary gameweek.
     const potErrors: { potId: string; message: string }[] = []
     for (const potId of potIds) {
       try {
         await this.generateStandings(ctx, potId)
+        await this.awardPrize(ctx, potId)
       } catch (err) {
         potErrors.push({ potId, message: err instanceof Error ? err.message : String(err) })
       }
@@ -712,7 +753,7 @@ export class PredictorEngine implements GameEngine {
 
     if (potErrors.length > 0) {
       throw new Error(
-        `settle() finalized entries for gameweek ${gameweekId}, but standings processing failed for ${potErrors.length} pot(s): ` +
+        `settle() finalized entries for gameweek ${gameweekId}, but standings/prize processing failed for ${potErrors.length} pot(s): ` +
           potErrors.map((e) => `${e.potId}: ${e.message}`).join('; ')
       )
     }
@@ -915,12 +956,434 @@ export class PredictorEngine implements GameEngine {
     }
   }
 
-  async determineWinner(_ctx: GameEngineContext, _potId: string): Promise<string[]> {
-    throw new GameEngineNotImplementedError('score_predictor', 'determineWinner')
+  // Shared between determineWinner() and a future awardPrize() — same
+  // split LmsEngine's own classifyOutcome()/determineWinner() already
+  // established (a rich, reusable classification behind a thin GE-6
+  // wrapper). One outcome type simpler than LMS's four
+  // (in_progress/single_survivor/wipeout/season_end): Predictor has no
+  // elimination concept at all (GE-5.3 — every entry stays in for the
+  // whole season, ranked by cumulative points, confirmed since Slice 1's
+  // own architecture review), so there is no "single survivor" or
+  // "wipeout" case to distinguish — the competition can only ever
+  // conclude one way, at the season's actual end.
+  //
+  // Eight questions, answered before writing this method:
+  //
+  // 1. What constitutes a completed Predictor competition? The pot's
+  //    designated final gameweek (pots.end_gameweek_id — a shared,
+  //    mode-agnostic column, GE-4.1, not an LMS-specific concept borrowed
+  //    without justification) has actually passed its deadline. Same
+  //    mechanism LmsEngine.classifyOutcome() already uses for its own
+  //    season_end case, reused here for the identical reason: nothing
+  //    about "has this season's real-world calendar end been reached"
+  //    differs between the two modes. Unlike LMS, this is Predictor's
+  //    *only* conclusion path — no elimination means no earlier-than-
+  //    end-gameweek conclusion is structurally possible.
+  //
+  // 2. How does predictor_cycle_mode affect this? Not at all, confirmed
+  //    by reasoning rather than assumed silently. GE-6's fixed
+  //    determineWinner(ctx, potId) signature has no way to express "which
+  //    half" — it can only ever answer one question, "who has the most
+  //    cumulative points once the season ends," and that computation is
+  //    identical regardless of predictor_cycle_mode: a two_halves pot's
+  //    season-end winner is still whoever has the most points across the
+  //    whole season, exactly like a single_cycle pot's. The genuinely
+  //    open, still-unresolved question — whether a two_halves pot ALSO
+  //    needs a SEPARATE, earlier determination at its half-cycle boundary
+  //    (docs/decisions.md § Score Predictor architecture review; GE-15's
+  //    "half_cycle boundary computation... needs resolving") — is a
+  //    question about a different, not-yet-designed invocation this
+  //    method has no part of, not something this slice guesses at or
+  //    blocks on.
+  //
+  // 3. Once per season, once per half, or both? Once per season only —
+  //    the only concept the fixed interface can express (see Q2). "Once
+  //    per half" would need a different method signature entirely, not
+  //    something to invent here per "implement determineWinner() only."
+  //
+  // 4. Ties? Revised, Milestone 6 Slice 8, 2026-08-08 — the repo owner
+  //    supplied a real product rule (originally presented labelled as a
+  //    Pick 5 change; its own vocabulary — "exact score predictions,"
+  //    "correct goalscorer predictions" — matches nothing in Pick 5's
+  //    actual pick model at all, only Predictor's own
+  //    game_entry_predictor.exact_score_count/correct_scorer_count, so
+  //    this was confirmed with the repo owner directly rather than guessed
+  //    at or silently applied to the wrong mode; Pick 5's own
+  //    determineWinner()/awardPrize() are unchanged by this slice).
+  //    Winner hierarchy, applied only when the tier above is tied:
+  //      1. Highest total_points.
+  //      2. Most exact_score_count.
+  //      3. Most correct_scorer_count.
+  //      4. Still tied — every remaining entry wins jointly, net prize
+  //         split equally (awardPrize()'s existing floorToCents behavior,
+  //         unchanged).
+  //    Deliberately NOT applied to generateStandings()'s own ranking
+  //    (Slice 6) — the repo owner's own instruction for this correction
+  //    said "no changes to standings unless genuinely required," and nothing
+  //    about awarding the actual prize requires the ongoing leaderboard
+  //    display to adopt the same tiebreak; that leaderboard still uses
+  //    the shared "every rank-1 entry ties, no further tiebreak" rule
+  //    every other standings view in this codebase uses.
+  //
+  // 5. Standings snapshots, or recompute from source? Recompute directly
+  //    from game_entries/game_entry_predictor — explicitly required
+  //    ("never depend on cached state, recompute from authoritative
+  //    data"), and matches LmsEngine.classifyOutcome()'s own choice, not
+  //    Pick5Engine.determineWinner()'s (which does read
+  //    pot_standings_snapshots — safe for Pick 5 only because a settled
+  //    gameweek's snapshot can never change retroactively; Predictor's
+  //    season-end snapshot could in principle be stale if
+  //    generateStandings() hasn't been re-run since the last score
+  //    change, so trusting it here would be trusting a cache, not the
+  //    source of truth).
+  //
+  // 6. Reinstated entries? Included automatically, no special-case code —
+  //    this method has no memory of any previous call, reads
+  //    game_entries.status and game_entry_predictor fresh every time, and
+  //    a successful reinstatement (docs/decisions.md § Late Payment
+  //    Override) already leaves both correctly updated by the time this
+  //    runs.
+  //
+  // 7. Can a void entry become eligible again? Yes, via the same
+  //    reinstatement flow — this method excludes status = 'void' entries
+  //    at read time (same .neq('status', 'void') filter
+  //    generateStandings() uses), so a still-void entry never wins, but
+  //    nothing here remembers that exclusion between calls; once
+  //    reinstated, it's simply no longer void the next time this runs.
+  //
+  // 8. Idempotent? Yes, trivially — this method (and classifyOutcome())
+  //    performs no writes of any kind, same "only determine the outcome"
+  //    discipline the repo owner required of LmsEngine.determineWinner().
+  //    A pure read of current state is idempotent by construction; two
+  //    calls with no state change in between return identical results,
+  //    and a call after a real state change (a rescored gameweek, a
+  //    reinstatement) correctly reflects it — never stale, because
+  //    nothing is ever cached.
+  private async classifyOutcome(ctx: GameEngineContext, potId: string): Promise<{ type: 'in_progress' } | { type: 'season_end'; winnerIds: string[] }> {
+    const { data: pot, error: potError } = await ctx.supabase
+      .from('pots')
+      .select('end_gameweek_id')
+      .eq('id', potId)
+      .maybeSingle()
+
+    if (potError) {
+      throw new Error(`Failed to look up pot: ${potError.message}`)
+    }
+    if (!pot?.end_gameweek_id) {
+      return { type: 'in_progress' } // no designated season end configured — cannot conclude
+    }
+
+    const { data: endGameweek, error: gameweekError } = await ctx.supabase
+      .from('gameweeks')
+      .select('deadline_utc')
+      .eq('id', pot.end_gameweek_id)
+      .maybeSingle()
+
+    if (gameweekError) {
+      throw new Error(`Failed to look up the pot's final gameweek: ${gameweekError.message}`)
+    }
+    if (!endGameweek?.deadline_utc || ctx.now() < new Date(endGameweek.deadline_utc)) {
+      return { type: 'in_progress' }
+    }
+
+    // Season has concluded — recompute the leaderboard directly from
+    // source tables, same non-void filter as generateStandings() (Slice 6).
+    // exact_score_count/correct_scorer_count are read alongside
+    // total_points now (Slice 8) — both already existed on
+    // game_entry_predictor since Slice 4, maintained by calculateScore()'s
+    // own full-recompute design, so no schema change and no new query
+    // this method didn't already need most of.
+    const { data: entries, error: entriesError } = await ctx.supabase
+      .from('game_entries')
+      .select('user_id, game_entry_predictor(total_points, exact_score_count, correct_scorer_count)')
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (entriesError) {
+      throw new Error(`Failed to look up entries: ${entriesError.message}`)
+    }
+
+    type PredictorStats = { total_points: number; exact_score_count: number; correct_scorer_count: number }
+    type PredictorEmbed = PredictorStats | PredictorStats[] | null
+    type EntryRow = { user_id: string; game_entry_predictor: PredictorEmbed }
+
+    type Candidate = { userId: string; totalPoints: number; exactScoreCount: number; correctScorerCount: number }
+    const candidatesByUser = new Map<string, Candidate>()
+    for (const entry of (entries ?? []) as EntryRow[]) {
+      const stats = Array.isArray(entry.game_entry_predictor) ? entry.game_entry_predictor[0] : entry.game_entry_predictor
+      if (!stats) continue // malformed — no extension row; excluded rather than guessed at
+      candidatesByUser.set(entry.user_id, {
+        userId: entry.user_id,
+        totalPoints: stats.total_points,
+        exactScoreCount: stats.exact_score_count,
+        correctScorerCount: stats.correct_scorer_count,
+      })
+    }
+
+    if (candidatesByUser.size === 0) {
+      return { type: 'season_end', winnerIds: [] } // concluded, but nobody eligible to win
+    }
+
+    // Tiebreak hierarchy — each level only narrows the field further when
+    // the level above is genuinely tied; a level that already narrows to
+    // one candidate short-circuits the rest, same as a real "first
+    // criterion that breaks the tie wins" rule would.
+    let candidates = [...candidatesByUser.values()]
+
+    const maxPoints = Math.max(...candidates.map((c) => c.totalPoints))
+    candidates = candidates.filter((c) => c.totalPoints === maxPoints)
+
+    if (candidates.length > 1) {
+      const maxExactScores = Math.max(...candidates.map((c) => c.exactScoreCount))
+      candidates = candidates.filter((c) => c.exactScoreCount === maxExactScores)
+    }
+
+    if (candidates.length > 1) {
+      const maxCorrectScorers = Math.max(...candidates.map((c) => c.correctScorerCount))
+      candidates = candidates.filter((c) => c.correctScorerCount === maxCorrectScorers)
+    }
+
+    return { type: 'season_end', winnerIds: candidates.map((c) => c.userId) }
   }
 
-  async awardPrize(_ctx: GameEngineContext, _potId: string): Promise<void> {
-    throw new GameEngineNotImplementedError('score_predictor', 'awardPrize')
+  // GE-6: "Identify the winner(s)." Reviewed Pick5Engine.determineWinner()
+  // and LmsEngine.determineWinner() first — modeled on neither wholesale.
+  // A thin wrapper over classifyOutcome(), same shape as LmsEngine's own
+  // (not Pick5Engine's one-line pot_standings_snapshots lookup — see
+  // classifyOutcome()'s own comment, point 5, for why). No writes of any
+  // kind — no pot_prizes, no notifications — per the repo owner's
+  // explicit "only determine the outcome" instruction, same discipline
+  // already established for LMS.
+  async determineWinner(ctx: GameEngineContext, potId: string): Promise<string[]> {
+    const outcome = await this.classifyOutcome(ctx, potId)
+    return outcome.type === 'season_end' ? outcome.winnerIds : []
+  }
+
+  // GE-6: "Split net prize pool equally." Reviewed Pick5Engine.awardPrize()
+  // and LmsEngine.awardPrize() first, plus the prize-deduction math and
+  // every transaction-ordering correction already applied to both
+  // (hardening sprint, 2026-08-06). Not modeled on either wholesale —
+  // justified per question below.
+  //
+  // Seven questions, answered before writing this method:
+  //
+  // 1. How does predictor_cycle_mode affect prize awarding? Not at all —
+  //    same reasoning as determineWinner() (above): the fixed
+  //    awardPrize(ctx, potId) signature can only ever award the season-end
+  //    outcome determineWinner() identified, and that computation and
+  //    payout are both unchanged by cycle mode. The still-open "does
+  //    two_halves need a SEPARATE, earlier payout at its half-cycle
+  //    boundary" question is not resolved or guessed at here — it would
+  //    need its own, not-yet-designed invocation this method has no part
+  //    of, exactly the same conclusion determineWinner() already reached.
+  //
+  // 2. One pot_prizes row, or multiple? One — scope='season', matching
+  //    LmsEngine's shape exactly, not Pick5Engine's (which legitimately
+  //    creates a new scope='gameweek' row every week because a new
+  //    payable instance — a weekly jackpot — concludes weekly for Pick 5).
+  //    Predictor has exactly one conclusion, ever, per pot (GE-5.3, no
+  //    elimination, no recurring weekly payout concept) — the identical
+  //    structural fact that already made LMS a single-row mode.
+  //
+  // 3. How are tied winners paid? Equally, via the same floorToCents split
+  //    every mode already uses — the tiebreak hierarchy above (Slice 8)
+  //    narrows determineWinner()'s output as far as points/exact-score/
+  //    scorer-count can resolve it; whatever's left after that genuinely
+  //    ties and splits, same as Pick 5's/LMS's own remaining-tie handling.
+  //    No tied recipient is ever favored by rounding — the remainder (at
+  //    most winnerCount - 1 cents) is never paid to anyone, identical rule
+  //    platform-wide.
+  //
+  // 4. Does Predictor use prize deductions identically to Pick 5/LMS? Yes
+  //    — admin_fee_*/charity_fee_* are shared, mode-agnostic pots columns
+  //    (GE-4.1), calculated with the identical roundToCents/fee-percentage
+  //    math (calculatePredictorFeeAmount, above — a private duplicate of
+  //    the same logic, per GE-18). One genuine divergence: gross_amount
+  //    has no carry_over_amount term the way LmsEngine's does — LMS's
+  //    carry-over exists specifically for its own rollover-pot mechanism
+  //    (a wipeout resolving as roll_prize, GE-5.2), a structurally LMS-only
+  //    concept with no Predictor equivalent (Predictor pots' own
+  //    carry_over_amount is always 0, since nothing ever sets it for this
+  //    game_type) — including a always-zero term would be dead code, not
+  //    a faithful port.
+  //
+  // 5. Should awardPrize() consume determineWinner() directly? Yes —
+  //    unlike LmsEngine.awardPrize() (which calls classifyOutcome()
+  //    directly, because it genuinely needs the richer outcome type to
+  //    distinguish wipeout/season_end/single_survivor's different payout
+  //    groups and the wipeout-only rollover branch), Predictor's
+  //    classifyOutcome() carries no information determineWinner() doesn't
+  //    already flatten faithfully — there is only one non-trivial outcome
+  //    shape, season_end, and no further branching by outcome type. Calling
+  //    determineWinner() directly here matches Pick5Engine.awardPrize()'s
+  //    own choice, for the same reason: nothing richer to lose by using
+  //    the thin wrapper instead of the private helper. Confirms, rather
+  //    than duplicates, determineWinner()'s own tiebreak logic — the
+  //    entire reason this question was asked was to avoid re-implementing
+  //    that hierarchy a second time here.
+  //
+  // 6. Idempotent across repeated execution? Yes — identical mechanism to
+  //    Pick5Engine's/LmsEngine's own: an existing, settled pot_prizes row
+  //    (scope='season') short-circuits the whole method before any
+  //    classification or writes happen.
+  //
+  // 7. Any additional transaction-ordering risks? Simpler than LMS's, not
+  //    riskier — Predictor has no rollover-pot-creation step (that's an
+  //    LMS-only wipeout mechanism), so there are only three writes: settle
+  //    entries to 'settled' (idempotent UPDATE), write payouts (idempotent
+  //    UPDATE), then the pot_prizes row LAST — applying the exact ordering
+  //    lesson the hardening sprint had to retrofit onto Pick5Engine/
+  //    LmsEngine from the start, not rediscovering it. is_settled=true is
+  //    written only once every other write has already succeeded, so a
+  //    failure anywhere above it leaves the pot safely retryable — every
+  //    write above it is naturally idempotent, requiring no separate
+  //    compensating-rollback logic the way LmsEngine's own rollover step
+  //    needs.
+  //
+  // Every non-void entry (not just winners) transitions to status =
+  // 'settled' once a real outcome is reached — deferred exactly this far,
+  // same "'settled' only makes sense once the competition has concluded"
+  // reasoning Slice 5 already established and explicitly deferred to here.
+  async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
+    const { data: existingPrize, error: existingPrizeError } = await ctx.supabase
+      .from('pot_prizes')
+      .select('id, is_settled')
+      .eq('pot_id', potId)
+      .eq('scope', 'season')
+      .maybeSingle()
+
+    if (existingPrizeError) {
+      throw new Error(`Failed to look up existing prize: ${existingPrizeError.message}`)
+    }
+    if ((existingPrize as { id: number; is_settled: boolean } | null)?.is_settled) {
+      return
+    }
+
+    const winners = await this.determineWinner(ctx, potId)
+    if (winners.length === 0) {
+      // Deliberately silent, matching LmsEngine.awardPrize()'s philosophy,
+      // not Pick5Engine's (which throws Pick5NoEligibleWinnersError on
+      // zero winners): "season not concluded yet" is Predictor's normal,
+      // overwhelmingly common state (this method is intended to be called
+      // on every settle() tick, same as LMS), and a genuinely-concluded
+      // pot with zero eligible entries has zero money to award either
+      // (gross_amount will compute to 0) — internally consistent, not an
+      // anomaly worth failing loudly for the way Pick 5's own "settled
+      // entries exist but nobody ranks 1" case is.
+      return
+    }
+
+    const { data: pot, error: potError } = await ctx.supabase
+      .from('pots')
+      .select('entry_fee, admin_fee_type, admin_fee_amount, admin_fee_percentage, charity_fee_type, charity_fee_amount, charity_fee_percentage')
+      .eq('id', potId)
+      .single()
+
+    if (potError) {
+      throw new Error(`Failed to look up pot fee configuration: ${potError.message}`)
+    }
+
+    type PotFeeConfig = {
+      entry_fee: number
+      admin_fee_type: 'none' | 'fixed' | 'percentage'
+      admin_fee_amount: number | null
+      admin_fee_percentage: number | null
+      charity_fee_type: 'none' | 'fixed' | 'percentage'
+      charity_fee_amount: number | null
+      charity_fee_percentage: number | null
+    }
+    const potConfig = pot as PotFeeConfig
+
+    // Gross amount: every non-void entry counts (not just 'settled' ones
+    // — that transition hasn't happened yet at this point in the method,
+    // same reasoning as LmsEngine.awardPrize()'s identical gross-amount
+    // query; Pick5Engine's own version can count 'settled' entries only
+    // because its settle() already made that transition earlier). No
+    // carry_over_amount term — see Q4 above.
+    const { data: nonVoidEntries, error: nonVoidError } = await ctx.supabase
+      .from('game_entries')
+      .select('id')
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (nonVoidError) {
+      throw new Error(`Failed to count non-void entries: ${nonVoidError.message}`)
+    }
+
+    const grossAmount = roundToCents(potConfig.entry_fee * (nonVoidEntries?.length ?? 0))
+    const adminFeeAmount = calculatePredictorFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, grossAmount)
+    const charityFeeAmount = calculatePredictorFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, grossAmount)
+    const netAmount = roundToCents(grossAmount - adminFeeAmount - charityFeeAmount)
+
+    if (netAmount < 0) {
+      throw new PredictorPrizePoolExceededError(potId, grossAmount, adminFeeAmount, charityFeeAmount)
+    }
+
+    // Settle every non-void entry (not just winners) — idempotent UPDATE,
+    // safe to repeat on retry. Written before the payout loop, matching
+    // Pick5Engine's/LmsEngine's own ordering (both naturally-idempotent
+    // updates, order between them doesn't affect retry-safety either way,
+    // kept consistent with precedent for readability).
+    const { error: settleEntriesError } = await ctx.supabase
+      .from('game_entries')
+      .update({ status: 'settled', settled_at: ctx.now().toISOString() })
+      .eq('pot_id', potId)
+      .neq('status', 'void')
+
+    if (settleEntriesError) {
+      throw new Error(`Failed to settle entries: ${settleEntriesError.message}`)
+    }
+
+    const perWinnerAmount = floorToCents(netAmount / winners.length)
+
+    for (const userId of winners) {
+      const { error: payoutError } = await ctx.supabase
+        .from('game_entries')
+        .update({ payout_amount: perWinnerAmount })
+        .eq('pot_id', potId)
+        .eq('user_id', userId)
+
+      if (payoutError) {
+        throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+      }
+    }
+
+    // Written LAST, deliberately — applying the hardening-sprint lesson
+    // from the start rather than retrofitting it: is_settled=true here is
+    // what makes every future call treat this pot as concluded, so
+    // nothing above this line may be allowed to run again "for free"
+    // after it. Every write above is a naturally idempotent UPDATE, safe
+    // to repeat on a retry.
+    const prizeRow = {
+      pot_id: potId,
+      scope: 'season' as const,
+      gameweek_id: null,
+      gross_amount: grossAmount,
+      admin_fee_amount: adminFeeAmount,
+      charity_fee_amount: charityFeeAmount,
+      is_settled: true,
+      settled_at: ctx.now().toISOString(),
+    }
+
+    // Same get-or-create-then-write-by-id workaround pot_standings_snapshots
+    // needed (GE-4.6) — pot_prizes has the identical partial-unique-index
+    // shape (pot_prizes_season_key on (pot_id) where scope='season').
+    if (existingPrize) {
+      const { error: updateError } = await ctx.supabase
+        .from('pot_prizes')
+        .update(prizeRow)
+        .eq('id', (existingPrize as { id: number }).id)
+
+      if (updateError) {
+        throw new Error(`Failed to update prize: ${updateError.message}`)
+      }
+    } else {
+      const { error: insertError } = await ctx.supabase.from('pot_prizes').insert(prizeRow)
+
+      if (insertError) {
+        throw new Error(`Failed to insert prize: ${insertError.message}`)
+      }
+    }
   }
 
   async notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {
