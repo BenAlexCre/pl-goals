@@ -17,6 +17,7 @@ import ToastContainer from './components/ui/ToastContainer'
 import Spinner from './components/ui/Spinner'
 import PotManager from './components/pot/PotManager'
 import PotDetailPage from './pages/PotDetail'
+import JoinPot from './pages/JoinPot'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -42,6 +43,10 @@ export default function App() {
         <Route path="/sign-in" element={<SignIn />} />
         <Route path="/sign-up" element={<SignUp />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+        {/* Public: a real invite link must work for a signed-out visitor,
+            not just an existing member — see JoinPot.jsx's own note. */}
+        <Route path="/join" element={<JoinPot />} />
+        <Route path="/join/:inviteCode" element={<JoinPot />} />
 
         <Route
           element={

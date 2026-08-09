@@ -501,30 +501,6 @@ option never appears. This is a UX inconsistency, not a business-rule bypass —
 closing it (making `PicksPage.jsx`'s list filter goalkeepers too) is optional
 cleanup, not a correctness fix.
 
-#### ISSUE-8 — No self-serve pot-join flow
-`pots.invite_code` exists in the schema (unique-constrained — see
-[database.md § pots](./database.md#pots)) but no frontend code reads, generates, or
-redeems it. The only ways to become a pot member are (a) being the creator, or (b) an
-existing pot admin using `admin-actions`' `add_member` action — which itself has no
-UI trigger (the components that would call it are the same unwired `MemberTable.jsx`
-from ISSUE-6). **Status: confirmed.** This looks like a feature that was started
-(the column and its unique constraint exist) and not finished. Plan:
-[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
-
-**Re-confirmed and extended, 2026-08-09, during the Phase 7 Stage 1 audit.**
-`admin-actions`' `remove_member` action (which ISSUE-6's original text didn't
-cover) has the identical gap — grepped `remove_member`/`remove_user_id` across
-`frontend/src`, zero matches, no UI trigger anywhere. **Correction to this
-issue's own prior text**: ISSUE-6 (Payment Verification) was resolved
-2026-08-05 and no longer explains why `MemberTable.jsx` is unwired — the
-component still exists (`components/admin/MemberTable.jsx`), still has an
-`onRemove` prop wired for exactly this purpose, and is still never imported by
-any page; it's simply orphaned/dead code today, not blocked on anything else.
-So both halves of member management — inviting/adding, and removing — remain
-entirely unreachable through the UI, and `redeem_invite()`'s own deferred
-`max_members`/`status` checks (Milestone 7 scope, per
-[schema-review.md #5](./schema-review.md)) are still moot until a join flow
-exists to call it at all.
 
 #### ISSUE-9 — `/admin` has no UI-level role gate
 `App.jsx`'s route table puts `/admin` behind `ProtectedRoute` (must be signed in) but
@@ -811,6 +787,34 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-8 — No self-serve pot-join flow
+**Discovered** (join-flow half) at initial documentation; **extended
+2026-08-09** during the Phase 7 Stage 1 audit to also cover `remove_member`
+(identical no-UI gap, plus a stale cross-reference correction — `MemberTable.jsx`
+is simply orphaned/dead code, not blocked on the by-then-resolved `ISSUE-6`).
+**Resolved 2026-08-09**, Phase 7 Stage 2 Slice 3. Both `pots.invite_code`/
+`redeem_invite()` (self-serve join by code/link) and `admin-actions`'
+`add_member`/`remove_member` (organiser adds/removes a known user directly)
+are now reachable through the UI — a new public `/join`/`/join/:inviteCode`
+route, a new `InviteCard` (copy code/link, generate-if-missing,
+add-by-username) and `MemberList` (plain list + admin-only remove with a
+confirmation dialog) mounted on all three pot-detail surfaces. Zero backend
+changes — every capability used was already implemented and tested; see
+[decisions.md § Member invitations](./decisions.md#member-invitations) for
+the full account, including the repo owner's explicit decision to keep
+membership immediate rather than add a pending-invitation layer (`redeem_invite()`'s
+own deferred `max_members`/`status` checks, `schema-review.md #5`, remain
+genuinely deferred to Milestone 7 — unrelated to and unblocked by this
+resolution). **Not resolved, deliberately out of scope**: a member cannot
+remove themselves ("leave") — `admin-actions`' `remove_member` is
+authorization-gated to pot admins only; extending that gate was judged new
+backend business logic, not a bug fix, so it wasn't built. Verified live
+with two real users (organiser + player, sequential sessions): invite
+generation, join by link, join by code, duplicate-join protection,
+add-by-username, remove, rejoin, invalid-code handling, and the
+signed-out-visitor redirect-preserving sign-in flow. All test data (1 pot,
+2 users) removed by exact ID, independently re-verified as zero residue.
 
 #### ISSUE-33 — Last Man Standing and Score Predictor have zero frontend integration
 **Discovered 2026-08-09** during the Phase 7 Stage 1 audit; **player experience

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import Button from '../../components/ui/Button'
 import Card from '../../components/ui/Card'
@@ -8,6 +8,13 @@ import { useUiStore } from '../../store/uiStore'
 export default function SignUp() {
   const navigate = useNavigate()
   const addToast = useUiStore((s) => s.addToast)
+  const [searchParams] = useSearchParams()
+  // Same "preserve a pending /join/:inviteCode destination" reasoning as
+  // SignIn.jsx.
+  const redirectTo = searchParams.get('redirect') || '/dashboard'
+  const redirectQuery = searchParams.get('redirect')
+    ? `?redirect=${encodeURIComponent(searchParams.get('redirect'))}`
+    : ''
 
   const [form, setForm] = useState({
     display_name: '',
@@ -39,13 +46,13 @@ export default function SignUp() {
 
     if (data.session) {
       addToast({ type: 'success', message: 'Account created. You are now signed in.' })
-      navigate('/dashboard', { replace: true })
+      navigate(redirectTo, { replace: true })
     } else {
       addToast({
         type: 'success',
         message: 'Account created. Check your email if confirmation is enabled.',
       })
-      navigate('/sign-in', { replace: true })
+      navigate(`/sign-in${redirectQuery}`, { replace: true })
     }
   }
 
@@ -79,7 +86,7 @@ export default function SignUp() {
         </form>
 
         <div className="mt-4 text-sm">
-          <Link to="/sign-in" className="text-accent hover:text-accent-muted">
+          <Link to={`/sign-in${redirectQuery}`} className="text-accent hover:text-accent-muted">
             Already have an account? Sign in
           </Link>
         </div>

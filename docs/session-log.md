@@ -13,6 +13,113 @@ from here.
 
 ---
 
+## 2026-08-09 (55) — Phase 7 Stage 2, Slice 3: Member invitations & joining (`ISSUE-8`)
+
+**Goal:** complete the organiser and player membership journey (invite,
+view members, remove members; join by code/link, duplicate protection,
+view joined competitions) so a real multi-player competition is possible
+through the UI — the explicit instruction: reuse the existing backend, do
+not redesign membership, only fix genuine bugs found while wiring.
+
+**Reviewed before writing code**, per the task's own explicit list:
+`pot_members`'s exact schema (no status column — membership is a single,
+immediate insert, never a two-step process), `redeem_invite()`'s full SQL
+body (a `security definer` RPC: resolve pot by code, reject an invalid
+code or an already-a-member caller, insert `pot_members` as `'member'`),
+`admin-actions`' `add_member`/`remove_member` (organiser-only, both
+already implemented, both never called from anywhere in `frontend/`),
+`profiles`' RLS (`profiles_select_authenticated`, `using (true)` — any
+authenticated user can already read any profile row, enough for a
+client-side username search with no new backend capability), and the
+current, dead `MemberTable.jsx` component.
+
+**A real product-shape conflict, raised directly rather than guessed
+at.** The task's own initial checklist asked for "pending members,"
+"resend invitations," and "accept/decline" as distinct actions — none of
+which the schema can represent (no pending state exists anywhere). Per
+this project's own "if a product rule is genuinely missing, stop and ask"
+discipline, this was surfaced to the repo owner with two concrete options
+(add a small, additive `pot_invitations` table vs. build only on the
+existing immediate-membership backend) rather than picked silently. The
+repo owner chose explicitly: keep membership immediate, do not add new
+schema, treat pending/resend/accept/decline as a legitimate but
+out-of-scope future enhancement — full instruction text preserved in
+[decisions.md § Member invitations](./decisions.md#member-invitations).
+
+**Implemented, reusing 100% of the existing backend — zero migrations,
+zero Edge Function changes.** `hooks/useMembership.js`: invite-code
+generation (client-side random code, written via a plain `pots` update —
+already permitted by the existing `pots_update_admin` RLS policy, no new
+grant needed), username search, add/remove (thin wrappers around
+`admin-actions`), and redeem (wraps the RPC, adds a friendlier
+already-a-member fallback that looks up the now-readable pot after
+membership is confirmed). `InviteCard.jsx` (copy code/link,
+generate-if-missing, add-by-username with existing members excluded from
+results) and `MemberList.jsx` (plain list + admin-only remove behind a
+confirmation modal, reusing the existing `Modal` component) — mounted on
+all three pot-detail surfaces: Pick 5's existing Members tab gained a
+Remove button added directly to its existing per-row rendering (not a
+second, duplicate list); LMS/Predictor, which had no members section at
+all before this slice, got the full pair. New public route,
+`pages/JoinPot.jsx` at `/join`/`/join/:inviteCode`, deliberately outside
+`ProtectedRoute` — a real invite link has to work for someone who isn't
+signed in yet. `SignIn.jsx`/`SignUp.jsx` gained a `redirect` query param
+(defaulting to the existing `/dashboard`) so a signed-out visitor's
+pending join survives the sign-in detour instead of being silently lost.
+
+**A genuine bug found and fixed during this slice's own live
+verification, not deferred.** `PotDetail.jsx` (Pick 5) holds its own
+`pot`/`members` state via plain `useState` + imperative fetches, not
+react-query — confirmed live: generating an invite code wrote the correct
+value to the database, but the UI kept showing "No invite code yet" until
+a manual reload, because the new hooks' `invalidateQueries(['pot',
+potId])` calls (correct for LMS/Predictor's `usePot()`-based state) had
+nothing to invalidate there. Fixed with the smallest available change — an
+optional `onChange` callback prop on `InviteCard`, `PotDetail.jsx` passing
+its own existing `loadPot`/`loadMembers` reload functions; LMS/Predictor
+need no change, already correct. Not treated as a reason to convert
+`PotDetail.jsx` to react-query wholesale — that's `ISSUE-10`'s own
+existing, separate scope.
+
+**Verified live**, real browser, two real distinct users (an organiser
+and a player, sequential sign-out/sign-in sessions — proving the flow
+doesn't require true concurrency): pot created, invite code generated and
+both the code and derived link copied; player joined via the link while
+signed in, confirmed by direct DB read; a second redemption attempt with
+the same code correctly hit the "already a member" path server-side and
+still redirected cleanly to the pot, no duplicate row; add-by-username
+search correctly excluded the already-a-member player, then correctly
+included them again immediately after removal; organiser removed the
+player through the confirmation-dialog-gated button, member count and
+search results both updated live with no page reload; organiser
+re-added the same player directly by username; player rejoined via the
+plain `/join` form (code typed in lowercase, case-normalized
+client-side) after a second removal; an invalid invite code produced a
+friendly "Invalid invite code" message, not a raw exception; a fully
+signed-out visitor landed on the same invite link, saw sign-in/sign-up
+prompts carrying the code through the redirect query param, and after
+signing in landed back on the join page — not the default dashboard —
+with the code still pre-filled. "View joined competitions" needed no new
+code at all — `Dashboard.jsx`'s existing `usePots()` already covers it,
+confirmed live. Full unit suite (312/312, unchanged), `deno check`
+(unchanged, no backend code touched), and a frontend production build all
+clean before and after. All test data (1 pot, 2 users) removed by exact
+ID, independently re-verified as zero residue.
+
+**Deliberately not built, both explicitly out of scope**: any
+pending/resend/accept/decline invitation state (repo owner's own explicit
+instruction), and member self-removal ("leave a pot" — investigated;
+`admin-actions`' `remove_member` authorization gate permits only pot
+admins/app-admins, and extending it would be new backend business logic,
+not a bug fix, so it's documented as an open gap rather than built).
+
+**No backend redesign, no new competition rules** — every capability
+used already existed and was already tested; this slice only wired
+frontend to it. Not committed. Stopping here per instruction, awaiting
+review before any further frontend slice.
+
+---
+
 ## 2026-08-09 (54) — Phase 7 Stage 2, Slice 2: Player experience (LMS + Predictor) and automatic league selection
 
 **Goal:** complete the player experience for Last Man Standing and Score

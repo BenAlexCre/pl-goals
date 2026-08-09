@@ -21,8 +21,12 @@ import Button from '../components/ui/Button'
 import Spinner from '../components/ui/Spinner'
 import Toast from '../components/ui/Toast'
 import EmptyState from '../components/ui/EmptyState'
+import Modal from '../components/ui/Modal'
 import LmsPotDetail from '../components/pot/LmsPotDetail'
 import PredictorPotDetail from '../components/pot/PredictorPotDetail'
+import InviteCard from '../components/pot/InviteCard'
+import { useAuthStore } from '../store/authStore'
+import { useRemoveMember } from '../hooks/useMembership'
 
 const PAGE_SIZE = 1000
 const MAX_PICKS = 5
@@ -35,6 +39,9 @@ function formatDeadline(deadline) {
 
 export default function PotDetailPage() {
   const { potId } = useParams()
+  const { user } = useAuthStore()
+  const removeMember = useRemoveMember()
+  const [pendingRemoval, setPendingRemoval] = useState(null)
 
   const [pot, setPot] = useState(null)
   const [members, setMembers] = useState([])
@@ -93,6 +100,7 @@ export default function PotDetailPage() {
         name,
         status,
         game_type,
+        invite_code,
         season_id,
         league_id,
         created_by,
@@ -586,6 +594,23 @@ export default function PotDetailPage() {
     if (!selectedGameweek?.deadline_utc) return false
     return new Date(selectedGameweek.deadline_utc).getTime() <= Date.now()
   }, [selectedGameweek])
+
+  const isPotAdmin = useMemo(
+    () => members.some((m) => m.user_id === user?.id && m.role === 'admin'),
+    [members, user]
+  )
+
+  async function handleConfirmRemoveMember() {
+    if (!pendingRemoval) return
+    try {
+      await removeMember.mutateAsync({ potId, userId: pendingRemoval.user_id })
+      setMessage(`${pendingRemoval.profiles?.display_name || 'Member'} removed from the pot`)
+      setPendingRemoval(null)
+      await loadMembers()
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to remove member')
+    }
+  }
 
   const teamOptions = useMemo(() => {
     const values = new Set()
@@ -1091,6 +1116,19 @@ export default function PotDetailPage() {
             )}
           </>
         ) : (
+          <div className="space-y-6">
+          {isPotAdmin ? (
+            <InviteCard
+              potId={potId}
+              inviteCode={pot.invite_code}
+              existingMemberIds={new Set(members.map((m) => m.user_id))}
+              onChange={async () => {
+                await loadPot()
+                await loadMembers()
+              }}
+            />
+          ) : null}
+
           <Card className="p-5">
             <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
               <div>
@@ -1161,6 +1199,18 @@ export default function PotDetailPage() {
                           >
                             {entryRow.hasEntry ? 'Selected' : 'Not selected'}
                           </span>
+
+                          {isPotAdmin ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setPendingRemoval(entryRow.member)}
+                              aria-label={`Remove ${displayName}`}
+                            >
+                              Remove
+                            </Button>
+                          ) : null}
                         </div>
                       </div>
 
@@ -1198,8 +1248,24 @@ export default function PotDetailPage() {
               </div>
             )}
           </Card>
+          </div>
         )}
       </section>
+
+      <Modal open={!!pendingRemoval} onClose={() => setPendingRemoval(null)} title="Remove member" size="sm">
+        <p className="text-sm text-white/60">
+          Remove <span className="font-medium text-white">{pendingRemoval?.profiles?.display_name}</span> from this pot?
+          They will lose access to picks, standings, and payments for this competition.
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={() => setPendingRemoval(null)}>
+            Cancel
+          </Button>
+          <Button type="button" variant="danger" onClick={handleConfirmRemoveMember} loading={removeMember.isPending} disabled={removeMember.isPending}>
+            Remove
+          </Button>
+        </div>
+      </Modal>
 
       {message ? <Toast message={message} type="success" /> : null}
       {errorMessage ? <Toast message={errorMessage} type="error" /> : null}

@@ -9,6 +9,8 @@ import EmptyState from '../ui/EmptyState'
 import CountdownTimer from '../ui/CountdownTimer'
 import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
+import InviteCard from './InviteCard'
+import MemberList from './MemberList'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import {
   usePredictorEntry,
@@ -18,15 +20,21 @@ import {
   useSubmitPredictorPicks,
 } from '../../hooks/usePredictorEntry'
 import { useLeaderboard } from '../../hooks/useLeaderboard'
+import { usePot } from '../../hooks/usePots'
+import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
 
 // Score Predictor "pot home" — the Predictor sibling of LmsPotDetail.jsx,
 // same reasoning for staying its own component rather than a branch inside
 // PotDetail.jsx's already Pick5-specific body.
 export default function PredictorPotDetail({ pot, potId }) {
+  const { user } = useAuthStore()
   const { data: gameweeks = [], isLoading: gameweeksLoading } = useGameweeksForPot(pot.season_id, pot.league_id)
   const { data: entry, isLoading: entryLoading } = usePredictorEntry(potId)
   const { data: standings = [] } = useLeaderboard(potId, null)
+  const { data: potWithMembers } = usePot(potId)
+  const members = potWithMembers?.pot_members ?? []
+  const isPotAdmin = members.some((m) => m.user_id === user?.id && m.role === 'admin')
 
   const getOrCreateEntry = useGetOrCreatePredictorEntry()
   const submitPicks = useSubmitPredictorPicks()
@@ -290,6 +298,17 @@ export default function PredictorPotDetail({ pot, potId }) {
           </Card>
         </section>
       ) : null}
+
+      <section className="space-y-6">
+        {isPotAdmin ? (
+          <InviteCard
+            potId={potId}
+            inviteCode={potWithMembers?.invite_code}
+            existingMemberIds={new Set(members.map((m) => m.user_id))}
+          />
+        ) : null}
+        <MemberList potId={potId} members={members} isAdmin={isPotAdmin} />
+      </section>
 
       {/* Deliberately labeled "Live fixtures", not "& standings" — see
           LmsPotDetail.jsx's identical note: PredictorEngine.generateStandings()

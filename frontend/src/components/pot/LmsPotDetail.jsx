@@ -9,9 +9,13 @@ import EmptyState from '../ui/EmptyState'
 import CountdownTimer from '../ui/CountdownTimer'
 import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
+import InviteCard from './InviteCard'
+import MemberList from './MemberList'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import { useLmsEntry, useTeamsForGameweek, useGetOrCreateLmsEntry, useSubmitLmsPick } from '../../hooks/useLmsEntry'
 import { useLeaderboard } from '../../hooks/useLeaderboard'
+import { usePot } from '../../hooks/usePots'
+import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
 
 // Last Man Standing "pot home" — the LMS sibling of PotDetail.jsx's Pick 5
@@ -21,9 +25,13 @@ import { isPastDeadline } from '../../utils/time'
 // per-mode separation (GE-18: modes never share implementation) at the
 // frontend layer too.
 export default function LmsPotDetail({ pot, potId }) {
+  const { user } = useAuthStore()
   const { data: gameweeks = [], isLoading: gameweeksLoading } = useGameweeksForPot(pot.season_id, pot.league_id)
   const { data: entry, isLoading: entryLoading } = useLmsEntry(potId)
   const { data: standings = [] } = useLeaderboard(potId, null)
+  const { data: potWithMembers } = usePot(potId)
+  const members = potWithMembers?.pot_members ?? []
+  const isPotAdmin = members.some((m) => m.user_id === user?.id && m.role === 'admin')
 
   const getOrCreateEntry = useGetOrCreateLmsEntry()
   const submitPick = useSubmitLmsPick()
@@ -228,6 +236,17 @@ export default function LmsPotDetail({ pot, potId }) {
           </Card>
         </section>
       ) : null}
+
+      <section className="space-y-6">
+        {isPotAdmin ? (
+          <InviteCard
+            potId={potId}
+            inviteCode={potWithMembers?.invite_code}
+            existingMemberIds={new Set(members.map((m) => m.user_id))}
+          />
+        ) : null}
+        <MemberList potId={potId} members={members} isAdmin={isPotAdmin} />
+      </section>
 
       {/* Deliberately labeled "Live fixtures", not "& standings" — GameweekPage's
           own Standings section queries pot_standings_snapshots scoped to this

@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 
 export default function SignIn() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  // Preserves a pending /join/:inviteCode destination through sign-in —
+  // otherwise a signed-out visitor clicking an invite link would land back
+  // on /dashboard with no way to finish joining. Falls back to the
+  // existing default for every other sign-in.
+  const redirectTo = searchParams.get('redirect') || '/dashboard'
 
   const [mode, setMode] = useState('signin') // signin | signup
   const [email, setEmail] = useState('')
@@ -19,7 +25,7 @@ export default function SignIn() {
       } = await supabase.auth.getSession()
 
       if (session?.user) {
-        navigate('/dashboard', { replace: true })
+        navigate(redirectTo, { replace: true })
       }
     }
 
@@ -57,7 +63,7 @@ export default function SignIn() {
           setMessage('Account created. Check your confirmation email before signing in.')
         } else {
           setMessage('Account created and signed in.')
-          navigate('/dashboard', { replace: true })
+          navigate(redirectTo, { replace: true })
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -67,7 +73,7 @@ export default function SignIn() {
 
         if (error) throw error
 
-        navigate('/dashboard', { replace: true })
+        navigate(redirectTo, { replace: true })
       }
     } catch (err) {
       setError(err.message || 'Something went wrong')

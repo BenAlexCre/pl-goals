@@ -3363,3 +3363,139 @@ the one attempted write that genuinely failed — 15 checks, all passing.
 All test data removed by exact ID, independently re-verified as zero
 residue; the temporarily-flipped fixture/gameweek statuses both
 reverted.
+
+## Member invitations
+
+**Decided 2026-08-09**, Phase 7 Stage 2 Slice 3 (`ISSUE-8`). Before writing
+any code, the exact existing backend was read directly, not assumed: two
+mechanisms already exist, both from Milestone 2/4, neither ever wired to
+any frontend. `pots.invite_code` (unique, nullable) +
+`redeem_invite(p_invite_code text)` — a `security definer` RPC that looks
+up the pot by code, rejects an invalid code or a caller already a member,
+and inserts a `pot_members` row as `'member'`, all in one server-side
+step. And `admin-actions`' `add_member`/`remove_member` — an organiser (or
+app-admin) adding or removing a specific, already-registered user by id,
+also immediate, also already implemented and tested.
+
+**Architecture review finding: there is no "pending invitation" concept
+anywhere in the schema.** `pot_members` has no status column; `joined_at`
+is always set at insert time. Both existing mechanisms grant membership
+immediately, in one step — there is no intermediate state between "not
+invited" and "a full member."
+
+**This created a real tension against the task's own initial request**,
+which asked for "pending members," "resend invitations," and "accept/
+decline" as distinct player actions — none representable in the current
+data model. Two paths existed: add a small, additive `pot_invitations`
+table (new pre-membership layer, `pot_members`/roles themselves untouched)
+to support those literally, or build only on what already exists and
+accept that those specific items become approximate rather than literal.
+**Raised directly with the repo owner rather than guessed at, per this
+project's own "if a product rule is genuinely missing, stop and ask"
+discipline.** The repo owner chose the second option explicitly and in
+detail: *"Do NOT introduce a new `pot_invitations` table. Do NOT redesign
+the membership model. The existing backend architecture is intentional
+and should remain the source of truth. Membership is immediate. This is
+the MVP behaviour... There is NO concept of: pending invitations,
+invitation status, resend invitation, accept invitation, decline
+invitation. Those are future enhancements and are explicitly out of
+scope."**
+
+**Revised scope, per that instruction:**
+- Organiser: generate/copy an invite code, copy a shareable invite link
+  (`{origin}/join/{code}`), add a known registered user directly by
+  username, view current members, remove members.
+- Player: join by invite code, join by invite link, immediate membership,
+  duplicate-join protection (already server-side, via `redeem_invite()`'s
+  own existing-member check), friendly success/error messages, view
+  joined competitions.
+- No pending state, no resend, no accept/decline, anywhere. "Leave the
+  competition" was investigated (`admin-actions`' `remove_member` is
+  gated to callers who are already a pot admin — a regular member has no
+  path to remove themselves) and deliberately **not** built: the task's
+  own framing was "if existing rules allow," and they don't — extending
+  `remove_member`'s authorization to permit self-removal would be new
+  backend business logic, not "only fix bugs," so it's documented as an
+  open, out-of-scope gap rather than built.
+
+**Implemented, reusing 100% of the existing backend — zero migrations,
+zero Edge Function changes:**
+- `hooks/useMembership.js` — `useGenerateInviteCode()` (client-side random
+  8-char code from an ambiguity-free alphabet, written via a plain
+  `pots` update — `pots_update_admin`, 002_rls_policies.sql, already lets
+  an admin update any column on their own pot, `invite_code` included;
+  retries on the astronomically rare unique-constraint collision, since
+  `invite_code` is globally unique, not per-pot); `useSearchProfilesByUsername()`
+  (a plain read against `profiles`, already broadly readable to any
+  authenticated user per `profiles_select_authenticated`, `using (true)`
+  — username only, since `profiles` has no email/phone column and
+  `auth.users` isn't client-readable at all, same reason
+  `admin-actions`' own bulk-payment identifier resolution needs the
+  service role instead); `useAddMember()`/`useRemoveMember()` (thin
+  wrappers around the existing `admin-actions` actions); `useRedeemInvite()`
+  (wraps the RPC, translates its two known exception messages into a
+  friendlier shape, with a best-effort follow-up pot lookup for the
+  "already a member" case — only possible *after* membership is
+  confirmed, since `pots` RLS requires membership to read a row at all).
+- `components/pot/InviteCard.jsx` (copy code/link, generate-if-missing,
+  add-by-username) and `components/pot/MemberList.jsx` (plain list +
+  admin-only remove with a confirmation modal, reusing the existing
+  `Modal` component) — both mounted on all three pot-detail surfaces
+  (Pick 5's existing Members tab gained a "Remove" button added directly
+  to its existing per-row rendering rather than a second, duplicate list;
+  LMS/Predictor, which had no members section at all before this slice,
+  got the full `InviteCard` + `MemberList` pair).
+- `pages/JoinPot.jsx`, a new public route (`/join`, `/join/:inviteCode`,
+  deliberately outside `ProtectedRoute`/`AppShell`) — a real invite link
+  must work for someone who isn't signed in yet, not just an existing
+  member. `pots` itself isn't readable pre-membership (every `pots`
+  SELECT policy requires an existing `pot_members` row), so there's no
+  pot-name preview possible before joining — the post-join redirect to
+  `/pot/:potId` is what shows the player what they joined.
+- `pages/auth/SignIn.jsx`/`SignUp.jsx` gained a `redirect` query-param
+  (falling back to the existing `/dashboard` default) — without it, a
+  signed-out visitor clicking a real invite link would be bounced through
+  sign-in and land back on `/dashboard` with the invite code lost
+  entirely. `JoinPot.jsx` passes `?redirect=/join/:code` when it renders
+  the signed-out sign-in/sign-up prompt.
+
+**A real bug found and fixed during this slice's own live verification,
+not deferred**: `pages/PotDetail.jsx` (Pick 5) holds its `pot`/`members`
+state via plain `useState` + imperative fetches, not react-query — so
+`useGenerateInviteCode()`/`useAddMember()`'s own `invalidateQueries(['pot',
+potId])` calls (correct for the LMS/Predictor surfaces, which use
+`usePot()`) never touched it. Confirmed live: generating an invite code
+wrote `BSD9PK44` to the database correctly, but the UI kept showing "No
+invite code yet" until a manual reload. Fixed with the smallest available
+change — an optional `onChange` callback prop on `InviteCard`, called
+after a successful generate/add in addition to its own cache
+invalidation; `PotDetail.jsx` passes `async () => { await loadPot(); await
+loadMembers() }`, its own existing reload functions. LMS/Predictor don't
+need to pass it — their `usePot()`-based state already refreshes
+correctly via react-query alone. Not a reason to convert `PotDetail.jsx`
+to react-query wholesale (`ISSUE-10`'s own existing scope, deliberately
+not touched here).
+
+**Verified live**, real browser, two real users (an organiser and a
+player, sequential sessions — sign out/sign in, not concurrent, since
+proving the flow doesn't require true concurrency): organiser created a
+pot, generated an invite code, copied both the code and the derived link;
+player joined via the invite link while already signed in (immediate
+membership, confirmed via direct DB read); a second redemption attempt
+with the identical code correctly hit the "already a member" path and
+still redirected to the pot, no duplicate `pot_members` row; organiser
+removed the player via the confirmation-modal-gated Remove button, the
+UI's member count and the "add by username" search results both updated
+live with no page reload; organiser added the same player back directly
+by username, confirmed live; player rejoined via the plain `/join` form
+(no code in the URL, typed and lowercase — case-normalized client-side
+before submission) after being removed a second time; an invalid invite
+code produced a friendly "Invalid invite code" message, not a raw
+exception; a fully signed-out visitor landed on the same invite link,
+saw sign-in/sign-up prompts carrying the invite code through the redirect
+query param, and after signing in landed back on the join page (not the
+default dashboard) with the code still pre-filled. "View joined
+competitions" needed no new code at all — `Dashboard.jsx`'s existing
+`usePots()` already lists every pot a user is a member of. All test data
+(1 pot, 2 users) removed by exact ID, independently re-verified as zero
+residue.
