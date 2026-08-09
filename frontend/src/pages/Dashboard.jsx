@@ -8,6 +8,12 @@ import { SkeletonCard } from '../components/ui/Skeleton'
 import EmptyState from '../components/ui/EmptyState'
 import { Trophy, Users } from 'lucide-react'
 
+const GAME_TYPE_LABELS = {
+  pick5: 'Pick 5',
+  last_man_standing: 'Last Man Standing',
+  score_predictor: 'Score Predictor',
+}
+
 export default function Dashboard() {
   const { data: pots = [], isLoading } = usePots()
   const { data: currentGw } = useCurrentGameweek()
@@ -69,6 +75,10 @@ export default function Dashboard() {
                       <span>{pot.leagues?.name}</span>
                     </div>
                     <span className="text-white/30">{pot.seasons?.name}</span>
+                  </div>
+
+                  <div className="mt-2 text-xs text-white/35">
+                    {GAME_TYPE_LABELS[pot.game_type] || pot.game_type || 'Pick 5'}
                   </div>
                 </Card>
               </Link>

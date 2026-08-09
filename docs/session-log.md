@@ -13,6 +13,159 @@ from here.
 
 ---
 
+## 2026-08-09 (53) — Phase 7 Stage 2, Slice 1: Pot creation form (`ISSUE-34`)
+
+**Goal:** the repo owner reviewed the Phase 7 Stage 1 audit and chose "follow
+the recommended order" for Stage 2 — start with `ISSUE-34` (pot creation form
+gaps), the confirmed prerequisite for `ISSUE-33` (LMS/Predictor have zero
+frontend integration), then work down the list one slice at a time, same
+incremental review-per-slice pattern as Milestones 4-6.
+
+**Investigated before writing code**: read `components/pot/potManager.jsx`
+in full, every migration that added a `pots` column
+(`004`/`010`/`013`/`019_*.sql`) to get the exact, current column/enum/check-
+constraint set, and the `prevent_pot_contract_change()` trigger's exact
+guarded-column list (some fields lock unconditionally at creation, others
+only once the pot's first `game_entries` row exists). Also confirmed the
+column-level INSERT grant (`013`'s `revoke insert on pots from authenticated`
++ explicit `grant insert (...)` column list, extended by `019`) — every
+pot-contract field needed for this form is grantable to an authenticated
+client except the three rollover-lineage columns, which correctly stay
+service-role-only.
+
+**Implemented**: `potManager.jsx`'s create-pot form rebuilt with the full
+pot-contract field set (game_type, entry fee, max members, admin/charity fee
+type+amount/percentage, and mode-specific settings conditionally rendered on
+the selected game mode). `hooks/usePots.js`'s previously-dead `useCreatePot`
+mutation extended to accept the full config and do both writes (`pots` then
+the admin `pot_members` row) — reused rather than duplicating the insert
+logic inline a second time, closing part of the dead-code finding from
+Stage 1's own audit. Client-side validation was deliberately kept to exactly
+what the DB's own check constraints already require (fee consistency,
+non-negative Predictor points) — no invented stricter rule.
+
+**Two real product-risk decisions resolved by reading the engines directly,
+not guessed at**: (1) `season_end_tie_rule = 'final_prediction'` is offered
+in the dropdown but disabled, since `LmsEngine.awardPrize()` still throws
+`LmsFinalPredictionNotImplementedError` for it — the UI must not let an
+organiser configure a pot for a guaranteed future failure with no recovery
+path (no pot-edit UI exists yet). (2) `end_gameweek_id` is required (not
+just recommended) for both LMS and Predictor — read both engines'
+`classifyOutcome()` directly and confirmed a null value returns `{ type:
+'in_progress' }` forever, not an error, so an organiser who skipped it would
+have no way to notice or fix it later. `start_gameweek_id` is similarly
+required for LMS, since `ISSUE-32`'s own `checkEntryWindow()` fix rejects
+every entry attempt for a normal pot with none set.
+
+**Live-verified** through the real browser (Playwright, real local Supabase,
+a freshly signed-up test user): created a Score Predictor pot exercising
+every Predictor-specific field, and a Last Man Standing pot exercising both
+fee-type conditional branches (percentage admin fee, fixed charity fee) —
+both confirmed correct via direct `pots` table read; submitting without a
+required end-gameweek was correctly blocked client-side with a specific
+message, not a generic one. All test data (2 pots, 1 pot_members row, 1 auth
+user, 1 profile) removed by exact ID immediately after, independently
+re-verified as zero residue.
+
+**Found, not fixed — a real, previously-undocumented data problem, not a
+code bug**: no gameweek anywhere in the local seed data has `is_current =
+true`, and the Premier League league tied to the *current* season has zero
+gameweeks at all (the real 38-gameweek Premier League data sits under a
+second, non-current league row). This explains a pre-existing, silent
+`useCurrentGameweek()` 406 on `Dashboard.jsx`, and would have made the new
+pot-creation form's "— Current" league option a dead end for LMS/Predictor.
+Registered as `ISSUE-39` rather than silently patched via ad-hoc SQL — the
+same "don't make out-of-band database changes" discipline `ISSUE-1`/
+`ISSUE-20`/`ISSUE-21`/`ISSUE-24` already established applies here too, and
+this is a data-seeding fact, not something a frontend or Edge Function
+change can fix.
+
+**No backend or schema changes.** `deno check`/312 unit tests re-confirmed
+clean as a baseline (untouched by this slice); frontend production build
+succeeds cleanly both before and after. Not committed. Continuing down the
+recommended Stage 2 order next: `ISSUE-33` (LMS/Predictor entry, pick
+submission, standings, notifications UI).
+
+---
+
+## 2026-08-09 (52) — Phase 7 Stage 1: Frontend Completion & Launch Readiness audit
+
+**Goal:** with all three `GameEngine` backends complete (Milestones 4-6), audit
+the entire frontend/admin surface against every implemented backend
+capability, across all three game modes, and produce a gap analysis — audit
+only, no implementation, per the task's own explicit "stop after Stage 1"
+instruction and this repo's own planning discipline for large work
+(`CLAUDE.md § Planning`).
+
+**Method:** re-read `game-engine.md`/`business-rules.md`/`current-state.md`/
+`project-board.md`/`decisions.md`, then ran two parallel, read-only, thorough
+audits: one over every frontend page/hook/admin component/route, one over
+every Edge Function's purpose/auth posture/mode-awareness. Cross-referenced
+both against each other and against the known `GameEngine`/`admin-actions`
+capability set rather than assuming anything already documented as "done" on
+the backend was reachable from the UI.
+
+**Headline finding: Last Man Standing and Score Predictor have zero frontend
+integration** (`ISSUE-33`). An exhaustive, case-insensitive grep of
+`frontend/src` for every LMS/Predictor-related term (`lms`, `predictor`,
+`game_entry_lms`, `game_entry_predictor`, `lms_team_picks`,
+`predictor_fixture_picks`, `get-or-create-lms-entry`,
+`get-or-create-predictor-entry`, `submit-lms-pick`, `submit-predictor-picks`)
+returned **zero matches on every term** — including `game_type` itself, which
+does not appear anywhere in the frontend at all. Root cause: `ISSUE-34` — the
+only pot-creation flow (`components/pot/potManager.jsx`) is a raw, unvalidated
+insert setting just `name`/`league_id`/`season_id`; every other pot-contract
+column (`game_type`, `entry_fee`, fee/charity config, LMS wipeout/season-end
+rules, Predictor scoring config) is DB-default-only, so an organiser cannot
+create anything but a free, default Pick 5 pot through the UI. Confirmed the
+`prevent_pot_contract_change()` trigger's exact immutable-column set (some
+fields lock unconditionally at creation, others lock once the pot's first
+`game_entries` row exists), which any future pot-edit UI needs to respect.
+
+**Four more issues newly registered**: `ISSUE-35` (season-scoped LMS/Predictor
+payments have no admin UI — `AdminPayments.jsx` is hard-scoped to
+`gameweek`-scoped payments only, even though `mark_paid`/`mark_unpaid` already
+support the season-scoped shape); `ISSUE-36` (`reinstate_entry` — implemented
+and live-verified across all three modes 2026-08-08 — has zero frontend
+callers); `ISSUE-37` (no notifications UI for any mode, Pick 5 included —
+consolidates three previously-separate, LMS/Predictor-only project-board notes
+into one platform-wide issue, since Pick 5's own notifications, live since
+Milestone 4 Slice 9, have never had a UI either).
+
+**Three existing issues extended** with newly confirmed facts, not new ids
+(same underlying gap, more instances found): `ISSUE-26` (the missing-auth-check
+gap also applies to `sync-fixtures`, confirmed by direct source read — not
+previously checked); `ISSUE-8` (confirmed `remove_member` has the identical
+no-UI gap `add_member` already had; corrected a stale internal cross-reference
+to the now-resolved `ISSUE-6` explaining why `MemberTable.jsx` was unwired —
+it's simply orphaned, not blocked on anything); `ISSUE-11` (five more
+confirmed-dead exports/components — `usePick5Entry.js`, `useAdminAction`,
+`usePot`/`useCreatePot`, `MemberTable.jsx`, `LeaderboardCard.jsx` — plus one
+orphaned route, `/pot/:potId/picks`, routed but never linked from anywhere).
+
+**Also confirmed, not new findings**: all three previously-documented
+unauthenticated money/scoring Edge Functions (`compute-deadlines`/
+`compute-scores`/`settle-gameweek`, `ISSUE-26`) are still exactly as
+documented — direct source read, not inferred. `LeaderboardTable.jsx` (the
+only component rendering `pot_standings_snapshots`) is confirmed Pick-5-specific
+(hardcodes `PICK5_PICK_COUNT = 5`, would render nonsense for LMS's
+alive/eliminated shape or Predictor's unbounded cumulative score) — directly
+relevant to `ISSUE-33`'s scope, not a new issue on its own. `admin-actions`'
+full action set (`mark_paid`/`mark_unpaid`/`reinstate_entry`/`add_member`/
+`remove_member`/`bulk_verify_payments`) and each one's exact request-body
+shape were confirmed by direct source read, to inform the future frontend
+forms that will need to call them correctly.
+
+**No backend code changed.** No new backend bugs found — everything
+confirmed was either already documented or a frontend-side gap. Delivered:
+full audit, missing-feature matrix, all organiser/player/lifecycle user
+journeys traced against real code, production-readiness assessment, and a
+recommended implementation order for Stage 2, per the task's own deliverable
+list. **Stopped after Stage 1, awaiting review and prioritization before any
+Stage 2 frontend/admin code is written**, per explicit instruction.
+
+---
+
 ## 2026-08-09 (51) — Milestone 6 Slice 9: Score Predictor notifications
 
 **Goal:** implement only `PredictorEngine.notifyUsers()`, wired into
