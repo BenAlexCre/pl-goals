@@ -14,6 +14,8 @@ const configs = {
   completed:'bg-white/5 text-white/40 border-white/8',
   admin:    'bg-amber/15 text-amber border-amber/30',
   member:   'bg-white/8 text-white/50 border-white/10',
+  alive:      'bg-accent/15 text-accent border-accent/30',
+  eliminated: 'bg-red-goal/15 text-red-goal border-red-goal/30',
 }
 
 const defaultLabels = {
@@ -21,6 +23,7 @@ const defaultLabels = {
   pending: '· Pending', void: '∅ Void', locked: '🔒 Locked', settled: '✓ Settled',
   paid: '✓ Paid', unpaid: '✗ Unpaid', live: '● Live', upcoming: 'Upcoming',
   completed: 'Final', admin: 'Admin', member: 'Member',
+  alive: '● Alive', eliminated: '✗ Eliminated',
 }
 
 export default function Badge({ status, children, className = '' }) {

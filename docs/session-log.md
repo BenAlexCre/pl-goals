@@ -13,6 +13,128 @@ from here.
 
 ---
 
+## 2026-08-09 (54) — Phase 7 Stage 2, Slice 2: Player experience (LMS + Predictor) and automatic league selection
+
+**Goal:** complete the player experience for Last Man Standing and Score
+Predictor (join, submit/edit pick, view locked pick, standings, elimination
+status or cumulative score, notifications) and implement a new product
+rule — automatic league selection — enforced in both frontend and backend.
+Explicit instruction: do not redesign the backend; only fix backend bugs
+genuinely discovered during frontend integration.
+
+**Reviewed before writing code**, per the task's own explicit list:
+`PotDetail.jsx`, `GameweekPage.jsx`, `useEntry.js`, `useLeaderboard.js`/
+`LeaderboardTable.jsx`, `useAdmin.js`, `usePick5Entry.js` (the existing, if
+dead, per-mode-hook pattern to model new hooks on), every `ui/` component,
+`App.jsx`'s route table, and — read directly, not paraphrased — the exact
+request/response contracts of `get-or-create-lms-entry`/`submit-lms-pick`/
+`get-or-create-predictor-entry`/`submit-predictor-picks`, plus both
+engines' `validateEntry()` bodies (team-has-a-fixture-in-this-gameweek and
+no-repeat-team for LMS; fixture-belongs-to-gameweek and
+goalscorer-must-be-on-one-of-the-two-teams for Predictor) and both
+`generateStandings()` methods' exact `meta` shapes
+(`{competitiveStatus, eliminatedGameweekId}` / `{exactScoreCount,
+correctScorerCount}`) — so every new picker and every standings row
+matches what the server will actually accept or has actually written,
+never guessed.
+
+**League selection implemented**: `potManager.jsx` computes a
+`defaultLeagueId()` — the sole active league when exactly one exists (no
+selector rendered, matching "the user should not even know a choice
+existed"), the current Premier League season when several exist (falling
+back to the existing current-first/alphabetical sort), empty when none
+exist (blocks submission, disables the button, shows a clear message).
+Backend enforcement (`021_pots_require_active_league.sql`) extends
+`pots_insert_authenticated`'s `WITH CHECK` with `exists (select 1 from
+leagues where id = league_id and is_active = true)` — RLS is the only
+mechanism that can express this kind of cross-table invariant; a CHECK
+constraint can't reference another table's mutable state.
+
+**Player experience implemented**: `PotDetail.jsx` now branches on
+`pot.game_type` immediately after loading the pot, dispatching to two new
+components (`LmsPotDetail.jsx`, `PredictorPotDetail.jsx`) rather than
+extending its own already-large, Pick5-only body — the same per-mode
+separation the backend's own `GameEngine` architecture already enforces
+(GE-18), applied at the frontend layer for the first time. New hooks
+(`useLmsEntry.js`, `usePredictorEntry.js`) are thin wrappers around the
+already-implemented, already-tested Edge Functions — no business logic
+duplicated, no new rules invented. Team/fixture/goalscorer pickers only
+ever offer choices the server will actually accept, read directly from
+each engine's `validateEntry()`. `LeaderboardTable.jsx` gained a `gameType`
+prop (default `'pick5'`, so its one existing call site needs no change) so
+standings render LMS's alive/eliminated shape and Predictor's cumulative
+points instead of always assuming Pick 5's `score/5`.
+
+**Notifications implemented**: `useNotifications.js` + a new
+`NotificationPanel.jsx`, opened from a bell icon added to `TopNav.jsx`,
+reusing the existing `Drawer`/`useUiStore` primitive rather than building a
+new one. Mode-agnostic by construction (reads `notifications.type` as free
+text, formats any `.prize_awarded` event generically) — resolves the
+notifications gap for all three modes at once, since it lives in shared
+layout, not a per-mode page.
+
+**A genuine backend bug found and fixed during this slice's own live
+verification, not deferred.** Testing `021`'s new RLS check directly (a
+real REST insert, bypassing the frontend entirely, against a league
+temporarily flipped to `is_active=false`) — the insert still succeeded.
+A full audit of every INSERT policy on `pots` found two undocumented,
+out-of-band duplicates, `"authenticated can create pots"`/`"users can
+create own pots"`, both bare `with check (created_by = auth.uid())` —
+already known and already correctly classified "harmless" by `ISSUE-28`
+back on 2026-08-05, since `pots_insert_authenticated`'s own check was
+identically permissive at the time. That classification stopped being
+true the instant `021` made `pots_insert_authenticated` strictly more
+restrictive: RLS OR-combines same-command policies, so the two duplicates
+silently let through exactly what the new, intentionally stricter policy
+existed to block. Fixed with `022_drop_duplicate_pots_insert_policies.sql`
+(same drop-by-name pattern as the existing `012_drop_undocumented_rls_policies.sql`
+precedent); re-verified live, the identical request now correctly returns
+`403`. A concrete lesson for `ISSUE-28`'s own remaining ~15 "harmless
+duplicate" policies: that classification needs re-checking whenever the
+policy being duplicated changes, not just recorded once.
+
+**Verified live**, real browser (Playwright), real local Supabase: all
+three league-selection branches (exactly one active league — silent
+auto-assign, confirmed via direct DB read; several — selector shown,
+correctly defaulted; none — submission blocked with a clear message,
+button disabled), both full player journeys (LMS: joined, submitted a
+pick, edited it, confirmed the no-repeat-team picker constraint, viewed a
+simulated eliminated state and a simulated locked pick via temporarily
+adjusted DB state — both reverted after — viewed previously-used teams,
+viewed mode-correct standings via a seeded snapshot row, viewed and
+marked-read a real notification; Predictor: joined, predicted a fixture's
+score with a goalscorer restricted to the correct two teams, edited the
+prediction, viewed a simulated locked prediction, viewed cumulative
+points, viewed mode-correct standings via a seeded snapshot row), and the
+RLS bug both broken and fixed via direct REST calls. Two small display
+bugs found and fixed during this same verification pass (LMS's
+"previously used teams" list and elimination message both showed a raw
+`gameweeks.id` instead of the gameweek number — `LmsPotDetail.jsx` now
+resolves both against its own loaded gameweeks list). Full unit suite
+(312/312), `deno check` on every Edge Function, and a frontend production
+build were all clean before and after. All test data (3 pots across both
+new modes plus one Pick 5 pot used for the single-league test, 1 auth
+user, 2 seeded `pot_standings_snapshots` rows, 1 seeded `notifications`
+row, 3 pots created directly via the RLS bypass tests) removed by exact
+ID, independently re-verified as zero residue; every temporarily-flipped
+`leagues.is_active`/`gameweeks.deadline_utc` value reverted to its exact
+original value, independently re-verified.
+
+**Found, not fixed, one small cosmetic gap** (out of scope, documented):
+`LeaderboardTable`'s LMS elimination subtitle still shows the raw
+`gameweeks.id` from `meta.eliminatedGameweekId` rather than the gameweek
+number, since the component has no gameweek-number lookup available to it
+from either of its two call sites.
+
+**No Game Engine redesign, no new competition rules** — every backend
+change (the two migrations) is additive RLS-policy scope, not business
+logic. Not committed. Stopping here per instruction, awaiting review before
+continuing to `ISSUE-8` (member invite/join — now the top remaining
+blocker to real multi-player use of either mode) or any further Stage 2
+slice.
+
+---
+
 ## 2026-08-09 (53) — Phase 7 Stage 2, Slice 1: Pot creation form (`ISSUE-34`)
 
 **Goal:** the repo owner reviewed the Phase 7 Stage 1 audit and chose "follow

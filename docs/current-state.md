@@ -463,36 +463,6 @@ deliberately removed/replaced by the manual scraper workflow. Plan:
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-33 — Last Man Standing and Score Predictor have zero frontend integration
-**Discovered 2026-08-09**, during the Phase 7 Stage 1 frontend/backend gap audit
-(the first systematic comparison of the frontend against every implemented
-`GameEngine` capability since Milestone 5/6 began). Both modes are fully
-implemented, unit-tested, and live-verified on the backend — all eight
-`GameEngine` methods each, per [game-engine.md § GE-12](./game-engine.md#ge-12-milestone-plan)
-— but **no frontend code references either mode at all**. Confirmed by an
-exhaustive, case-insensitive grep of `frontend/src` for `lms`, `predictor`,
-`game_entry_lms`, `game_entry_predictor`, `lms_team_picks`,
-`predictor_fixture_picks`, `get-or-create-lms-entry`, `get-or-create-predictor-entry`,
-`submit-lms-pick`, `submit-predictor-picks`, and `game_type` itself: **zero
-matches for every single term.** The literal string `game_type` does not occur
-anywhere in the frontend — no page or hook branches on it, so nothing in the UI
-even knows a pot could be anything other than Pick 5.
-
-Concretely, none of the following can happen through the UI, for either mode:
-creating an entry (`get-or-create-lms-entry`/`get-or-create-predictor-entry`,
-both implemented, tested, and reachable via HTTP, but never called from
-`frontend/`), submitting a pick (`submit-lms-pick`/`submit-predictor-picks`,
-same status), or viewing standings/notifications that would render correctly
-(see `ISSUE-37` and the standings note below). The pot-creation form itself
-can't even produce an LMS or Predictor pot in the first place — see `ISSUE-34`.
-
-One partial exception: `pot_standings_snapshots` rows for LMS/Predictor pots
-*are* technically queryable by the existing `useLeaderboard`/`LeaderboardTable`
-code path if such a pot existed, but that rendering is Pick-5-specific
-(hardcodes `PICK5_PICK_COUNT = 5` and a `score/5` display) and would render
-nonsense for LMS's alive/eliminated shape or Predictor's unbounded cumulative
-score — not a working view, just a code path that wouldn't crash.
-
 **Status: confirmed, not fixed.** This is the largest single gap between what
 the backend can do and what a real user can do — see
 [project-board.md](./project-board.md) for the prioritized implementation plan.
@@ -695,6 +665,26 @@ confirming each one individually adds no capability beyond its documented
 sibling, which is more verification than a "small, low-risk" hardening pass
 allows; recommend a dedicated cleanup pass, not a blind bulk drop.
 
+**A third exception found and fixed, 2026-08-09, during Phase 7 Stage 2
+Slice 2's own live verification of a new, more restrictive `pots` INSERT
+policy** (`021_pots_require_active_league.sql`, the automatic
+league-selection product rule's backend enforcement): two of `pots`'
+undocumented duplicate INSERT policies — `"authenticated can create pots"`
+and `"users can create own pots"`, both bare `with check (created_by =
+auth.uid())` — were correctly classified "harmless" here in 2026-08-05,
+since `pots_insert_authenticated`'s own check was identically permissive at
+the time. That stopped being true the moment `pots_insert_authenticated`
+became strictly more restrictive: RLS OR-combines same-command policies, so
+these two duplicates silently let through exactly the inserts the new,
+intentionally stricter policy existed to block — confirmed live via a real
+REST insert against a league flipped to `is_active=false`, which succeeded
+when it should have been rejected. Dropped both via
+`022_drop_duplicate_pots_insert_policies.sql` (same drop-by-name pattern as
+`012_drop_undocumented_rls_policies.sql`); re-verified live, same request
+now correctly returns `403`. A concrete illustration of why "harmless
+duplicate" classifications need re-checking whenever the policy they
+duplicate changes, not just recorded once and assumed to age well.
+
 #### ISSUE-10 — Duplicated data-fetching pattern
 `pages/PotDetail.jsx` and `components/pot/potManager.jsx` re-implement data
 fetching/mutation with local `useState`/`useEffect` + direct `supabase.from(...)`
@@ -821,6 +811,67 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-33 — Last Man Standing and Score Predictor have zero frontend integration
+**Discovered 2026-08-09** during the Phase 7 Stage 1 audit; **player experience
+resolved 2026-08-09**, Phase 7 Stage 2 Slice 2. Both modes are fully
+implemented, unit-tested, and live-verified on the backend (all eight
+`GameEngine` methods each), but no frontend code referenced either mode at
+all — confirmed by an exhaustive grep of every LMS/Predictor-related term
+and `game_type` itself returning zero matches anywhere in `frontend/src`.
+
+**Fixed**: `pages/PotDetail.jsx` now branches on `pot.game_type` immediately
+after the pot loads, dispatching to two new, fully separate components
+(`components/pot/LmsPotDetail.jsx`, `components/pot/PredictorPotDetail.jsx`)
+rather than being crammed into the already-large, Pick5-only body — mirrors
+the backend's own per-mode separation (GE-18) at the frontend layer.
+New hooks (`hooks/useLmsEntry.js`, `hooks/usePredictorEntry.js`) wrap the
+already-implemented, already-tested `get-or-create-lms-entry`/`submit-lms-pick`/
+`get-or-create-predictor-entry`/`submit-predictor-picks` Edge Functions —
+no backend logic duplicated, no new business rules invented. Both new
+components implement every journey item live-verified through the real
+browser: join, view entry, submit pick/prediction, edit before deadline,
+view locked pick/prediction, view previously-used-teams (LMS) or cumulative
+score (Predictor), view elimination status (LMS), view standings.
+`components/leaderboard/LeaderboardTable.jsx` gained a `gameType` prop (default
+`'pick5'`, so the one existing call site needs no change) so standings render
+correctly for all three modes instead of always assuming a `score/5` shape —
+LMS shows alive/eliminated (from `meta.competitiveStatus`/`eliminatedGameweekId`,
+exactly matching `LmsEngine.generateStandings()`'s own written shape),
+Predictor shows cumulative points plus `meta.exactScoreCount`/`correctScorerCount`.
+The LMS team-picker and Predictor fixture/goalscorer pickers only ever offer
+choices the server will actually accept (mirrors each engine's own
+`validateEntry()` checks directly, read from source, not guessed) — teams
+with a fixture in the selected gameweek, previously-used teams disabled,
+goalscorer candidates restricted to the two teams in the selected fixture.
+
+**Deliberately not built this slice** (out of the explicit player-journey
+scope, and each is its own real, separate gap): member invite/add — see
+`ISSUE-8`, still the reason a second real player cannot join a pot through
+the UI at all today, so this slice's live verification could only exercise
+a single (admin/creator) player's full journey per mode, not a genuine
+multi-player competition; season-scoped payment admin UI — `ISSUE-35`;
+`reinstate_entry` UI — `ISSUE-36`. `GameweekPage.jsx`'s own "Entries" section
+still only renders Pick 5 shape (degrades to an empty section for LMS/
+Predictor rather than crashing, confirmed) — not extended this slice, since
+each new pot-home page already satisfies "view locked pick" on its own;
+flagged as a possible future enhancement, not a gap in the stated journeys.
+
+**Minor cosmetic gap found, not fixed**: `LeaderboardTable`'s LMS elimination
+subtitle reads `meta.eliminatedGameweekId` directly, which is a raw
+`gameweeks.id`, not the human-readable gameweek number the rest of the UI
+shows (`LmsPotDetail.jsx` itself resolves this correctly via its own loaded
+gameweeks list). `LeaderboardTable` has no gameweek-number lookup available
+to it (used from both the pot-home pages and `GameweekPage.jsx`, neither of
+which currently passes one down) — fixing it cleanly needs a small prop
+threaded through both call sites, left as a documented, low-priority,
+purely-cosmetic follow-up rather than expanding this slice's scope.
+
+**Backend bug found and fixed during this slice's own live verification —
+see `ISSUE-28`'s update** for the full account: two undocumented, out-of-band
+`pots` INSERT policies (already known, previously classified harmless
+duplicates) turned out to actively bypass the new active-league RLS check
+this same slice added, until dropped.
 
 #### ISSUE-34 — Pot creation form exposes only 2 of ~20 configurable pot-contract columns
 **Discovered 2026-08-09** during the Phase 7 Stage 1 audit; **resolved the same

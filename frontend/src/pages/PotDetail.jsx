@@ -21,6 +21,8 @@ import Button from '../components/ui/Button'
 import Spinner from '../components/ui/Spinner'
 import Toast from '../components/ui/Toast'
 import EmptyState from '../components/ui/EmptyState'
+import LmsPotDetail from '../components/pot/LmsPotDetail'
+import PredictorPotDetail from '../components/pot/PredictorPotDetail'
 
 const PAGE_SIZE = 1000
 const MAX_PICKS = 5
@@ -90,6 +92,7 @@ export default function PotDetailPage() {
         id,
         name,
         status,
+        game_type,
         season_id,
         league_id,
         created_by,
@@ -705,6 +708,18 @@ export default function PotDetailPage() {
         description="This pot could not be loaded."
       />
     )
+  }
+
+  // Mode dispatch, mirroring the backend's own per-mode separation (GE-18)
+  // at the frontend layer: everything below this point is Pick 5-specific
+  // (MAX_PICKS, pick5_picks, get-or-create-pick5-entry) and stays exactly
+  // as it was — LMS/Predictor get their own components instead of being
+  // crammed into this already-large, Pick5-only state machine.
+  if (pot.game_type === 'last_man_standing') {
+    return <LmsPotDetail pot={pot} potId={potId} />
+  }
+  if (pot.game_type === 'score_predictor') {
+    return <PredictorPotDetail pot={pot} potId={potId} />
   }
 
   return (

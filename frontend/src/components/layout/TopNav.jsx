@@ -1,11 +1,17 @@
 import { Link, NavLink, useLocation } from 'react-router-dom'
-import { Home, Trophy, Users, User, Settings, LogOut } from 'lucide-react'
+import { Home, Trophy, Users, User, Settings, LogOut, Bell } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { useUiStore } from '../../store/uiStore'
+import { useNotifications } from '../../hooks/useNotifications'
 import Avatar from '../ui/Avatar'
+import NotificationPanel from '../notifications/NotificationPanel'
 
 export default function TopNav() {
   const { profile, signOut } = useAuthStore()
   const location = useLocation()
+  const openDrawer = useUiStore((s) => s.openDrawer)
+  const { data: notifications = [] } = useNotifications()
+  const unreadCount = notifications.filter((n) => !n.read_at).length
 
   const links = [
     { to: '/dashboard', label: 'Dashboard', icon: Home },
@@ -51,6 +57,20 @@ export default function TopNav() {
         </nav>
 
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => openDrawer(<NotificationPanel />)}
+            aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'}
+            className="relative rounded-xl p-2 text-white/65 hover:bg-white/5 hover:text-white"
+          >
+            <Bell size={18} />
+            {unreadCount > 0 ? (
+              <span className="absolute right-1 top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-pitch-950">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            ) : null}
+          </button>
+
           <Link to="/profile" className="flex items-center gap-2 rounded-xl px-2 py-1 hover:bg-white/5">
             <Avatar name={profile?.full_name || profile?.username || 'User'} />
             <div className="hidden sm:block">

@@ -235,6 +235,32 @@ export default function PotManager() {
     [leagues, leagueId]
   )
 
+  // Automatic league selection (product rule, Phase 7 Stage 2 Slice 2):
+  // exactly one active league -> assign it silently, no selector ever
+  // shown; several -> default to the current Premier League season but let
+  // the organiser pick another; none -> defaultLeagueId returns '', which
+  // both hides the selector and fails validate()/the RLS insert check.
+  // "Current Premier League" is name==='Premier League' AND its season is
+  // the current one — not just "any current-season league" — since a
+  // future non-Premier-League current-season league shouldn't silently
+  // become the default. Falls back to the existing current-first/
+  // alphabetical sort's first entry if no exact match exists.
+  function defaultLeagueId(leaguesList) {
+    if (leaguesList.length === 0) return ''
+    if (leaguesList.length === 1) return String(leaguesList[0].id)
+    const preferred = leaguesList.find(
+      (l) => l.name === 'Premier League' && l.seasons?.is_current
+    )
+    return String((preferred || leaguesList[0]).id)
+  }
+
+  useEffect(() => {
+    setLeagueId(defaultLeagueId(leagues))
+  }, [leagues])
+
+  const showLeagueSelector = leagues.length > 1
+  const noActiveLeagues = !loading && leagues.length === 0
+
   useEffect(() => {
     async function init() {
       try {
@@ -294,7 +320,7 @@ export default function PotManager() {
   function resetForm() {
     setName('')
     setDescription('')
-    setLeagueId('')
+    setLeagueId(defaultLeagueId(leagues))
     setGameType('pick5')
     setEntryFee('0')
     setMaxMembers('')
@@ -318,6 +344,7 @@ export default function PotManager() {
   function validate() {
     const trimmedName = name.trim()
     if (!trimmedName) return 'Pot name is required'
+    if (leagues.length === 0) return 'No active league is available right now — pots cannot be created until one is configured'
     if (!selectedLeague) return 'Select a league/tournament'
 
     const fee = Number(entryFee)
@@ -448,35 +475,60 @@ export default function PotManager() {
                 />
               </div>
 
-              <div>
-                <label className={labelClass} htmlFor="pot-league">League / tournament</label>
-                <div className="relative">
-                  <select
-                    id="pot-league"
-                    value={leagueId}
-                    onChange={(e) => setLeagueId(e.target.value)}
-                    className={selectClass}
-                  >
-                    <option value="">Select a league/tournament</option>
-                    {leagues.map((league) => (
-                      <option key={league.id} value={league.id}>
-                        {league.name}
-                        {league.country ? ` (${league.country})` : ''}
-                        {league.seasons?.is_current ? ' — Current' : ''}
-                      </option>
-                    ))}
-                  </select>
-
-                  <ChevronDown
-                    size={18}
-                    className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45"
-                  />
+              {/* Automatic league selection: exactly one active league is
+                  assigned silently (no selector rendered at all); several
+                  show a selector defaulting to the current Premier League;
+                  none blocks submission with a clear message. Backend RLS
+                  (pots_insert_authenticated, 021_pots_require_active_league.sql)
+                  enforces the same "must reference an active league"
+                  invariant independently — this UI is convenience, not the
+                  only gate. */}
+              {loading ? (
+                <div className={hintClass}>Loading available leagues...</div>
+              ) : noActiveLeagues ? (
+                <div className="rounded-xl border border-red-goal/25 bg-red-goal/10 p-4">
+                  <p className="text-sm font-medium text-red-goal">No active league available</p>
+                  <p className="mt-1 text-xs text-white/45">
+                    Pots can't be created until at least one league/season is configured. Contact an admin.
+                  </p>
                 </div>
+              ) : showLeagueSelector ? (
+                <div>
+                  <label className={labelClass} htmlFor="pot-league">League / tournament</label>
+                  <div className="relative">
+                    <select
+                      id="pot-league"
+                      value={leagueId}
+                      onChange={(e) => setLeagueId(e.target.value)}
+                      className={selectClass}
+                    >
+                      <option value="">Select a league/tournament</option>
+                      {leagues.map((league) => (
+                        <option key={league.id} value={league.id}>
+                          {league.name}
+                          {league.country ? ` (${league.country})` : ''}
+                          {league.seasons?.is_current ? ' — Current' : ''}
+                        </option>
+                      ))}
+                    </select>
 
-                {selectedLeague ? (
-                  <p className={hintClass}>Season: {selectedLeague.seasons?.name || 'Unknown'}</p>
-                ) : null}
-              </div>
+                    <ChevronDown
+                      size={18}
+                      className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45"
+                    />
+                  </div>
+
+                  {selectedLeague ? (
+                    <p className={hintClass}>Season: {selectedLeague.seasons?.name || 'Unknown'}</p>
+                  ) : null}
+                </div>
+              ) : selectedLeague ? (
+                <p className={hintClass}>
+                  League: {selectedLeague.name}
+                  {selectedLeague.country ? ` (${selectedLeague.country})` : ''} · Season:{' '}
+                  {selectedLeague.seasons?.name || 'Unknown'}
+                </p>
+              ) : null}
             </div>
 
             <div>
@@ -707,7 +759,7 @@ export default function PotManager() {
               </div>
             ) : null}
 
-            <Button type="submit" disabled={saving} loading={saving} className="inline-flex items-center gap-2">
+            <Button type="submit" disabled={saving || noActiveLeagues} loading={saving} className="inline-flex items-center gap-2">
               <PlusCircle size={16} />
               {saving ? 'Creating...' : 'Create pot'}
             </Button>
