@@ -13,6 +13,63 @@ from here.
 
 ---
 
+## 2026-08-09 (51) — Milestone 6 Slice 9: Score Predictor notifications
+
+**Goal:** implement only `PredictorEngine.notifyUsers()`, wired into
+`awardPrize()`. Before coding: review all completed Predictor slices
+(1-8), `game-engine.md`/`business-rules.md`/`decisions.md`/
+`current-state.md`, `Pick5Engine.notifyUsers()`/`LmsEngine.notifyUsers()`,
+and `PredictorEngine.awardPrize()`.
+
+**Architecture review finding:** `Pick5Engine.notifyUsers()` and
+`LmsEngine.notifyUsers()` are byte-for-byte identical implementations —
+insert one `notifications` row, throw on error — with identical call-site
+wiring (both inside `awardPrize()`, after the trailing `pot_prizes`
+write, wrapped in try/catch that logs and never propagates). This left
+no genuine design-decision surface for a third copy to diverge on;
+`PredictorEngine.notifyUsers()` reuses the same shape rather than
+inventing a different one. All six architecture-review questions
+resolved from this precedent: one event type (`predictor.prize_awarded`
+— `awardPrize()` has exactly one non-trivial outcome shape, `season_end`,
+so there is nothing else for a notification to describe); once per
+winning user (not once per pot); payload `{ amount, tied }` — `tied:
+winners.length > 1` is the Predictor-specific analog to Pick5's
+`gameweekId`/LMS's `outcome`, chosen because neither existing field would
+carry real information for Predictor's single-outcome, non-gameweek-
+scoped shape; a failed notification write must never affect settlement
+(the try/catch boundary lives at the call site, not inside
+`notifyUsers()` itself, matching both existing modes); sole/tied/split
+winners are all handled identically (one notification per winner,
+uniformly); idempotency comes free from `awardPrize()`'s own existing
+`pot_prizes.is_settled` short-circuit — no new dedup mechanism needed, no
+unique constraint added to `notifications`. No delivery mechanism
+invented. No schema change.
+
+**Verified:** 7 new unit tests — write success, write-failure throw, sole
+winner, tied winners (each correctly marked `tied:true`), failure
+isolation (prize/payout still succeed when the notification write
+fails), partial failure isolation (remaining winners still notified when
+one write fails), and idempotent re-call (no duplicate notification).
+312/312 across `supabase/functions/`. Live, through the real
+`settle-gameweek`/`compute-scores` Edge Functions: a sole winner received
+exactly one notification (`tied:false`); a genuine tie produced exactly
+two (`tied:true` each); a repeated `settle-gameweek` call after
+reopening the gameweek left notification counts unchanged (idempotency);
+a third pot proved failure isolation by calling the real `PredictorEngine`
+class directly with `.from('notifications').insert()` intercepted
+client-side (no persistent database mutation) — `awardPrize()` did not
+throw, the winner was still paid in full, the entry was still settled,
+and zero notification rows existed — 15 checks, all passing. All test
+data removed by exact ID, independently re-verified as zero residue.
+Full ADR: [decisions.md § Score Predictor notifications](./decisions.md#score-predictor-notifications).
+Not committed. **All eight `GameEngine` contract methods are now
+implemented for Score Predictor — Milestone 6's core implementation work
+is complete**, the same completion point Pick5 (Milestone 4)/LMS
+(Milestone 5) each reached at the end of their own Slice 9. Stopped and
+awaiting review, per instruction.
+
+---
+
 ## 2026-08-08/09 (50) — Milestone 6 Slice 8: Score Predictor prize awarding + Pick 5 tiebreak correction
 
 **Goal:** implement only `PredictorEngine.awardPrize()` and a stated new

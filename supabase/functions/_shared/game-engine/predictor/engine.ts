@@ -1,10 +1,10 @@
 // Milestone 6 (docs/game-engine.md § GE-5.3, GE-12): validateEntry (Slice 2),
 // lockEntries (Slice 3), calculateScore (Slice 4), settle (Slice 5),
-// generateStandings (Slice 6), determineWinner (Slice 7), and awardPrize
-// (Slice 8) are implemented — notifyUsers still throws
-// GameEngineNotImplementedError, same "half-built mode fails loudly"
-// pattern Pick5Engine/LmsEngine used between their own early slices and
-// later ones.
+// generateStandings (Slice 6), determineWinner (Slice 7), awardPrize
+// (Slice 8), and notifyUsers (Slice 9) are implemented — all eight
+// GameEngine contract methods are now implemented for Score Predictor,
+// same milestone-completion point Pick5Engine/LmsEngine each reached at
+// the end of their own Slice 9.
 //
 // Architecture review (docs/decisions.md § Score Predictor architecture
 // review, Milestone 6 kickoff) found Score Predictor genuinely doesn't
@@ -35,9 +35,21 @@
 // omission.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
-import { GameEngineNotImplementedError } from '../errors.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { PredictorPrizePoolExceededError, PredictorValidationError } from './errors.ts'
+
+// GE-4.8: notifications.type is free text at the schema level — same
+// per-mode catalog approach Pick5NotificationType/LmsNotificationType
+// already established. Only one event exists, mirroring both existing
+// modes' own single event type exactly (pick5.prize_awarded,
+// lms.prize_awarded): a real payout, for every actual recipient. Unlike
+// LMS (which weighed and explicitly rejected a second, rollover-specific
+// event — no Pick 5 equivalent to model, not asked for), Predictor has no
+// second event candidate to even consider: awardPrize() has exactly one
+// non-trivial outcome shape (season_end, GE-5.3 — no elimination, no
+// wipeout, no rollover), so there is nothing else for a notification to
+// describe.
+export type PredictorNotificationType = 'predictor.prize_awarded'
 
 export interface PredictorPickInput {
   gameweekId: number
@@ -1384,9 +1396,82 @@ export class PredictorEngine implements GameEngine {
         throw new Error(`Failed to insert prize: ${insertError.message}`)
       }
     }
+
+    // GE-8.7/decisions.md § Notifications: called last, deliberately —
+    // after the trailing pot_prizes write above, not from inside the
+    // payout loop. Reviewed Pick5Engine's/LmsEngine's own call sites
+    // first — reused, not reinvented: same invariant both already
+    // established (a notification only ever fires once both the money
+    // AND the settlement record it describes are already durably
+    // written), same placement relative to the pot_prizes write LMS uses
+    // (LMS also writes pot_prizes last, for the identical reason Slice 8
+    // gave this method the same ordering from the start). Best-effort —
+    // a failure here must never unwind or block a payout already
+    // written, and must never stop the loop from notifying this pot's
+    // remaining winners, so it's caught and logged rather than left to
+    // propagate, exactly like both existing modes' own call sites.
+    // notifyUsers() itself still throws on error (like every other
+    // GameEngine method) — the try/catch boundary belongs here, at the
+    // one call site that knows this specific write is allowed to fail
+    // silently, not inside notifyUsers() itself.
+    //
+    // One notification per winning user (never once per pot) — the same
+    // loop shape both existing modes use, uniform regardless of whether
+    // winners.length is 1 (a sole winner) or more (a tied group splitting
+    // the prize): no special-casing by winner count, since a "tied
+    // winner" notification and a "sole winner" notification are the same
+    // write with a different payload, not a structurally different flow.
+    //
+    // Idempotent the same way both existing modes already are — not via
+    // any dedup mechanism on the notifications table itself (there is
+    // none, matching established precedent), but because this entire
+    // loop is only ever reached once per pot's actual conclusion: the
+    // is_settled short-circuit at the top of this method means a pot
+    // that has already been awarded never reaches this loop again on any
+    // later call, so notifications can never be duplicated by a retry of
+    // the outer method. A single recipient's own notification write
+    // failing (logged, not retried) is an accepted, pre-existing
+    // limitation this design shares with Pick5Engine's/LmsEngine's own —
+    // not a new gap introduced here, and not something this slice
+    // redesigns.
+    for (const userId of winners) {
+      try {
+        await this.notifyUsers(ctx, {
+          userId,
+          potId,
+          type: 'predictor.prize_awarded' satisfies PredictorNotificationType,
+          payload: { amount: perWinnerAmount, tied: winners.length > 1 },
+        })
+      } catch (notifyError) {
+        console.error(
+          `notifyUsers failed for pot ${potId}, user ${userId} (prize already awarded, not affected): ` +
+            (notifyError instanceof Error ? notifyError.message : String(notifyError))
+        )
+      }
+    }
   }
 
-  async notifyUsers(_ctx: GameEngineContext, _event: NotificationEvent): Promise<void> {
-    throw new GameEngineNotImplementedError('score_predictor', 'notifyUsers')
+  // GE-6: "Write to notifications." A pure domain-event emitter — inserts
+  // one row and returns, no delivery mechanism of any kind (email/push/
+  // SMS remain explicitly out of scope, docs/decisions.md § Notifications).
+  // Reviewed Pick5Engine.notifyUsers() and LmsEngine.notifyUsers() first —
+  // both are byte-for-byte identical to each other already (insert one
+  // row, throw on error), confirming this is genuinely shared-platform-
+  // shaped, zero-mode-specific-logic behavior, not something to
+  // reinterpret for Predictor. Duplicated privately per GE-18 rather than
+  // imported, same as every other genuinely-shared-mechanics helper in
+  // this file (rankWithTies(), the money helpers, the pot_prizes upsert
+  // workaround).
+  async notifyUsers(ctx: GameEngineContext, event: NotificationEvent): Promise<void> {
+    const { error } = await ctx.supabase.from('notifications').insert({
+      user_id: event.userId,
+      pot_id: event.potId,
+      type: event.type,
+      payload: event.payload ?? null,
+    })
+
+    if (error) {
+      throw new Error(`Failed to write notification: ${error.message}`)
+    }
   }
 }

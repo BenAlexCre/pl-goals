@@ -748,6 +748,7 @@ interface FakeSettlePrize {
   is_settled: boolean
   settled_at?: string | null
 }
+interface FakeNotification { user_id: string; pot_id: string | null; type: string; payload: Record<string, unknown> | null }
 
 interface FakeSettleDb {
   pots: FakeSettlePot[]
@@ -764,14 +765,19 @@ interface FakeSettleDb {
   // awardPrize() (Slice 8) reads/writes this — settle() now calls it
   // unconditionally per pot too.
   pot_prizes: FakeSettlePrize[]
+  // notifyUsers() (Slice 9) writes this, called from within awardPrize().
+  notifications: FakeNotification[]
   // Failure injection for the retry-safety test, below — same purpose as
   // the LMS fake's own entriesVoidShouldFail/picksVoidShouldFail flags.
   payoutShouldFail?: boolean
+  // Failure injection for notifyUsers()'s own failure-isolation test —
+  // fires once, self-resets, same shape as payoutShouldFail above.
+  notifyShouldFail?: boolean
 }
 
 function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
   // deno-lint-ignore no-explicit-any
-  function queryBuilder(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail'>, getRows: () => any[]) {
+  function queryBuilder(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail' | 'notifyShouldFail'>, getRows: () => any[]) {
     // deno-lint-ignore no-explicit-any
     const filters: ((row: any) => boolean)[] = []
     let updatePatch: Record<string, unknown> | null = null
@@ -821,6 +827,10 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
       },
       // deno-lint-ignore no-explicit-any
       insert: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+        if (table === 'notifications' && db.notifyShouldFail) {
+          db.notifyShouldFail = false
+          return Promise.resolve({ data: null, error: { message: 'simulated failure' } })
+        }
         // Real supabase-js accepts either a single row object or an array
         // — PredictorEngine.awardPrize()'s pot_prizes insert passes a
         // single object, unlike generateStandings()' batched array insert.
@@ -865,7 +875,7 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
   }
 
   const fakeSupabase = {
-    from(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail'>) {
+    from(table: Exclude<keyof FakeSettleDb, 'payoutShouldFail' | 'notifyShouldFail'>) {
       return queryBuilder(table, () => db[table])
     },
   }
@@ -881,6 +891,7 @@ function baseSettleDb(overrides: Partial<FakeSettleDb> = {}): FakeSettleDb {
     pot_standings_snapshots: [],
     gameweeks: [],
     pot_prizes: [],
+    notifications: [],
     ...overrides,
   }
 }
@@ -1667,4 +1678,139 @@ Deno.test('awardPrize: retry after an injected failure does not double-pay and c
   assertEquals(db.pot_prizes.length, 1)
   assertEquals(db.pot_prizes[0].is_settled, true)
   assertEquals(db.game_entries[0].payout_amount, 10) // gross = entry_fee 10 * 1 entry, no fees, sole winner
+})
+
+// --- notifyUsers() -------------------------------------------------------
+
+Deno.test('notifyUsers writes a notification row with the given type and payload', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb()
+  const ctx = fakeSettleContext(db)
+
+  await engine.notifyUsers(ctx, { userId: 'user-1', potId: 'pot-1', type: 'predictor.prize_awarded', payload: { amount: 10, tied: false } })
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0], { user_id: 'user-1', pot_id: 'pot-1', type: 'predictor.prize_awarded', payload: { amount: 10, tied: false } })
+})
+
+Deno.test('notifyUsers throws when the write fails', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ notifyShouldFail: true })
+  const ctx = fakeSettleContext(db)
+
+  await assertRejects(() => engine.notifyUsers(ctx, { userId: 'user-1', potId: 'pot-1', type: 'predictor.prize_awarded' }))
+})
+
+// --- awardPrize() notification integration (Slice 9) ---------------------
+
+Deno.test('awardPrize writes a predictor.prize_awarded notification for a sole winner', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.notifications[0].user_id, 'user-1')
+  assertEquals(db.notifications[0].pot_id, 'pot-1')
+  assertEquals(db.notifications[0].type, 'predictor.prize_awarded')
+  assertEquals(db.notifications[0].payload, { amount: 10, tied: false })
+})
+
+Deno.test('awardPrize writes one notification per tied winner, each correctly marked tied', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 }, // genuine complete tie
+    ],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 2) // one per winning user, never once per pot
+  const byUser = new Map(db.notifications.map((n) => [n.user_id, n]))
+  assertEquals(byUser.get('user-1')?.payload, { amount: 10, tied: true })
+  assertEquals(byUser.get('user-2')?.payload, { amount: 10, tied: true })
+})
+
+Deno.test('awardPrize still awards the prize and payout when the notification write fails — failure isolation', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+    notifyShouldFail: true,
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  // Must not throw — the notification failure is caught and logged at
+  // awardPrize()'s own call site, never propagated (same discipline
+  // Pick5Engine's/LmsEngine's own call sites already established).
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 0) // the one attempted write failed
+  assertEquals(db.game_entries[0].payout_amount, 10) // the payout itself is unaffected
+  assertEquals(db.pot_prizes[0]?.is_settled, true) // and the pot is still correctly, fully settled
+})
+
+Deno.test('awardPrize notifies the winner still standing after one of two notification writes fails — remaining winners are still notified', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [
+      { id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-2', pot_id: 'pot-1', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_predictor: [
+      { game_entry_id: 'entry-1', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 },
+      { game_entry_id: 'entry-2', total_points: 20, exact_score_count: 2, correct_scorer_count: 1 },
+    ],
+    notifyShouldFail: true, // fires once — fails the FIRST winner's notification only, self-resets
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  // One winner's notification failed, but the loop continued — the other
+  // winner still got theirs. Both were still paid regardless (payouts
+  // happen in an earlier, unrelated loop).
+  assertEquals(db.notifications.length, 1)
+  assertEquals(db.game_entries.every((e) => e.payout_amount === 10), true)
+})
+
+Deno.test('awardPrize does not write a duplicate notification on an idempotent second call', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [basePrizePot()],
+    gameweeks: [{ id: 38, deadline_utc: '2026-06-01T00:00:00Z' }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
+    game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 5, exact_score_count: 1, correct_scorer_count: 0 }],
+  })
+  const ctx = fakeSettleContextAt(db, SEASON_ENDED)
+
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.notifications.length, 1)
+
+  // Second call: the outer is_settled short-circuit means the method
+  // returns before the notify loop is ever reached again — no dedup
+  // logic needed on the notifications table itself, matching Pick5Engine's/
+  // LmsEngine's own established precedent.
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.notifications.length, 1)
 })

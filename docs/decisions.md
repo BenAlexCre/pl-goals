@@ -3240,3 +3240,126 @@ special recovery step, completed correctly — 24 checks, all passing. All
 test data removed by exact ID, independently re-verified as zero
 residue; the temporarily-flipped fixture/gameweek status both correctly
 reverted.
+
+## Score Predictor notifications
+
+**Decided 2026-08-09**, Milestone 6 Slice 9 — the final `GameEngine`
+method for Score Predictor. Per the repo owner's explicit "review
+Pick5Engine.notifyUsers() and LmsEngine.notifyUsers() first, do not
+assume Predictor should follow either, justify every similarity and
+difference" instruction.
+
+**Finding: the two existing implementations are byte-for-byte identical
+to each other already.** Both `Pick5Engine.notifyUsers()` and
+`LmsEngine.notifyUsers()` do exactly the same thing — insert one row into
+`notifications`, throw on error — with zero mode-specific logic in
+either. This is a strong, direct signal (not an assumption) that
+`notifyUsers()` itself is genuinely shared-platform-shaped, not a method
+where "don't assume Predictor should follow either mode" leaves any real
+room for divergence: `PredictorEngine.notifyUsers()` is the same
+duplicate (per GE-18, no cross-mode import), with no design decision to
+make beyond the routine "reuse the established pattern."
+
+**Architecture review — six questions, in order:**
+
+1. **Which notification events should Predictor emit?** Exactly one,
+   `predictor.prize_awarded` — mirroring both existing modes' own single
+   event type (`pick5.prize_awarded`, `lms.prize_awarded`) exactly.
+   Unlike LMS (which explicitly weighed and rejected a second,
+   rollover-specific event, since it has multiple distinct outcome
+   shapes to potentially describe), Predictor has no second event
+   candidate to even consider: `awardPrize()` has exactly one non-trivial
+   outcome shape (`season_end`, GE-5.3 — no elimination, no wipeout, no
+   rollover), so there's nothing else for a notification to describe.
+2. **Once per winning user, once per pot, or both?** Once per winning
+   user — the same loop shape both existing modes use, uniform whether
+   `winners.length` is 1 (a sole winner) or more (a tied group): no
+   special-casing by winner count, since a "tied winner" notification and
+   a "sole winner" notification are the same write with a different
+   payload, not a structurally different flow. Never once per pot.
+3. **What payload should be stored?** `{ amount, tied }`. `amount`
+   mirrors both existing modes exactly (the actual payout this recipient
+   received — the core fact the notification exists to convey). The
+   second field diverges from both, deliberately, rather than copying
+   either verbatim: Pick 5's own second field is `gameweekId` (meaningful
+   there because its competition instance *is* a gameweek); LMS's is
+   `outcome` (meaningful there because it has three genuinely different
+   conclusion shapes — single_survivor/wipeout/season_end — worth
+   recording which one occurred). Neither applies to Predictor: it has no
+   gameweek-scoped instance and, per Q1, only one outcome shape, so
+   copying either field would carry no real information (LMS's own
+   `outcome` field would always read the same constant value for
+   Predictor). `tied: winners.length > 1` is the genuinely Predictor-
+   relevant analog — recipient-specific context about the *nature* of
+   their win, cheaply available from data `awardPrize()` already computed
+   (no extra query), directly relevant given Slice 8 just added a real
+   tiebreak hierarchy that decides whether a win is sole or shared.
+4. **Must failed notification writes affect settlement?** No — required
+   explicitly ("never prevent prize settlement if notification insertion
+   fails") and matches both existing modes' own call-site design exactly:
+   `notifyUsers()` itself still throws on error, like every other
+   `GameEngine` method, but the call site inside `awardPrize()`'s
+   recipient loop wraps it in try/catch, logs, and continues — never
+   unwinds or blocks a payout already written, never stops the loop from
+   notifying the pot's remaining winners.
+5. **Emitted for sole winner, tied winners, split prizes?** Yes to all
+   three, uniformly — see Q2. These are just different sizes of the same
+   `winners` array processed by the same loop, not different code paths.
+6. **Does repeated execution remain fully idempotent?** Yes — not via any
+   dedup mechanism on the `notifications` table itself (there is none,
+   matching both existing modes' own established precedent), but because
+   the entire notify loop is only ever reached once per pot's actual
+   conclusion: `awardPrize()`'s own existing `pot_prizes.is_settled`
+   short-circuit means an already-awarded pot never reaches the notify
+   loop again on any later call, so a retry of the *outer* method can
+   never duplicate notifications. A single recipient's own notification
+   write failing (logged, not retried) is an accepted, pre-existing
+   limitation this design shares with Pick5Engine's/LmsEngine's own — not
+   a new gap introduced here, and not something this slice redesigns
+   (explicitly out of scope: "do not redesign notifications").
+
+**No delivery mechanism invented or implied** — `notifyUsers()` remains a
+pure domain-event emitter, exactly matching
+[decisions.md § Notifications: domain events, not delivery](./decisions.md#notifications-domain-events-not-delivery)'s
+original design and both existing modes' own implementations. Email/push/
+SMS delivery remains explicitly out of scope, unchanged by this slice.
+
+**Wiring:** `PredictorEngine.awardPrize()`'s notify loop is placed after
+the trailing `pot_prizes` write, matching the exact invariant both
+existing modes already established — a notification only ever fires once
+both the money and the settlement record it describes are already
+durably written. Settlement logic itself (the payout loop, the entry-
+settling update, the `pot_prizes` write) is completely unmodified by this
+slice, per the explicit "do not modify settlement logic" instruction —
+only the notify loop was appended after it.
+
+**Consequences:**
+- All eight `GameEngine` contract methods are now implemented for Score
+  Predictor — Milestone 6's core implementation work (Slices 1-9) is
+  complete, the same milestone-completion point Pick 5 (Milestone 4) and
+  LMS (Milestone 5) each reached at the end of their own Slice 9.
+- No schema change — `notifications` already had every column needed
+  (`user_id`, `pot_id`, `type` free-text, `payload` jsonb).
+
+**Verified:** 7 new unit tests (`notifyUsers()` writes/throws correctly
+in isolation; `awardPrize()` writes a correct sole-winner notification;
+writes one correctly-tied notification per tied winner, never once per
+pot; still awards the prize and payout when the notification write fails
+— failure isolation; still notifies a remaining winner after one of two
+notification writes fails; does not duplicate a notification on an
+idempotent second call) — 312/312 across `supabase/functions/`, no
+regressions. Live, through the real `settle-gameweek`/`compute-scores`
+Edge Functions (not a bypass script): a sole winner received exactly one
+correctly-typed, correctly-payloaded notification while the non-winning
+entry received none; a genuine tied pot produced exactly two
+notifications, both correctly marked `tied: true`; a second real
+`settle-gameweek` call left both pots' notification counts unchanged
+(not duplicated); a third pot proved failure isolation by calling the
+real `PredictorEngine` class directly with the `notifications` insert
+intercepted client-side (no persistent database mutation) — `awardPrize()`
+itself did not throw, the winner was still paid in full, the entry still
+settled, the pot still fully settled, and no notification row exists for
+the one attempted write that genuinely failed — 15 checks, all passing.
+All test data removed by exact ID, independently re-verified as zero
+residue; the temporarily-flipped fixture/gameweek statuses both
+reverted.

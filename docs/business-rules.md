@@ -370,9 +370,10 @@ ahead of being asked for).
 ## Score Predictor
 
 **Milestone 6, in progress — this section covers only what's actually
-decided and shipped so far (Slices 1-8: entry creation, pick submission,
+decided and shipped so far (Slices 1-9: entry creation, pick submission,
 locking, scoring, settlement, standings, winner determination, prize
-awarding).** Notifications are not built yet — see
+awarding, and notifications — all eight `GameEngine` contract methods).**
+See
 [decisions.md § Score Predictor architecture review](./decisions.md#score-predictor-architecture-review),
 [§ Score Predictor pick submission](./decisions.md#score-predictor-pick-submission-slice-2),
 [§ Score Predictor locking](./decisions.md#score-predictor-locking),
@@ -380,8 +381,11 @@ awarding).** Notifications are not built yet — see
 [§ Score Predictor settlement](./decisions.md#score-predictor-settlement),
 [§ Score Predictor standings](./decisions.md#score-predictor-standings),
 [§ Score Predictor winner determination](./decisions.md#score-predictor-winner-determination),
-and [§ Score Predictor prize awarding](./decisions.md#score-predictor-prize-awarding)
-for the full reasoning and everything still genuinely undecided.
+[§ Score Predictor prize awarding](./decisions.md#score-predictor-prize-awarding),
+and [§ Score Predictor notifications](./decisions.md#score-predictor-notifications)
+for the full reasoning and everything still genuinely undecided. Every
+paid winner receives an in-app notification once the payout is written —
+tied winners each receive their own.
 
 **Entry.** One entry per pot for the whole season (like Last Man Standing,
 unlike Pick 5's per-gameweek entries) — cumulative points accrue across
