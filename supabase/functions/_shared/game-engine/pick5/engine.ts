@@ -840,29 +840,54 @@ export class Pick5Engine implements GameEngine {
     const newGeneration = sourcePot.rollover_generation + 1
     const newName = `${baseName} (Rollover #${newGeneration})`
 
-    const { error: potInsertError } = await ctx.supabase.from('pots').insert({
-      name: newName,
-      season_id: nextLeague.season_id,
-      league_id: nextLeague.id,
-      created_by: sourcePot.created_by,
-      game_type: 'pick5',
-      status: 'draft',
-      entry_fee: sourcePot.entry_fee,
-      admin_fee_type: sourcePot.admin_fee_type,
-      admin_fee_amount: sourcePot.admin_fee_amount,
-      admin_fee_percentage: sourcePot.admin_fee_percentage,
-      charity_fee_type: sourcePot.charity_fee_type,
-      charity_fee_amount: sourcePot.charity_fee_amount,
-      charity_fee_percentage: sourcePot.charity_fee_percentage,
-      rollover_source_pot_id: sourcePotId,
-      carry_over_amount: carryOverAmount,
-      rollover_generation: newGeneration,
-      start_gameweek_id: bounds.firstGameweekId,
-      end_gameweek_id: bounds.finalGameweekId,
-    })
+    const { data: newPot, error: potInsertError } = await ctx.supabase
+      .from('pots')
+      .insert({
+        name: newName,
+        season_id: nextLeague.season_id,
+        league_id: nextLeague.id,
+        created_by: sourcePot.created_by,
+        game_type: 'pick5',
+        status: 'draft',
+        entry_fee: sourcePot.entry_fee,
+        admin_fee_type: sourcePot.admin_fee_type,
+        admin_fee_amount: sourcePot.admin_fee_amount,
+        admin_fee_percentage: sourcePot.admin_fee_percentage,
+        charity_fee_type: sourcePot.charity_fee_type,
+        charity_fee_amount: sourcePot.charity_fee_amount,
+        charity_fee_percentage: sourcePot.charity_fee_percentage,
+        rollover_source_pot_id: sourcePotId,
+        carry_over_amount: carryOverAmount,
+        rollover_generation: newGeneration,
+        start_gameweek_id: bounds.firstGameweekId,
+        end_gameweek_id: bounds.finalGameweekId,
+      })
+      .select('id')
+      .single()
 
     if (potInsertError) {
       throw new Error(`Failed to create Pick 5 rollover pot: ${potInsertError.message}`)
+    }
+
+    // Bug found during Phase 7 Stage 2 Slice 4's frontend integration
+    // (organiser rollover-management UI): unlike LmsEngine.createRolloverPot(),
+    // this method never added the organiser as a pot_members row on the new
+    // pot — `created_by` alone satisfies the pots-table RLS SELECT policies,
+    // but every pot_members-based query (usePotsForAdmin's admin-pot list,
+    // admin-actions' own pot-admin authorization gate for any future action
+    // against this pot) requires an actual row and would silently never
+    // find this pot at all. Fixed to match LMS's existing pattern exactly,
+    // including the same compensating rollback (no cross-table transaction
+    // available) if the membership insert fails.
+    const { error: memberError } = await ctx.supabase.from('pot_members').insert({
+      pot_id: newPot.id,
+      user_id: sourcePot.created_by,
+      role: 'admin',
+    })
+
+    if (memberError) {
+      await ctx.supabase.from('pots').delete().eq('id', newPot.id)
+      throw new Error(`Failed to add organiser to rollover pot: ${memberError.message}`)
     }
   }
 

@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { CreditCard } from 'lucide-react'
+import { CreditCard, RefreshCw } from 'lucide-react'
 import { useTriggerSync, useSyncLogs } from '../hooks/useAdmin'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
@@ -45,6 +45,17 @@ export default function AdminDashboard() {
             <Button fullWidth variant="secondary">
               <CreditCard size={16} />
               Open payment verification
+            </Button>
+          </Link>
+        </Card>
+
+        <Card className="p-4 space-y-3">
+          <h2 className="text-sm font-semibold text-white">Rollover management</h2>
+          <p className="text-xs text-white/40">Review, rename, and activate draft pots created after an unclaimed jackpot or wipeout.</p>
+          <Link to="/admin/rollovers">
+            <Button fullWidth variant="secondary">
+              <RefreshCw size={16} />
+              Manage rollover pots
             </Button>
           </Link>
         </Card>

@@ -211,7 +211,11 @@ continue from there. **One firm limit**: reinstatement is refused outright
 once the relevant competition instance has already paid out (a gameweek's
 prize for Pick 5, or the whole competition's prize for LMS/Predictor) —
 money that's already been distributed is never clawed back or re-split.
-Applies to all three modes, including Pick 5. Full reasoning:
+Applies to all three modes, including Pick 5. **UI added 2026-08-10** — a
+"Reinstate entry" button on the payment table, shown only where it's
+decidable (a void entry whose payment is now marked paid), gated behind a
+confirmation dialog; the backend action itself has been reachable since
+2026-08-08. Full reasoning:
 [decisions.md § Late Payment Override](./decisions.md#late-payment-override).
 
 **Record payment received (Pick 5), decided 2026-08-09, corrected 2026-08-10.**
@@ -231,14 +235,19 @@ admin actions exist, and only two:
   suggesting the nearest valid amounts). The number of weeks is the amount divided
   by the entry fee — the organiser never calculates or enters a week count, and
   never ticks individual weeks. The app shows a preview ("£25 received. This will
-  mark 5 future Pick 5 weeks as paid.") before anything is written; confirming
-  materializes that many ordinary `entry_payments` rows, marked paid, allocated to
-  the member's next **unpaid** eligible upcoming Pick 5 gameweeks — a gameweek
-  already marked paid (by a prior individual mark-paid, or an earlier payment
-  record) is skipped, so the payment extends coverage by that many genuinely new
-  weeks rather than wasting allocation re-confirming a week already covered. If the
-  season doesn't have that many eligible unpaid gameweeks left, whatever number does
-  exist is materialized — the remainder is not carried anywhere or refunded.
+  mark 5 future Pick 5 weeks as paid: ✓ GW6 ✓ GW7 ✓ GW8 ✓ GW9 ✓ GW10") before
+  anything is written, naming the actual gameweeks, not just a count —
+  **enhanced 2026-08-10** to also show any already-paid gameweek skipped
+  along the way ("Already paid: GW5"), so the organiser always sees exactly
+  which weeks are covered and why one was skipped, not just the resulting
+  total. Confirming materializes that many ordinary `entry_payments` rows, marked
+  paid, allocated to the member's next **unpaid** eligible upcoming Pick 5
+  gameweeks — a gameweek already marked paid (by a prior individual mark-paid, or
+  an earlier payment record) is skipped, so the payment extends coverage by that
+  many genuinely new weeks rather than wasting allocation re-confirming a week
+  already covered. If the season doesn't have that many eligible unpaid gameweeks
+  left, whatever number does exist is materialized — the remainder is not carried
+  anywhere or refunded.
 
 This introduces **no balance, wallet, credit, or stored-value concept of any
 kind** — recording a payment is nothing more than several ordinary weekly payment
@@ -458,11 +467,24 @@ paid winner receives an in-app notification once the payout is written.
 **Not implemented, deliberately:** the Final Prediction settlement path
 (throws a specific, catchable error rather than guessing if a pot
 configured that way ever actually reaches a season-end tie — most won't);
-activating a draft rollover pot (`status` leaving `'draft'` — nothing about
-a rollover pot starts on its own; a separate, not-yet-designed piece of
-work); and a rollover-specific notification (telling the organiser their
+and a rollover-specific notification (telling the organiser their
 competition rolled over — flagged as a likely future addition, not built
 ahead of being asked for).
+
+**Reviewing and activating a draft rollover pot, added 2026-08-10** — a
+`/admin/rollovers` page lists every draft rollover pot the organiser can
+manage (Pick 5 or LMS), showing what it inherited (league, season, entry
+fee, jackpot/`carry_over_amount`, fee deductions, gameweek range), lets the
+organiser rename it, and activates it (`status: 'draft' -> 'active'`) after
+a confirmation dialog. No new backend capability — `pots` already had RLS
+letting a pot admin update their own pot directly, this only builds the UI
+for it. LMS's own rollover pot leaves its starting **and** final gameweek
+unset (an arbitrary organiser-chosen cutoff, not automatically resolvable —
+see the "Late entry" section above); activation requires the organiser to
+choose both before it can proceed. Pick 5's own rollover pot already has
+both resolved automatically at creation time (see
+[§ Pick 5 jackpot and prizes](#pick-5-jackpot-and-prizes)), so activation
+there needs only a confirmation, nothing else.
 
 ## Score Predictor
 

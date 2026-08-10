@@ -13,6 +13,111 @@ from here.
 
 ---
 
+## 2026-08-10 (58) — Phase 7 Stage 2 Slice 4: Payment UX & Rollover Management Polish
+
+**Goal:** a pure frontend usability pass over the now-complete Game Engine
+backend — "identify every unnecessary click," build the previously-
+nonexistent rollover-management UI, and fix only genuine bugs found while
+integrating, not redesign anything. Explicit scope boundary: do not
+redesign the backend, do not change business rules, do not change payment
+architecture.
+
+**Reviewed before writing code**: `AdminPayments.jsx`, `PaymentTable.jsx`,
+`useAdmin.js`, `recordPayment.ts`, `paymentAllocation.ts`, the `mark_paid`/
+`mark_unpaid`/`reinstate_entry`/`bulk_verify_payments` admin-actions cases,
+`createRolloverPot()` (both engines), and the existing admin pages/routes/
+nav (`AdminDashboard.jsx`, `App.jsx`, `TopNav.jsx`/`BottomNav.jsx`).
+
+**UX improvements**: "Record payment received" no longer sits behind the
+gameweek selector — it doesn't need a gameweek at all, so requiring one
+first was an unnecessary click (`usePotMembers()`, a new gameweek-
+independent member list, replaces the gameweek-scoped one it was
+borrowing). The payment preview now names individual gameweeks
+("✓ GW6 ✓ GW7...") and shows any already-paid one skipped ("Already paid:
+GW5"), not just a count — required a small, additive backend response
+enrichment (`paymentAllocation.ts` now also returns
+`skippedAlreadyPaidGameweekIds`; `recordPayment.ts` resolves gameweek
+number/name for both lists). Every money/state-changing action (record
+payment, mark paid/unpaid, reinstate, rollover rename/activate) is now
+guarded against a rapid double-click with a synchronous `useRef` flag,
+checked and set before anything async happens — `mutation.isPending`
+alone has a one-render gap a genuine double-click can race past.
+Terminology audited across the payment surface: no Purchase/Checkout/Buy/
+Pay now anywhere, only Record payment/Payment received/Mark paid/Payment
+verified.
+
+**New: `/admin/rollovers`.** Lists every draft rollover pot the organiser
+can manage — Pick 5 or LMS — showing everything it inherited (league,
+season, entry fee, jackpot/`carry_over_amount`, admin/charity fee
+deductions, gameweek range), lets the organiser rename it inline, and
+activates it behind a confirmation dialog. Activation validates required
+fields first: LMS needs both a starting and final gameweek chosen (its own
+rollover pot deliberately leaves both null — an arbitrary organiser cutoff
+isn't auto-resolvable); Pick 5 needs neither, since both are already
+resolved automatically at creation time (Slice 3's own fix). Zero new
+backend capability — `pots` already has RLS UPDATE policies letting a pot
+admin update their own pot directly, and neither `status` nor `name` is
+one of the three columns `prevent_pot_contract_change()` locks after
+creation.
+
+**New: `reinstate_entry` finally has a UI trigger (`ISSUE-36`, resolved).**
+The backend action has been complete and live-verified since 2026-08-08;
+nothing in the frontend ever called it. `usePaymentStatus()` extended to
+also resolve each member's `game_entries.status`/`reinstated_at`, so
+`PaymentTable.jsx` can offer "Reinstate entry" exactly where the backend
+would actually accept it — a void entry whose payment is now marked
+paid — confirmation-gated, matching the existing remove-member
+confirmation pattern.
+
+**Two genuine backend bugs found and fixed during integration** (not a
+redesign — both small, both discovered by building the UI, not gone
+looking for): (1) `Pick5Engine.createPick5RolloverPot()` never added the
+organiser as a `pot_members` row — only `created_by` was set;
+`LmsEngine.createRolloverPot()` already did this. Meant the pot was
+invisible to every `pot_members`-based query, including
+`usePotsForAdmin()`'s own list and the new rollover-management list
+itself. Fixed to match LMS's pattern exactly, including the same
+compensating rollback on member-insert failure. (2) A self-referencing
+PostgREST embed (`pots!pots_rollover_source_pot_id_fkey`, meant to show
+"rolled over from X" in one round trip) doesn't resolve — confirmed live
+via a real 400 ("Could not find a relationship between 'pots' and
+'pots'"). Worked around with one small separate query instead of chasing a
+clever embed fix.
+
+**Verification:** 2 new Pick 5 unit tests (the `pot_members` fix and its
+rollback case); the fake-DB harness gained `pot_members`/`.delete()`/
+chained `.insert().select().single()` support it didn't have. Full suite
+336/336 across `supabase/functions/`. `deno check` clean on every touched
+file. `npm run build` clean. **Live-verified**, real browser (Playwright)
+against local Supabase: a dedicated Pick 5 pot and LMS pot each rolled
+over via a real `awardPrize()` call; payment preview correctly named
+gameweeks and showed a skipped already-paid one; a rapid double-click on
+"Confirm & record payment" (fired via `Promise.all`, no `await` between
+clicks) produced exactly one write of the previewed weeks; a validation
+error for a non-multiple amount showed the exact suggested-amounts
+message; "Reinstate entry" appeared only for a void+paid row, and the
+reinstated entry was confirmed correctly re-settled in the database
+(`status: 'settled'`, `reinstated_at`/`reinstated_by` populated) via the
+existing recompute pipeline; `/admin/rollovers` listed both rollover pots
+(confirming the `pot_members` fix), renamed the Pick 5 one, activated it
+with just a confirmation, and activated the LMS one only once both
+required gameweek fields were filled (confirmed disabled before, enabled
+after). No horizontal overflow at a 375px mobile viewport on either page.
+
+**Result:** all objectives implemented and live-verified; the two bugs
+found were small, genuinely discovered during integration, and fixed —
+no backend redesign, no business-rule change, no payment-architecture
+change. All test data (2 source pots, 2 rollover pots, 7 pot members, 1
+season, 1 league, 2 gameweeks, 5 game entries, 2 game_entry_lms rows, 6
+pot_standings_snapshots rows, 2 pot_prizes rows, 5 entry_payments rows)
+removed by exact ID, independently re-verified as zero residue. Not
+committed, per explicit instruction. See
+[project-board.md § Done](./project-board.md#done) and
+[current-state.md § Resolved issues](./current-state.md#resolved-issues)
+(`ISSUE-36`).
+
+---
+
 ## 2026-08-10 (57) — Pre-commit review and corrections: Pick 5 jackpot + LMS rollover + payment recording
 
 **Goal:** a repo-owner pre-commit review of session (56) below, against the

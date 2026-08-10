@@ -20,7 +20,18 @@ export interface PaymentAllocationInput {
 
 export type PaymentAllocationResult =
   | { outcome: 'invalid_amount'; reason: string }
-  | { outcome: 'allocated'; weeksRequested: number; gameweekIds: number[] }
+  | {
+      outcome: 'allocated'
+      weeksRequested: number
+      gameweekIds: number[]
+      // Phase 7 Stage 2 Slice 4 — the organiser must "always understand
+      // exactly what is about to happen": every already-paid gameweek
+      // encountered while collecting weeksRequested unpaid ones (not the
+      // user's entire paid history — only the ones actually skipped over
+      // to reach this allocation), so the UI can show "Already paid: GW5"
+      // next to "Will allocate to: GW6, GW7...".
+      skippedAlreadyPaidGameweekIds: number[]
+    }
 
 export function computePaymentAllocation(input: PaymentAllocationInput): PaymentAllocationResult {
   const { amount, entryFee, eligibleGameweekIds, alreadyPaidGameweekIds } = input
@@ -49,7 +60,17 @@ export function computePaymentAllocation(input: PaymentAllocationInput): Payment
   }
 
   const weeksRequested = amountCents / feeCents
-  const gameweekIds = eligibleGameweekIds.filter((id) => !alreadyPaidGameweekIds.has(id)).slice(0, weeksRequested)
+  const gameweekIds: number[] = []
+  const skippedAlreadyPaidGameweekIds: number[] = []
 
-  return { outcome: 'allocated', weeksRequested, gameweekIds }
+  for (const id of eligibleGameweekIds) {
+    if (gameweekIds.length >= weeksRequested) break
+    if (alreadyPaidGameweekIds.has(id)) {
+      skippedAlreadyPaidGameweekIds.push(id)
+      continue
+    }
+    gameweekIds.push(id)
+  }
+
+  return { outcome: 'allocated', weeksRequested, gameweekIds, skippedAlreadyPaidGameweekIds }
 }

@@ -652,6 +652,11 @@ interface FakeDb {
   gameweeks: { id: number; league_id: number; season_id: number; number: number }[]
   leagues: { id: number; name: string; country: string; season_id: number }[]
   seasons: { id: number; year_start: number }[]
+  // Phase 7 Stage 2 Slice 4 — createPick5RolloverPot() now also adds the
+  // organiser as a pot_members row on the new pot (bug fix: it never did,
+  // unlike LmsEngine.createRolloverPot()'s existing equivalent).
+  potMembers: { pot_id: string; user_id: string; role: string }[]
+  potMembersInsertShouldFail: boolean
   notifications: { id: number; user_id: string; pot_id: string | null; type: string; payload: Record<string, unknown> | null }[]
   // Slice 9: lets a test simulate the notifications insert failing, to prove
   // awardPrize() isolates that failure from the money it already wrote —
@@ -712,6 +717,8 @@ function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     gameweeks: [],
     leagues: [],
     seasons: [],
+    potMembers: [],
+    potMembersInsertShouldFail: false,
     notifications: [],
     notificationsShouldFail: false,
     entriesVoidShouldFail: false,
@@ -805,18 +812,47 @@ function queryBuilder(
     // deno-lint-ignore no-explicit-any
     // deno-lint-ignore no-explicit-any
     insert: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+      // Real supabase-js: `.insert(x)` alone is directly awaitable (a
+      // thenable); chaining `.select(...).single()` after it is also valid
+      // and returns the just-inserted row — createPick5RolloverPot() needs
+      // the new pot's generated id to insert its pot_members row, so this
+      // fake must support both shapes, not just the bare-await one every
+      // earlier insert() caller in this file used.
       if (insertShouldFail?.()) {
-        return Promise.resolve({ data: null, error: { message: 'Fake queryBuilder.insert() simulated failure' } })
+        const failure = { data: null, error: { message: 'Fake queryBuilder.insert() simulated failure' } }
+        return {
+          then: (resolve: (v: typeof failure) => void) => resolve(failure),
+          select: (_cols?: string) => ({ single: () => Promise.resolve(failure) }),
+        }
       }
       // Real supabase-js accepts either a single object or an array — this
       // codebase uses both shapes (e.g. get-or-create-pick5-entry inserts a
       // single object; generateStandings() inserts an array).
       const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows]
       const table = getRows()
-      for (const row of rows) {
-        table.push({ id: fakeIdCounter++, ...row })
+      const inserted = rows.map((row) => ({ id: fakeIdCounter++, ...row }))
+      for (const row of inserted) table.push(row)
+      return {
+        then: (resolve: (v: { data: typeof inserted; error: null }) => void) => resolve({ data: inserted, error: null }),
+        select: (_cols?: string) => ({ single: () => Promise.resolve({ data: inserted[0] ?? null, error: null }) }),
       }
-      return Promise.resolve({ data: rows, error: null })
+    },
+    delete: () => {
+      const deleteFilters: ((row: Record<string, unknown>) => boolean)[] = []
+      const deleteBuilder = {
+        eq: (col: string, val: unknown) => {
+          deleteFilters.push((row) => row[col] === val)
+          return deleteBuilder
+        },
+        then: (resolve: (v: { data: null; error: null }) => void) => {
+          const table = getRows()
+          const survivors = table.filter((row: Record<string, unknown>) => !deleteFilters.every((f) => f(row)))
+          table.length = 0
+          table.push(...survivors)
+          resolve({ data: null, error: null })
+        },
+      }
+      return deleteBuilder
     },
     // deno-lint-ignore no-explicit-any
     then: (resolve: (v: { data: any; error: null }) => void) => {
@@ -910,6 +946,8 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
           return queryBuilder(() => db.leagues)
         case 'seasons':
           return queryBuilder(() => db.seasons)
+        case 'pot_members':
+          return queryBuilder(() => db.potMembers, undefined, () => db.potMembersInsertShouldFail === true)
         case 'notifications':
           return queryBuilder(() => db.notifications, undefined, () => db.notificationsShouldFail)
         default:
@@ -1820,6 +1858,46 @@ Deno.test('awardPrize automatically creates a draft rollover pot in next season\
   assertEquals(rolloverPot?.entry_fee, 10, 'fee configuration is copied from the source pot')
   assertEquals(rolloverPot?.start_gameweek_id, 101, 'resolved to next season\'s first gameweek, never left null')
   assertEquals(rolloverPot?.end_gameweek_id, 138, 'resolved to next season\'s final gameweek, never left null')
+
+  // Bug fix, Phase 7 Stage 2 Slice 4: without this, the organiser has no
+  // pot_members row on the new pot at all — invisible to usePotsForAdmin()
+  // and to admin-actions' own pot-admin authorization gate.
+  assertEquals(db.potMembers.length, 1)
+  assertEquals(db.potMembers[0].pot_id, rolloverPot?.id)
+  assertEquals(db.potMembers[0].user_id, 'organiser-1')
+  assertEquals(db.potMembers[0].role, 'admin')
+})
+
+Deno.test('awardPrize: Pick 5 rollover pot creation rolls back if adding the organiser as a member fails', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: {
+      'pot-1': { entry_fee: 10, league_id: 1, season_id: 1, name: 'Office Pool', created_by: 'organiser-1' },
+    },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 38, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 38, user_id: 'user-a', rank: 1, score: 4 }],
+    gameweeks: [
+      { id: 38, league_id: 1, season_id: 1, number: 38 },
+      { id: 101, league_id: 2, season_id: 2, number: 1 },
+      { id: 138, league_id: 2, season_id: 2, number: 38 },
+    ],
+    leagues: [
+      { id: 1, name: 'Premier League', country: 'England', season_id: 1 },
+      { id: 2, name: 'Premier League', country: 'England', season_id: 2 },
+    ],
+    seasons: [
+      { id: 1, year_start: 2025 },
+      { id: 2, year_start: 2026 },
+    ],
+  })
+  db.potMembersInsertShouldFail = true
+  const ctx = fakeDbContext(db)
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+
+  assertEquals(db.pots.filter((p) => p.rollover_source_pot_id === 'pot-1').length, 0, 'the just-created pot was rolled back, not left orphaned with no members')
+  assertEquals(db.potPrizes.length, 0, 'the trailing pot_prizes write never ran — the whole method failed before reaching it')
 })
 
 Deno.test('awardPrize does not create a rollover pot mid-season, even with no winner, if the gameweek is not the season\'s final one', async () => {

@@ -9,12 +9,12 @@ Deno.test('computePaymentAllocation accepts an exact multiple and allocates that
     alreadyPaidGameweekIds: new Set(),
   })
 
-  assertEquals(result, { outcome: 'allocated', weeksRequested: 4, gameweekIds: [1, 2, 3, 4] })
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 4, gameweekIds: [1, 2, 3, 4], skippedAlreadyPaidGameweekIds: [] })
 })
 
 Deno.test('computePaymentAllocation accepts the fee amount itself as a single week', () => {
   const result = computePaymentAllocation({ amount: 5, entryFee: 5, eligibleGameweekIds: [10], alreadyPaidGameweekIds: new Set() })
-  assertEquals(result, { outcome: 'allocated', weeksRequested: 1, gameweekIds: [10] })
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 1, gameweekIds: [10], skippedAlreadyPaidGameweekIds: [] })
 })
 
 Deno.test('computePaymentAllocation rejects an amount that is not an exact multiple of the entry fee', () => {
@@ -64,7 +64,7 @@ Deno.test('computePaymentAllocation skips gameweeks already paid, extending cove
   // 4 weeks requested; 1 and 3 are skipped, so the next 4 UNPAID weeks
   // (2, 4, 5, 6) are allocated — 4 weeks of genuinely NEW coverage, not
   // 2 new + 2 wasted re-confirming already-paid weeks.
-  assertEquals(result, { outcome: 'allocated', weeksRequested: 4, gameweekIds: [2, 4, 5, 6] })
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 4, gameweekIds: [2, 4, 5, 6], skippedAlreadyPaidGameweekIds: [1, 3] })
 })
 
 Deno.test('computePaymentAllocation materializes fewer weeks than requested when the season runs out of eligible gameweeks', () => {
@@ -75,7 +75,7 @@ Deno.test('computePaymentAllocation materializes fewer weeks than requested when
     alreadyPaidGameweekIds: new Set(),
   })
 
-  assertEquals(result, { outcome: 'allocated', weeksRequested: 10, gameweekIds: [1, 2, 3] })
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 10, gameweekIds: [1, 2, 3], skippedAlreadyPaidGameweekIds: [] })
 })
 
 Deno.test('computePaymentAllocation returns zero allocated weeks when every eligible gameweek is already paid', () => {
@@ -86,7 +86,22 @@ Deno.test('computePaymentAllocation returns zero allocated weeks when every elig
     alreadyPaidGameweekIds: new Set([1, 2, 3]),
   })
 
-  assertEquals(result, { outcome: 'allocated', weeksRequested: 3, gameweekIds: [] })
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 3, gameweekIds: [], skippedAlreadyPaidGameweekIds: [1, 2, 3] })
+})
+
+Deno.test('computePaymentAllocation only reports already-paid weeks actually skipped over, not the user\'s entire paid history', () => {
+  // Week 1 is already paid but never even examined, since 2 unpaid weeks
+  // are found (2, 3) before scanning would ever reach it — it must not
+  // appear in skippedAlreadyPaidGameweekIds, since it was never "in the
+  // way" of this particular allocation.
+  const result = computePaymentAllocation({
+    amount: 10,
+    entryFee: 5,
+    eligibleGameweekIds: [2, 3, 1],
+    alreadyPaidGameweekIds: new Set([1]),
+  })
+
+  assertEquals(result, { outcome: 'allocated', weeksRequested: 2, gameweekIds: [2, 3], skippedAlreadyPaidGameweekIds: [] })
 })
 
 Deno.test('computePaymentAllocation is idempotent given the same inputs — same amount, same already-paid set, same result', () => {

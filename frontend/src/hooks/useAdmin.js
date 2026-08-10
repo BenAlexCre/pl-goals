@@ -120,12 +120,45 @@ export function useGameweeksForPot(seasonId, leagueId) {
   })
 }
 
+// Phase 7 Stage 2 Slice 4 — a pot's member list with no gameweek
+// dependency, so "Record payment received" (which allocates across
+// multiple future gameweeks, not one) doesn't force the organiser to
+// select an arbitrary gameweek first just to see who to record a payment
+// for. usePaymentStatus below stays gameweek-scoped for its own
+// per-gameweek table.
+export function usePotMembers(potId) {
+  return useQuery({
+    queryKey: ['pot-members', potId],
+    enabled: !!potId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('pot_members')
+        .select('user_id, role, profiles(id, display_name, username)')
+        .eq('pot_id', potId)
+      if (error) throw error
+      return (data ?? []).map((m) => ({
+        user_id: m.user_id,
+        display_name: m.profiles?.display_name || m.profiles?.username || 'User',
+        username: m.profiles?.username || 'unknown',
+      }))
+    },
+  })
+}
+
 // Every pot member's payment status for one pot+gameweek — the "entries
 // awaiting verification" view. Based on pot_members, not game_entries: an
 // admin can verify payment before a member has even submitted picks
 // (matches mark_paid's existing behavior, which has never required an
 // entry to exist first).
-export function usePaymentStatus(potId, gameweekId) {
+//
+// gameType, added Phase 7 Stage 2 Slice 4: also resolves each member's
+// game_entries.status/reinstated_at, so the table can offer "Reinstate
+// entry" (ISSUE-36 — ties admin-actions' existing reinstate_entry to a UI
+// for the first time) exactly where it's decidable: a void entry whose
+// payment is now marked paid. Pick 5's entry is gameweek-scoped; LMS's/
+// Predictor's is season-scoped (gameweek_id null) — same GE-4.5 split
+// reinstate.ts's own lookup already makes.
+export function usePaymentStatus(potId, gameweekId, gameType) {
   return useQuery({
     queryKey: ['payment-status', potId, gameweekId],
     enabled: !!potId && !!gameweekId,
@@ -144,10 +177,17 @@ export function usePaymentStatus(potId, gameweekId) {
         .eq('scope', 'gameweek')
       if (paymentsError) throw paymentsError
 
+      let entriesQuery = supabase.from('game_entries').select('user_id, status, reinstated_at').eq('pot_id', potId)
+      entriesQuery = gameType === 'pick5' ? entriesQuery.eq('gameweek_id', gameweekId) : entriesQuery.is('gameweek_id', null)
+      const { data: entries, error: entriesError } = await entriesQuery
+      if (entriesError) throw entriesError
+
       const paymentByUser = new Map((payments ?? []).map((p) => [p.user_id, p]))
+      const entryByUser = new Map((entries ?? []).map((e) => [e.user_id, e]))
 
       return (members ?? []).map((m) => {
         const payment = paymentByUser.get(m.user_id)
+        const entry = entryByUser.get(m.user_id)
         return {
           user_id: m.user_id,
           display_name: m.profiles?.display_name,
@@ -155,6 +195,8 @@ export function usePaymentStatus(potId, gameweekId) {
           is_paid: payment?.is_paid ?? false,
           has_record: !!payment,
           marked_at: payment?.marked_at ?? null,
+          entry_status: entry?.status ?? null,
+          reinstated_at: entry?.reinstated_at ?? null,
           notes: payment?.notes ?? null,
         }
       })
@@ -227,6 +269,155 @@ export function useBulkVerifyPayments() {
       if (!vars.dryRun) {
         qc.invalidateQueries({ queryKey: ['payment-status', vars.potId, vars.gameweekId] })
       }
+    },
+  })
+}
+
+// Phase 7 Stage 2 Slice 4 — Rollover management. No admin-actions call, no
+// new Edge Function: `pots` already has RLS UPDATE policies letting a pot
+// admin (or app admin) update their own pot directly (`pots_update_admin`,
+// `admins can update their pots`), and neither `status` nor `name` is one
+// of the three columns `prevent_pot_contract_change()` locks after
+// creation (`rollover_source_pot_id`/`carry_over_amount`/
+// `rollover_generation` only) — activating or renaming a draft rollover
+// pot is a plain client update against the existing backend, not a new
+// capability. "Do not redesign the backend" holds: nothing here is a
+// GameEngine method or a new Edge Function action.
+// rollover_source_pot_id's own name is resolved separately below, not
+// embedded here — PostgREST cannot resolve a self-referencing embed
+// (`pots!pots_rollover_source_pot_id_fkey` against the `pots` table
+// itself) via its schema-cache relationship hint; confirmed live (a real
+// 400 from the REST endpoint, "Could not find a relationship between
+// 'pots' and 'pots'"), not a hypothetical concern.
+const ROLLOVER_POT_SELECT = `
+  id, name, status, game_type, created_by, entry_fee,
+  admin_fee_type, admin_fee_amount, admin_fee_percentage,
+  charity_fee_type, charity_fee_amount, charity_fee_percentage,
+  carry_over_amount, rollover_generation, rollover_source_pot_id,
+  wipeout_resolution, season_end_tie_rule,
+  start_gameweek_id, end_gameweek_id,
+  league:leagues!pots_league_id_fkey(id, name, country),
+  season:seasons!pots_season_id_fkey(id, name, year_start, year_end),
+  start_gameweek:gameweeks!pots_start_gameweek_id_fkey(id, number, name),
+  end_gameweek:gameweeks!pots_end_gameweek_id_fkey(id, number, name)
+`
+
+// Draft rollover pots the current user can manage — a pot the Game Engine
+// created automatically (rollover_source_pot_id set), still in draft. Two
+// queries, merged and deduped by id, not one `.or()` filter: an app admin
+// or pot-member-admin is found via `pot_members`, but a fresh Pick 5
+// rollover pot's organiser is only ever guaranteed a `created_by` match
+// (see decisions.md's note on Pick5Engine.createPick5RolloverPot() also
+// now adding a pot_members row — this OR keeps working for any rollover
+// pot created before that fix, or by a future engine change that again
+// forgets to).
+export function useDraftRolloverPots() {
+  const { user } = useAuthStore()
+  return useQuery({
+    queryKey: ['draft-rollover-pots', user?.id],
+    enabled: !!user?.id,
+    queryFn: async () => {
+      const [byCreator, byMembership] = await Promise.all([
+        supabase
+          .from('pots')
+          .select(ROLLOVER_POT_SELECT)
+          .eq('status', 'draft')
+          .not('rollover_source_pot_id', 'is', null)
+          .eq('created_by', user.id),
+        supabase
+          .from('pots')
+          .select(`${ROLLOVER_POT_SELECT}, pot_members!inner(role)`)
+          .eq('status', 'draft')
+          .not('rollover_source_pot_id', 'is', null)
+          .eq('pot_members.user_id', user.id)
+          .eq('pot_members.role', 'admin'),
+      ])
+      if (byCreator.error) throw byCreator.error
+      if (byMembership.error) throw byMembership.error
+
+      const byId = new Map()
+      for (const pot of [...(byCreator.data ?? []), ...(byMembership.data ?? [])]) {
+        byId.set(pot.id, pot)
+      }
+      const pots = [...byId.values()]
+
+      // Resolves each source pot's own name for "rolled over from X" — a
+      // separate query, not embedded (see ROLLOVER_POT_SELECT's own
+      // comment on why the self-referencing embed doesn't work). The
+      // source pot is always readable: rollover creation preserves
+      // created_by from the source, so `users can view pots they belong
+      // to`'s created_by = auth.uid() branch always covers it, regardless
+      // of the source pot's own current status or membership.
+      const sourceIds = [...new Set(pots.map((p) => p.rollover_source_pot_id).filter(Boolean))]
+      let sourceNameById = new Map()
+      if (sourceIds.length > 0) {
+        const { data: sources, error: sourcesError } = await supabase.from('pots').select('id, name').in('id', sourceIds)
+        if (sourcesError) throw sourcesError
+        sourceNameById = new Map((sources ?? []).map((s) => [s.id, s.name]))
+      }
+
+      return pots
+        .map((pot) => ({ ...pot, rollover_source_name: sourceNameById.get(pot.rollover_source_pot_id) ?? null }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    },
+  })
+}
+
+export function useRenamePot() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ potId, name }) => {
+      const { error } = await supabase.from('pots').update({ name }).eq('id', potId)
+      if (error) throw error
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['draft-rollover-pots'] })
+      qc.invalidateQueries({ queryKey: ['pots-for-admin'] })
+    },
+  })
+}
+
+// Activation itself is the one-field flip (`status: 'draft' -> 'active'`);
+// startGameweekId/endGameweekId let the organiser fill in the fields
+// required-but-unset gap this same review found (LMS's rollover pot leaves
+// both null on purpose — see decisions.md — the organiser sets them here,
+// during the same review, rather than needing a second trip through some
+// other pot-settings screen that doesn't exist).
+export function useActivateRolloverPot() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ potId, startGameweekId, endGameweekId }) => {
+      const patch = { status: 'active' }
+      if (startGameweekId !== undefined) patch.start_gameweek_id = startGameweekId
+      if (endGameweekId !== undefined) patch.end_gameweek_id = endGameweekId
+      const { error } = await supabase.from('pots').update(patch).eq('id', potId)
+      if (error) throw error
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['draft-rollover-pots'] })
+      qc.invalidateQueries({ queryKey: ['pots-for-admin'] })
+      qc.invalidateQueries({ queryKey: ['pots'] })
+    },
+  })
+}
+
+// ISSUE-36 — Late Payment Override has always had a working backend
+// (admin-actions' reinstate_entry, docs/decisions.md § Late Payment
+// Override) but no frontend trigger anywhere. Thin wrapper, same shape as
+// useMarkPayment/useRecordPayment above — no new backend behavior.
+export function useReinstateEntry() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ potId, userId, gameweekId }) => {
+      const { data, error } = await supabase.functions.invoke('admin-actions', {
+        body: { action: 'reinstate_entry', pot_id: potId, user_id: userId, gameweek_id: gameweekId },
+      })
+      if (error) throw await extractFunctionError(error)
+      if (data?.error) throw new Error(data.error)
+      return data
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['payment-status', vars.potId, vars.gameweekId] })
     },
   })
 }

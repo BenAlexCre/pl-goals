@@ -32,9 +32,21 @@
 // individual get-or-create-by-id calls — a single INSERT ... ON CONFLICT
 // statement is atomic, so a write failure can never leave some of the N
 // weeks recorded and others not.
+//
+// Phase 7 Stage 2 Slice 4: the response now includes each allocated (and
+// each skipped-already-paid) gameweek's number/name, not just its id — "the
+// organiser should always understand exactly what is about to happen"
+// means naming GW6/GW7/..., not just a count. gameweeks was already being
+// fetched for allocation purposes; this only widens the select().
 
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { computePaymentAllocation } from './paymentAllocation.ts'
+
+export interface RecordPaymentGameweek {
+  id: number
+  number: number
+  name: string
+}
 
 export interface RecordPaymentResult {
   success: true
@@ -42,6 +54,8 @@ export interface RecordPaymentResult {
   weeks_requested: number
   weeks_materialized: number
   gameweek_ids: number[]
+  gameweeks: RecordPaymentGameweek[]
+  already_paid_gameweeks: RecordPaymentGameweek[]
 }
 
 export async function handleRecordPayment(
@@ -86,7 +100,7 @@ export async function handleRecordPayment(
   // (rule 3: Pick 5 always spans the whole season, no organiser cutoff).
   const { data: gameweeks, error: gwError } = await adminClient
     .from('gameweeks')
-    .select('id')
+    .select('id, number, name')
     .eq('league_id', potRow.league_id)
     .eq('season_id', potRow.season_id)
     .eq('status', 'upcoming')
@@ -95,6 +109,9 @@ export async function handleRecordPayment(
   if (gwError) {
     throw new Error(`Failed to look up upcoming gameweeks: ${gwError.message}`)
   }
+
+  const eligibleGameweeks = (gameweeks ?? []) as RecordPaymentGameweek[]
+  const gameweekById = new Map(eligibleGameweeks.map((gw) => [gw.id, gw]))
 
   const { data: existingPayments, error: paymentsError } = await adminClient
     .from('entry_payments')
@@ -116,7 +133,7 @@ export async function handleRecordPayment(
   const allocation = computePaymentAllocation({
     amount,
     entryFee: potRow.entry_fee,
-    eligibleGameweekIds: ((gameweeks ?? []) as { id: number }[]).map((gw) => gw.id),
+    eligibleGameweekIds: eligibleGameweeks.map((gw) => gw.id),
     alreadyPaidGameweekIds,
   })
 
@@ -124,7 +141,9 @@ export async function handleRecordPayment(
     throw new Error(allocation.reason)
   }
 
-  const { weeksRequested, gameweekIds: targetGameweekIds } = allocation
+  const { weeksRequested, gameweekIds: targetGameweekIds, skippedAlreadyPaidGameweekIds } = allocation
+  const targetGameweeks = targetGameweekIds.map((id) => gameweekById.get(id)).filter((gw): gw is RecordPaymentGameweek => !!gw)
+  const alreadyPaidGameweeks = skippedAlreadyPaidGameweekIds.map((id) => gameweekById.get(id)).filter((gw): gw is RecordPaymentGameweek => !!gw)
 
   if (dryRun) {
     return {
@@ -133,6 +152,8 @@ export async function handleRecordPayment(
       weeks_requested: weeksRequested,
       weeks_materialized: targetGameweekIds.length,
       gameweek_ids: targetGameweekIds,
+      gameweeks: targetGameweeks,
+      already_paid_gameweeks: alreadyPaidGameweeks,
     }
   }
 
@@ -161,5 +182,7 @@ export async function handleRecordPayment(
     weeks_requested: weeksRequested,
     weeks_materialized: targetGameweekIds.length,
     gameweek_ids: targetGameweekIds,
+    gameweeks: targetGameweeks,
+    already_paid_gameweeks: alreadyPaidGameweeks,
   }
 }

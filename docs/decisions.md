@@ -3858,3 +3858,124 @@ pot members, 1 season, 1 league, 3 gameweeks, 6 game entries, 4
 game_entry_lms rows, 2 pot_standings_snapshots, 3 pot_prizes rows, 4
 entry_payments rows) removed by exact ID, independently re-verified as
 zero residue.
+
+---
+
+## Phase 7 Stage 2 Slice 4 — Payment UX & Rollover Management Polish
+
+**Decision, 2026-08-10**: pure frontend usability slice against the
+already-complete Game Engine backend — "identify every unnecessary click,"
+build the previously-nonexistent rollover-management UI, and fix only
+genuine bugs found while integrating, not redesign anything. Two real bugs
+were found; both fixed, both small.
+
+**Bug 1 — `Pick5Engine.createPick5RolloverPot()` never added the organiser
+as a `pot_members` row.** Found while building `/admin/rollovers`:
+`usePotsForAdmin()`'s own pot list (an inner join on `pot_members` with
+`role = 'admin'`) would never surface a Pick 5 rollover pot at all — it had
+`created_by` set (enough for the `pots` table's own RLS SELECT policies)
+but no `pot_members` row, so every `pot_members`-based query, including
+`admin-actions`' own pot-admin authorization gate for any future action
+against that pot, would silently never find it.
+`LmsEngine.createRolloverPot()` already added this row (see the original
+Pick 5 jackpot entry above's own comment on mirroring LMS "as closely as
+GE-18 allows") — Pick 5's version simply never did. Fixed to match exactly,
+including the same compensating-rollback-on-member-insert-failure pattern.
+Two new unit tests (the member row itself, and the rollback case); the
+fake-DB harness gained `pot_members`/`.delete()`/chained
+`.insert().select().single()` support it didn't have before, needed to
+express this reliably.
+
+**Bug 2 — PostgREST cannot resolve a self-referencing embed.** The
+rollover-pot query originally tried
+`rollover_source:pots!pots_rollover_source_pot_id_fkey(id, name)` to show
+"rolled over from X" in one round trip. Confirmed live: PostgREST returns a
+400, `"Could not find a relationship between 'pots' and 'pots'"` — its
+schema-cache relationship resolution doesn't support a table embedding
+itself via one of its own foreign keys, at least not in the version this
+project runs. Not a real limitation worth working around cleverly: dropped
+the embed, resolve the source pot's name with one small separate query
+(`.in('id', sourceIds)`) and merge client-side. Worth remembering for any
+future embed against a self-referencing FK — `pots.rollover_source_pot_id`
+is not the only one in this schema.
+
+**Design choice: rollover activation needed zero new backend.** `pots`
+already has RLS UPDATE policies (`pots_update_admin` /
+`admins can update their pots`) letting a pot admin update their own pot
+directly, and neither `status` nor `name` is one of the three columns
+`prevent_pot_contract_change()` locks after creation
+(`rollover_source_pot_id`/`carry_over_amount`/`rollover_generation` only,
+confirmed by reading the trigger, not assumed). Activation and rename are
+both plain `supabase.from('pots').update(...)` calls against existing RLS —
+correctly in scope for "do not redesign the backend," since nothing here
+touches a GameEngine method or adds an Edge Function action.
+
+**Design choice: no optimistic updates on money-affecting mutations.**
+"Optimistic updates where appropriate" was in scope for this slice; record-
+payment, mark-paid/unpaid, reinstate-entry, and rollover activation were
+deliberately NOT made optimistic. An optimistic UI would show a false
+"success" before the server confirms a write that moves real-world money
+attestation state — for these specific actions, waiting for the real
+response and showing an explicit loading state is the correct choice, not
+an oversight. (Non-money-affecting reads — e.g., the pot/gameweek selectors
+— don't need it either, since they're already fast local cache lookups.)
+
+**Payment preview enhanced**: `computePaymentAllocation()`
+(`admin-actions/paymentAllocation.ts`) now also returns
+`skippedAlreadyPaidGameweekIds` — every already-paid gameweek encountered
+while collecting N unpaid ones (not the user's entire payment history, only
+the ones actually in the way of this specific allocation).
+`recordPayment.ts` enriches both the allocated and skipped id lists with
+each gameweek's `number`/`name` (it was already fetching `gameweeks` for
+allocation purposes; this only widens the `select()`). The organiser now
+sees "Already paid: GW5 / Will allocate to: GW6, GW7, GW8, GW9, GW10" —
+naming actual gameweeks, not just a count — matching the explicit
+requirement that "the organiser should always understand exactly what is
+about to happen."
+
+**Duplicate-submission protection**: React Query's `mutation.isPending`
+only becomes `true` after a render — a second click fired in the same
+JavaScript tick as the first (a genuine double-click, not two separate
+user actions) can race ahead of that re-render and fire a second mutation
+before the button visually disables. Every money/state-changing handler in
+`AdminPayments.jsx`/`AdminRollovers.jsx` now guards itself with a
+synchronous `useRef` boolean, checked and set at the very top of the
+handler, cleared in a `finally` block — a ref updates immediately, with no
+render in between, closing that window. Verified live: two `Confirm &
+record payment` clicks fired back-to-back (`Promise.all`, no `await`
+between them) produced exactly one write of the previewed weeks, not two.
+
+**Reinstate entry, wired to a UI for the first time (`ISSUE-36`,
+resolved).** The backend (`reinstate_entry`) has been complete and
+live-verified since 2026-08-08; nothing frontend ever called it.
+`usePaymentStatus()` extended to also resolve each member's
+`game_entries.status`/`reinstated_at` (same GE-4.5 gameweek/season-scope
+split `reinstate.ts` itself already makes for its own lookup), so
+`PaymentTable.jsx` can offer "Reinstate entry" exactly where the backend
+would actually accept it — a void entry whose payment is now marked
+paid — gated behind a confirmation modal, matching the existing
+remove-member confirmation pattern (`MemberList.jsx`) rather than
+inventing a new one. Live-verified: a void, now-paid Pick 5 entry was
+reinstated through the real UI and confirmed correctly re-settled in the
+database (`status: 'settled'`, `reinstated_at`/`reinstated_by` populated)
+via the existing `calculateScore()`/`settle()` recompute pipeline —
+exactly the "letting the same idempotent pipeline run now rather than
+never" behavior `reinstate.ts`'s own design already specified.
+
+**Verification performed**: full repo suite 336/336 (up from 334 — 2 new
+Pick 5 rollover `pot_members` tests). `deno check` clean on every touched
+file. `npm run build` clean. **Live-verified**, real browser (Playwright)
+against local Supabase, a dedicated Pick 5 pot and LMS pot each rolled
+over via a real `awardPrize()` call (not fabricated fixtures): payment
+preview correctly named individual gameweeks and skipped an
+already-individually-paid one; a rapid double-click on "Confirm & record
+payment" produced exactly one write; "Reinstate entry" appeared only for a
+void+paid row and correctly reinstated it; `/admin/rollovers` listed both
+rollover pots (confirming the `pot_members` bug fix flows through);
+renamed one; activated the Pick 5 one with just a confirmation (bounds
+already resolved); activated the LMS one only after both required
+gameweek fields were filled, correctly gated (`disabled` before, enabled
+after). All test data (2 source pots, 2 rollover pots, 7 pot members, 1
+season, 1 league, 2 gameweeks, 5 game entries, 2 game_entry_lms rows, 6
+pot_standings_snapshots rows, 2 pot_prizes rows, 5 entry_payments rows)
+removed by exact ID, independently re-verified as zero residue.

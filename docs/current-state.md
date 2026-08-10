@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed: 2026-08-09.
+Last reviewed: 2026-08-10.
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,
@@ -555,16 +555,6 @@ confirmed by reading `bulkPayments.ts`). Once `ISSUE-33`/`ISSUE-34` are
 addressed and a real LMS/Predictor pot with a one-time season entry fee
 exists, an admin will have no way to verify that payment, individually or in
 bulk, through the UI. **Status: confirmed, not fixed.**
-
-#### ISSUE-36 — `reinstate_entry` (Late Payment Override) has no UI trigger
-**Discovered 2026-08-09**, during the same audit. The backend action
-(`admin-actions`' `reinstate_entry`, implemented and live-verified across all
-three modes — see [decisions.md § Late Payment Override](./decisions.md#late-payment-override))
-has no frontend caller anywhere — grepped `reinstate_entry` across
-`frontend/src`, zero matches. An admin who accepts a late payment outside the
-app currently has no way to actually reinstate the voided entry through the
-UI; the only path today is a direct Edge Function call. **Status: confirmed,
-not fixed.**
 
 #### ISSUE-39 — No gameweek anywhere in the seed data has `is_current = true`; the "current" season's Premier League has zero gameweeks
 **Discovered 2026-08-09**, while live-verifying `ISSUE-34`'s pot-creation form
@@ -1194,6 +1184,21 @@ added as part of the same cutover — no prior page rendered this data at all). 
 (kept on disk) and are now excluded by the new root `.gitignore`. Whether to delete
 them from disk entirely (they're only needed if the WhoScored scraper workflow
 continues, per ISSUE-4) is a separate, not-yet-made decision.
+
+#### ISSUE-36 — `reinstate_entry` (Late Payment Override) has no UI trigger
+**Discovered 2026-08-09**, during the Phase 7 Stage 1 audit. **Resolved
+2026-08-10**, Phase 7 Stage 2 Slice 4. The backend action was always fully
+implemented and live-verified (`admin-actions`' `reinstate_entry` — see
+[decisions.md § Late Payment Override](./decisions.md#late-payment-override));
+it just had no frontend caller. `PaymentTable.jsx` now shows a "Reinstate
+entry" button exactly where it's decidable (a void entry whose payment is
+now marked paid — `usePaymentStatus()` extended to also resolve
+`game_entries.status`/`reinstated_at`, same GE-4.5 gameweek/season-scope
+split `reinstate.ts` itself already makes), gated behind a confirmation
+modal. Zero backend changes. Live-verified: a void-but-now-paid Pick 5
+entry was reinstated through the real UI and confirmed re-settled correctly
+in the database via the existing `calculateScore()`/`settle()` recompute
+pipeline.
 
 *(when a future issue is fixed and verified, move its entry here with the date, and a
 reference to the commit/PR that fixed it, instead of deleting it.)*

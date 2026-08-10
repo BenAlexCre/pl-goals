@@ -280,6 +280,16 @@ leaves both null for the organiser to set, since an LMS end gameweek is an
 arbitrary organiser-chosen cutoff, not necessarily a season's actual final
 gameweek.
 
+**Bug fixed, 2026-08-10** (Phase 7 Stage 2 Slice 4, docs/decisions.md §
+Phase 7 Stage 2 Slice 4): `Pick5Engine.createPick5RolloverPot()` never
+inserted a `pot_members` row for the organiser on the new pot — only
+`created_by` was set. `LmsEngine.createRolloverPot()` already added one;
+Pick 5's version simply never did, found while building the
+`/admin/rollovers` UI (it surfaced as the rollover pot never appearing in
+any `pot_members`-based query, including `usePotsForAdmin()`'s own list).
+Fixed to match LMS's pattern exactly, including the same
+compensating-rollback-on-member-insert-failure behavior.
+
 ### GE-4.5 `game_entries` — the shared parent
 
 `id`, `pot_id`, `user_id`, `gameweek_id` (nullable), `entry_scope pot_scope not null`
