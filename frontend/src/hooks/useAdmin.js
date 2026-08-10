@@ -421,3 +421,49 @@ export function useReinstateEntry() {
     },
   })
 }
+
+// Launch Readiness Sprint 1A — Security & Authorisation (2026-08-10,
+// resolves ISSUE-9). Route-level admin gating needs a real "is this user
+// an admin at all" signal — previously nothing in the frontend computed
+// one, not even to hide the "Admin" nav link. Two ways to qualify, matching
+// what the admin pages themselves actually require server-side:
+//   - app_admin (`user.app_metadata.role`, already decoded client-side from
+//     the session JWT — the same claim admin-actions/index.ts and the new
+//     cron Edge Function auth check both read) — needed for AdminDashboard's
+//     platform-wide "Manual jobs" (sync/compute/settle triggers, which the
+//     backend now also gates on this exact claim).
+//   - pot admin of at least one pot (`pot_members.role = 'admin'`) — needed
+//     for AdminPayments/AdminRollovers, which are genuinely meant for any
+//     pot organiser, not just platform admins; each page already scopes
+//     its own content to pots the caller administers via existing RLS, so
+//     this only blocks someone who administers nothing at all from
+//     entering the admin section in the first place.
+// This is intentionally the SAME "is this user any kind of admin" concept
+// for the whole /admin/* subtree, applied by one route guard — the pages
+// underneath still each enforce their own finer-grained authorization
+// (per-pot for payments/rollovers, app_admin-only for Manual Jobs) exactly
+// as before; this hook only answers "does this user have any legitimate
+// reason to be here."
+export function useIsAdmin() {
+  const { user } = useAuthStore()
+  const isAppAdmin = user?.app_metadata?.role === 'app_admin'
+
+  const potAdminQuery = useQuery({
+    queryKey: ['has-pot-admin-membership', user?.id],
+    enabled: !!user?.id && !isAppAdmin,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('pot_members')
+        .select('pot_id')
+        .eq('user_id', user.id)
+        .eq('role', 'admin')
+        .limit(1)
+      if (error) throw error
+      return (data?.length ?? 0) > 0
+    },
+  })
+
+  if (!user) return { isAdmin: false, isLoading: false }
+  if (isAppAdmin) return { isAdmin: true, isLoading: false }
+  return { isAdmin: potAdminQuery.data ?? false, isLoading: potAdminQuery.isLoading }
+}

@@ -1,6 +1,6 @@
 # API
 
-Last reviewed: 2026-08-03. There is no custom REST/GraphQL backend — the "API" here is
+Last reviewed: 2026-08-10. There is no custom REST/GraphQL backend — the "API" here is
 (1) Supabase's auto-generated PostgREST API used directly by the frontend, and (2) five
 Deno edge functions for operations that need to bypass RLS or call external services.
 
@@ -55,9 +55,11 @@ Frontend caller: `hooks/useAdmin.js:useAdminAction`. Whether anything currently
 invokes that hook, and why not: [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry).
 
 ### `POST /functions/v1/sync-fixtures`
-**Auth:** none enforced by the function itself — see
-[current-state.md ISSUE-9](./current-state.md#issue-9--admin-has-no-ui-level-role-gate)
-for what that means in practice. Pulls from **api-football**
+**Auth:** requires either the service-role key (the real cron caller) or a
+signed-in `app_admin` session (`_shared/adminOrCronAuth.ts`, added Launch
+Readiness Sprint 1A, resolves
+[current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests) —
+previously enforced nothing). Pulls from **api-football**
 (`v3.football.api-sports.io`), using the `VITE_FOOTBALL_DATA_KEY` env var as the
 api-football key (the name is misleading — this key is api-football's, not
 football-data.org's, despite `VITE_FOOTBALL_DATA_KEY` suggesting the latter).
@@ -79,13 +81,19 @@ Response: `{ success: true, processed, competitionId, competitionName, season }`
 `{ error, competitionId }` with status `500`.
 
 ### `POST /functions/v1/compute-deadlines`
-**Auth:** none enforced. No request body used. For every `upcoming`/`live` gameweek,
+**Auth:** requires either the service-role key or a signed-in `app_admin`
+session (see `sync-fixtures` above — same helper, same fix, resolves
+[current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests)).
+No request body used. For every `upcoming`/`live` gameweek,
 finds the earliest non-postponed/cancelled fixture kickoff and sets
 `earliest_kickoff_utc` to it and `deadline_utc` to 30 minutes before it. Response:
 `{ success: true, updated }`.
 
 ### `POST /functions/v1/compute-scores`
-**Auth:** none enforced. No request body used. Creates a `sync_runs` row
+**Auth:** requires either the service-role key or a signed-in `app_admin`
+session (see `sync-fixtures` above — same helper, same fix, resolves
+[current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests)).
+No request body used. Creates a `sync_runs` row
 (`job_name: 'compute-scores'`). For every `upcoming`/`live` gameweek: determines
 `isLive` (any fixture in that gameweek has `status = 'live'`), then for every
 `user_entries` row in that gameweek:
@@ -105,7 +113,11 @@ Response: `{ success: true, processed }` or `{ error }` with `500` (and the
 `sync_runs` row marked `failed`).
 
 ### `POST /functions/v1/settle-gameweek`
-**Auth:** none enforced. Optional body: `{ gameweek_id }` to target one gameweek,
+**Auth:** requires either the service-role key or a signed-in `app_admin`
+session (see `sync-fixtures` above — same helper, same fix, resolves
+[current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests)
+— previously doubly notable here since the body's `gameweek_id` had no
+ownership check either). Optional body: `{ gameweek_id }` to target one gameweek,
 otherwise scans every gameweek with `status != 'completed'`. For a gameweek where
 every non-postponed/cancelled fixture is `finished`: marks all its (non-void)
 `user_entries` as `settled`, marks the gameweek `completed`, then for each pot with

@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { isAuthorizedAdminOrCron } from '../_shared/adminOrCronAuth.ts'
 import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
 // Side-effecting imports — register each mode with the dispatcher (GE-7/
@@ -52,6 +53,14 @@ const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predict
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  // ISSUE-26 fix — see _shared/adminOrCronAuth.ts for the full reasoning.
+  if (!(await isAuthorizedAdminOrCron(req))) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
 
   const sb = createClient(
     Deno.env.get('SUPABASE_URL') ?? '',

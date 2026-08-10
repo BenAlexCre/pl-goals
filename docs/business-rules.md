@@ -635,11 +635,16 @@ Implementation: `is_pot_admin()`/`is_app_admin()` RLS helper functions
 ([database.md § Row Level Security summary](./database.md#row-level-security-summary)),
 re-checked manually inside `admin-actions`
 ([architecture.md § Security model](./architecture.md#security-model)).
-**Caveat:** `/admin` (the page that triggers sync/compute/settle jobs) currently has
-no role check at all in the UI — see
-[current-state.md ISSUE-9](./current-state.md#issue-9--admin-has-no-ui-level-role-gate).
-That page's actions aren't pot-scoped admin actions in the sense described above; they
-trigger system-wide jobs, and today any signed-in user can reach them.
+**Route-level gate, added 2026-08-10** (Launch Readiness Sprint 1A, resolves
+[current-state.md ISSUE-9](./current-state.md#issue-9--admin-has-no-ui-level-role-gate)):
+`/admin`, `/admin/payments`, and `/admin/rollovers` are now gated by an
+`AdminRoute` guard requiring either app admin or pot admin of at least one
+pot — an unauthenticated visitor is redirected to sign in, a signed-in
+user with no admin relationship anywhere sees a "Not authorised" page.
+`/admin`'s own "Manual jobs" section (the platform-wide sync/compute/settle
+triggers, not pot-scoped like the rest of admin permissions described
+above) is further restricted to app admins only, both in the UI and now
+also server-side — see [decisions.md § Launch Readiness Sprint 1A](./decisions.md#launch-readiness-sprint-1a--security--authorisation).
 
 ## Member invitations
 

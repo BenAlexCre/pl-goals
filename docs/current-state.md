@@ -166,37 +166,6 @@ deliberate decision on which value is actually correct (this repo's own
 documentation says 30 minutes) before either removing the trigger or updating
 `compute-deadlines` to match it.
 
-#### ISSUE-26 — `compute-deadlines`/`compute-scores`/`settle-gameweek` accept unauthenticated requests
-**Discovered 2026-08-05**, during the production hardening sprint audit. Unlike
-`get-or-create-pick5-entry`/`submit-pick5-picks`/`admin-actions` (all of which
-require and verify a caller JWT), these three Edge Functions have no
-`Authorization` check at all — any caller with the public anon key (embedded in
-the frontend bundle, or trivially obtainable) can invoke settlement, scoring, or
-deadline computation directly and repeatedly, with `settle-gameweek` additionally
-accepting an arbitrary `gameweek_id` body parameter. Broader and more specific
-than `ISSUE-9` (which is scoped to `/admin`'s missing UI-level role gate) — this
-is the underlying Edge Functions themselves having no server-side authentication,
-and it now also gates money-moving logic (`Pick5Engine.awardPrize()`) since the
-Pick 5 frontend cutover. **Status: confirmed, not fixed.** Mitigated somewhat by
-idempotency (repeated calls are safe no-ops) and by `settle-gameweek`'s "all
-fixtures finished" gate (blocks premature settlement, not abusive/repeated
-invocation). **Deliberately not fixed in the hardening sprint**: `AdminDashboard.jsx`'s
-"Manual jobs" buttons (`hooks/useAdmin.js:useTriggerSync`) call these same three
-functions using the signed-in user's own session token, not the service-role key
-— a naive "service-role-only" gate would silently break that existing, real
-UI feature. The correct fix needs a product decision (mirror `admin-actions`'
-pattern: allow either a valid app-admin session or the service-role key), not a
-blind lockdown; flagging for a deliberate pass rather than guessing.
-
-**Scope extended, 2026-08-09, during the Phase 7 Stage 1 frontend/backend audit**:
-`sync-fixtures` has the identical gap — no `Authorization` inspection at all in
-`index.ts`, relying entirely on Kong's gateway-level `apikey` requirement, same
-as the three functions above. Confirmed by direct source read, not inferred.
-Also externally billed (calls api-football), so an unauthenticated caller can
-both mutate fixture/gameweek data *and* run up the external API bill. Folded
-into this issue's scope rather than a new id, since it's the same underlying
-gap (Edge Function with no application-level auth check) on a fourth function.
-
 #### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
 **Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
 (26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
@@ -501,18 +470,6 @@ option never appears. This is a UX inconsistency, not a business-rule bypass —
 closing it (making `PicksPage.jsx`'s list filter goalkeepers too) is optional
 cleanup, not a correctness fix.
 
-
-#### ISSUE-9 — `/admin` has no UI-level role gate
-`App.jsx`'s route table puts `/admin` behind `ProtectedRoute` (must be signed in) but
-not behind any admin check — any authenticated user can navigate to it and trigger
-`sync-fixtures`, `compute-scores`, and `settle-gameweek`. Of the edge functions it
-calls, only `admin-actions` checks the caller's role server-side; the
-sync/compute/settle functions have no auth check at all (see
-[api.md § Edge Functions](./api.md#2-edge-functions) for each function's auth
-posture). **Status: confirmed.** Low real-world severity today since `AdminDashboard`
-doesn't call `admin-actions` (see ISSUE-6), but the sync/compute/settle triggers are
-live and callable by anyone. Plan:
-[roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
 #### ISSUE-17 — Leaderboard ranking has no tie-break rule
 `settle-gameweek` ranks pot members purely by `picks_won` descending
@@ -1199,6 +1156,66 @@ modal. Zero backend changes. Live-verified: a void-but-now-paid Pick 5
 entry was reinstated through the real UI and confirmed re-settled correctly
 in the database via the existing `calculateScore()`/`settle()` recompute
 pipeline.
+
+#### ISSUE-9 — `/admin` has no UI-level role gate
+**Discovered** at initial documentation; **re-verified, not assumed, 2026-08-10**
+directly against the then-current `App.jsx` before any fix was written — confirmed
+still true (`/admin`/`/admin/payments`/`/admin/rollovers` sat behind
+`ProtectedRoute` alone; `TopNav.jsx`/`BottomNav.jsx` showed the "Admin" link
+unconditionally to every signed-in user, with no client-side admin concept
+anywhere). **Resolved 2026-08-10**, Launch Readiness Sprint 1A. A new `AdminRoute`
+guard (`App.jsx`) wraps the whole `/admin/*` route group: unauthenticated →
+redirected to `/sign-in`; authenticated but neither an app admin
+(`user.app_metadata.role === 'app_admin'`) nor a pot admin of any pot
+(`pot_members.role = 'admin'`, any row) → a new `NotAuthorized.jsx` page, not a
+silent bounce. `usePotsForAdmin`/`AdminPayments`/`AdminRollovers` are genuinely
+meant for any pot organiser (each already scopes its own content to pots the
+caller administers via existing RLS), so "pot admin of at least one pot" — not
+"app admin only" — is the correct bar for the shared subtree; `AdminDashboard`'s
+own platform-wide "Manual jobs" section is separately hidden for non-app-admins
+specifically, since the backend now gates those four functions on `app_admin`
+alone (see `ISSUE-26`, below). The "Admin" nav link in `TopNav.jsx`/`BottomNav.jsx`
+is also now conditionally shown — an additional layer, explicitly not the actual
+protection, which is the route guard itself. Live-verified, real browser: an
+anonymous visitor hitting `/admin/payments` directly was redirected to
+`/sign-in`; a signed-in user with zero admin relationships anywhere saw
+"Not authorised" with the "Admin" nav link correctly absent; a real pot admin
+(no `app_admin` claim) was granted access with "Manual jobs" correctly hidden;
+the same user, after a temporary `app_admin` claim (reverted and independently
+re-confirmed afterward), saw "Manual jobs" and successfully triggered
+"Compute live scores" through the real UI end-to-end.
+
+#### ISSUE-26 — `compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures` accepted unauthenticated requests
+**Discovered 2026-08-05**, scope extended to `sync-fixtures` 2026-08-09; **all
+four re-verified, not assumed, 2026-08-10** via a fresh source read of each
+function before writing any fix — confirmed still true: none of the four read
+or verified an `Authorization` header, each built a service-role client
+unconditionally, and Kong's default `verify_jwt` only demands *some* valid JWT
+— the public anon key, embedded in the frontend bundle, satisfies it — not a
+specific caller. **Resolved 2026-08-10**, Launch Readiness Sprint 1A. A new
+shared helper, `_shared/adminOrCronAuth.ts`, requires one of exactly two
+callers — an exact match against the function's own `SUPABASE_SERVICE_ROLE_KEY`
+(the real cron caller; confirmed live via `cron.job`'s actual current
+`command` text that every scheduled job sends `Authorization: Bearer
+<service_role_key>` + a matching `apikey` header, not inferred from a
+migration file alone — the live `cron.job` table has some drift from the
+migrations, e.g. an undocumented `lock-due-entries-every-minute` job calling a
+plain SQL function, so this was checked directly), or a signed-in user with
+`app_metadata.role === 'app_admin'` (`AdminDashboard.jsx`'s "Manual jobs"
+buttons call these same functions with the user's own session token, not the
+service-role key — deliberately not broken by this fix, exactly the product
+decision this issue's own prior note called for rather than a blind
+service-role-only lockdown). Mirrors `admin-actions/index.ts`'s own
+already-proven auth shape rather than inventing a new one. Live-verified via
+direct HTTP calls to each of the four functions: the public anon key now gets
+`401` on all four (previously `200`); the service-role key still gets a normal
+response (`sync-fixtures`' `500` is a pre-existing, unrelated
+`competitionId`-not-provided error, confirmed by its error body, not an auth
+failure); the real, unmodified cron jobs continued succeeding every 1-3
+minutes throughout, confirmed via `AdminDashboard.jsx`'s own live sync log.
+`sync-live-events` cron job (`ISSUE-4`) was not touched — the Edge Function it
+targets still doesn't exist, unrelated to this fix, out of this sprint's scope
+per its own explicit "do not redesign the scheduler architecture" instruction.
 
 *(when a future issue is fixed and verified, move its entry here with the date, and a
 reference to the commit/PR that fixed it, instead of deleting it.)*

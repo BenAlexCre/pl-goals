@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-08-03.
+Last reviewed: 2026-08-10.
 
 This document describes **how the system is structured** — stack, request flow,
 directory layout, security model. It changes rarely: only when the structure itself
@@ -206,9 +206,16 @@ application collected itself. See the Payment Verification note above.
   `is_app_admin()` (`auth.jwt() -> 'app_metadata' ->> 'role' = 'app_admin'`). Full
   policy-by-policy table: [database.md § Row Level Security summary](./database.md#row-level-security-summary).
 - **Edge functions bypass RLS** by using the service-role key, then re-implement
-  authorization manually where they do it at all (e.g. `admin-actions` checks
-  `pot_members.role` and `app_metadata.role` itself before acting; several other edge
-  functions have no auth check — see [api.md](./api.md) for which).
+  authorization manually: `admin-actions` checks `pot_members.role`/`app_metadata.role`
+  itself before acting; the six pick-submission/entry-creation functions
+  (`get-or-create-*-entry`/`submit-*-picks`) verify the caller's JWT and resolve
+  identity before writing; the four cron-triggered functions
+  (`compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures`) require
+  either the service-role key or a signed-in `app_admin` session
+  (`_shared/adminOrCronAuth.ts`, added 2026-08-10, Launch Readiness Sprint 1A,
+  resolves [current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests)
+  — previously had no auth check at all). See [api.md](./api.md) for each
+  function's exact auth posture.
 - **Reference data** (seasons, leagues, teams, players, gameweeks, fixtures,
   fixture_events) is readable by any authenticated user — there's no per-pot
   partitioning of football data, only of pots/entries/picks.

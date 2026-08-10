@@ -6,10 +6,20 @@ import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
 import SyncLog from '../components/admin/SyncLog'
 import { useUiStore } from '../store/uiStore'
+import { useAuthStore } from '../store/authStore'
 
 export default function AdminDashboard() {
   const addToast = useUiStore((s) => s.addToast)
   const { data: logs = [] } = useSyncLogs()
+  // Manual jobs (sync-fixtures/compute-scores/settle-gameweek) are now
+  // backend-gated to app_admin only (Launch Readiness Sprint 1A, resolves
+  // ISSUE-26) — a pot organiser who reaches this page (AdminRoute admits
+  // any admin of any pot, not just app admins, since this page also links
+  // to Payment verification/Rollover management, which genuinely are for
+  // any organiser) would otherwise see buttons that always 401. Hiding the
+  // section for them is a small, security-motivated UX correction, not a
+  // new feature — the real protection is the backend check either way.
+  const isAppAdmin = useAuthStore((s) => s.user?.app_metadata?.role === 'app_admin')
 
   const syncFixtures   = useTriggerSync('sync-fixtures')
   const syncLive       = useTriggerSync('sync-live-events')
@@ -60,23 +70,25 @@ export default function AdminDashboard() {
           </Link>
         </Card>
 
-        <Card className="p-4 space-y-3">
-          <h2 className="text-sm font-semibold text-white">Manual jobs</h2>
-          <Button fullWidth variant="secondary" loading={syncFixtures.isPending} onClick={() => runSync(syncFixtures, 'Fixture sync')}>
-            Sync fixtures / squads
-          </Button>
-          <Button fullWidth variant="secondary" loading={syncLive.isPending} onClick={() => runSync(syncLive, 'Live events sync')}>
-            Sync live events
-          </Button>
-          <Button fullWidth variant="secondary" loading={computeScores.isPending} onClick={() => runSync(computeScores, 'Score compute')}>
-            Compute live scores
-          </Button>
-          <Button fullWidth variant="secondary" loading={settleGameweek.isPending} onClick={() => runSync(settleGameweek, 'Settlement')}>
-            Settle finished gameweeks
-          </Button>
-        </Card>
+        {isAppAdmin && (
+          <Card className="p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-white">Manual jobs</h2>
+            <Button fullWidth variant="secondary" loading={syncFixtures.isPending} onClick={() => runSync(syncFixtures, 'Fixture sync')}>
+              Sync fixtures / squads
+            </Button>
+            <Button fullWidth variant="secondary" loading={syncLive.isPending} onClick={() => runSync(syncLive, 'Live events sync')}>
+              Sync live events
+            </Button>
+            <Button fullWidth variant="secondary" loading={computeScores.isPending} onClick={() => runSync(computeScores, 'Score compute')}>
+              Compute live scores
+            </Button>
+            <Button fullWidth variant="secondary" loading={settleGameweek.isPending} onClick={() => runSync(settleGameweek, 'Settlement')}>
+              Settle finished gameweeks
+            </Button>
+          </Card>
+        )}
 
-        <SyncLog logs={logs} />
+        {isAppAdmin && <SyncLog logs={logs} />}
       </div>
     </div>
   )

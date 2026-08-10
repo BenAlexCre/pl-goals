@@ -13,6 +13,99 @@ from here.
 
 ---
 
+## 2026-08-10 (59) — Launch Readiness Sprint 1A: Security & Authorisation
+
+**Goal:** close the two remaining launch-blocking security gaps — `ISSUE-9`
+(`/admin` has no UI-level role gate) and `ISSUE-26` (`compute-deadlines`/
+`compute-scores`/`settle-gameweek`/`sync-fixtures` accept unauthenticated
+requests). Explicit boundary: no new product features, no GameEngine
+redesign, no payment/rollover redesign — security only. Explicit
+instruction: do not assume either finding is still accurate; re-verify
+against current source before writing any fix.
+
+**Re-verification, not assumption**: read the current `App.jsx` directly —
+confirmed `/admin`/`/admin/payments`/`/admin/rollovers` still sat behind
+`ProtectedRoute` alone, and `TopNav.jsx`/`BottomNav.jsx` showed "Admin" to
+every signed-in user unconditionally, with no client-side admin concept
+anywhere. Read all four cron-triggered functions' current source directly
+(via a research agent, cross-checked) — confirmed none read or verified an
+`Authorization` header, each built a service-role client unconditionally,
+trusting only Kong's default `verify_jwt` (which the public anon key
+already satisfies). Both findings confirmed exactly as documented — no
+drift either direction since their original 2026-08-05/09 discovery dates.
+
+**`ISSUE-26` fix**: one new shared helper, `_shared/adminOrCronAuth.ts`,
+wired into all four functions right after their existing OPTIONS check.
+Requires either an exact match against the function's own
+`SUPABASE_SERVICE_ROLE_KEY` (the real cron caller) or a signed-in user
+with `app_metadata.role === 'app_admin'` (preserving
+`AdminDashboard.jsx`'s existing "Manual jobs" buttons, which call these
+same functions with the user's own session token, not the service-role
+key) — mirrors `admin-actions/index.ts`'s own already-proven two-caller
+shape rather than inventing a new one. Verified the real cron caller's
+actual headers directly against the live `cron.job` table (not just the
+migration files that originally configured it) — a real, if minor,
+discovery along the way: the live table has drifted from those
+migrations (an undocumented `lock-due-entries-every-minute` job exists,
+calling a plain SQL function, not an HTTP endpoint at all; `sync-live-events`
+is still active and "succeeding" every 2 minutes despite calling a
+function that doesn't exist, `ISSUE-4` — `pg_net`'s async `http_post`
+marks the enqueue itself successful, not the downstream HTTP response).
+Neither is a security issue; neither was touched — out of scope for "do
+not redesign the scheduler architecture."
+
+**`ISSUE-9` fix**: a new `AdminRoute` guard (`App.jsx`) wraps `/admin`,
+`/admin/payments`, `/admin/rollovers` as one nested route group —
+unauthenticated → `/sign-in`; authenticated but not admin → a new
+`NotAuthorized.jsx` page, not a silent bounce. "Admin," for this guard,
+means `app_admin` OR pot-admin-of-at-least-one-pot (`useIsAdmin()`, new
+hook in `hooks/useAdmin.js`) — a deliberate choice, not the obvious
+narrower one: `AdminPayments`/`AdminRollovers` are genuinely built for any
+pot organiser, each already scoping its own content to the caller's own
+pots via existing RLS, so gating the whole subtree to `app_admin` alone
+would have blocked real organisers from tools already meant for them.
+`AdminDashboard`'s own platform-wide "Manual jobs" section — genuinely
+`app_admin`-only, matching what the backend now actually allows for those
+four functions — is separately hidden for non-`app_admin`s, so a
+pot-only-admin never sees buttons that would just `401`. The "Admin" nav
+link in `TopNav.jsx`/`BottomNav.jsx` is now also conditionally shown — an
+explicitly-labeled additional layer, never the actual protection, per the
+brief's own "do not rely only on hiding navigation" instruction.
+
+**Verification**: full suite 336/336 unchanged (no existing test touched
+— these four functions have no dedicated `.test.ts` files, matching this
+codebase's established convention of relying on live verification for
+dispatcher-driving Edge Functions rather than a fake-DB harness).
+`deno check` clean on every touched/new file, including confirming
+`sync-fixtures/index.ts`'s pre-existing 31 type errors (`ISSUE-38`) were
+unchanged — same count before and after. `npm run build` clean.
+**Live-verified**: direct HTTP calls confirmed the anon key now gets
+`401` on all four functions (previously `200`) and the service-role key
+still succeeds (`sync-fixtures`'s `500` is a pre-existing, unrelated
+`competitionId`-not-provided error, confirmed by its response body); the
+real, unmodified cron jobs kept succeeding every 1-3 minutes throughout,
+confirmed via `AdminDashboard.jsx`'s own live sync log during testing.
+Real browser: an anonymous visitor hitting `/admin/payments` directly was
+redirected to `/sign-in`; a signed-in user with zero admin relationships
+anywhere saw "Not authorised" with the "Admin" nav link correctly absent;
+a real pot admin (no `app_admin` claim) was granted access with "Manual
+jobs" correctly hidden; the same user, given a temporary `app_admin`
+claim, saw "Manual jobs" and successfully triggered "Compute live scores"
+end-to-end through the real UI — the claim was reverted and independently
+re-confirmed against `auth.users.raw_app_meta_data` immediately after.
+
+**Result:** both launch-blocking security gaps closed; no new product
+feature, no GameEngine change, no payment or rollover redesign. No test
+data rows were created this pass — every backend check was a pure HTTP
+auth-boundary probe, and the one live UI mutation (an extra
+`compute-scores` tick) is the identical idempotent operation cron already
+performs every 3 minutes, not test pollution. Not committed, per explicit
+instruction. See [project-board.md § Done](./project-board.md#done) and
+[current-state.md § Resolved issues](./current-state.md#resolved-issues)
+(`ISSUE-9`, `ISSUE-26`).
+
+---
+
 ## 2026-08-10 (58) — Phase 7 Stage 2 Slice 4: Payment UX & Rollover Management Polish
 
 **Goal:** a pure frontend usability pass over the now-complete Game Engine

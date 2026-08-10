@@ -3,6 +3,7 @@ import { Home, Trophy, Users, User, Settings, LogOut, Bell } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUiStore } from '../../store/uiStore'
 import { useNotifications } from '../../hooks/useNotifications'
+import { useIsAdmin } from '../../hooks/useAdmin'
 import Avatar from '../ui/Avatar'
 import NotificationPanel from '../notifications/NotificationPanel'
 
@@ -12,12 +13,17 @@ export default function TopNav() {
   const openDrawer = useUiStore((s) => s.openDrawer)
   const { data: notifications = [] } = useNotifications()
   const unreadCount = notifications.filter((n) => !n.read_at).length
+  // Launch Readiness Sprint 1A — hiding the link is a small, additional
+  // layer on top of AdminRoute's real protection (App.jsx), never a
+  // substitute for it — the route itself blocks a non-admin regardless of
+  // whether this link is visible.
+  const { isAdmin } = useIsAdmin()
 
   const links = [
     { to: '/dashboard', label: 'Dashboard', icon: Home },
     { to: '/pots', label: 'Pots', icon: Users },
     { to: '/profile', label: 'Profile', icon: User },
-    { to: '/admin', label: 'Admin', icon: Settings },
+    ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
   ]
 
   return (

@@ -3979,3 +3979,101 @@ after). All test data (2 source pots, 2 rollover pots, 7 pot members, 1
 season, 1 league, 2 gameweeks, 5 game entries, 2 game_entry_lms rows, 6
 pot_standings_snapshots rows, 2 pot_prizes rows, 5 entry_payments rows)
 removed by exact ID, independently re-verified as zero residue.
+
+---
+
+## Launch Readiness Sprint 1A — Security & Authorisation
+
+**Decision, 2026-08-10**: close the two remaining launch-blocking security
+gaps identified during Phase 7's own frontend audit — `ISSUE-9` (`/admin`
+has no UI-level role gate) and `ISSUE-26` (`compute-deadlines`/
+`compute-scores`/`settle-gameweek`/`sync-fixtures` accept unauthenticated
+requests). Per the explicit brief, both findings were re-verified against
+current source before writing any fix, not assumed still accurate from
+their original discovery dates (2026-08-05/09) — both were confirmed still
+open, exactly as documented, no drift either direction.
+
+**ISSUE-26 fix — one shared helper, four call sites.**
+`_shared/adminOrCronAuth.ts` requires either an exact match against the
+function's own `SUPABASE_SERVICE_ROLE_KEY` (the real cron caller — verified
+live against the actual current `cron.job` table, not just the migration
+files that originally configured it, since the two had already drifted:
+an undocumented `lock-due-entries-every-minute` job exists, calling a
+plain SQL function directly, not an HTTP endpoint at all) or a signed-in
+user with `app_metadata.role === 'app_admin'` (the same claim
+`admin-actions/index.ts` already checks). This mirrors admin-actions' own
+already-proven shape rather than inventing a new one, and deliberately
+preserves `AdminDashboard.jsx`'s existing "Manual jobs" buttons (which
+call these same four functions with the signed-in user's own session
+token, not the service-role key) — the exact two-caller design the
+original `ISSUE-26` finding already called for, not guessed at fresh.
+`sync-live-events`'s cron job (`ISSUE-4`) was left alone — the Edge
+Function it targets still doesn't exist, unrelated to auth, out of this
+sprint's explicit "do not redesign the scheduler architecture" boundary.
+
+**ISSUE-9 fix — one route guard, admission defined by what the pages
+actually need.** `AdminRoute` (`App.jsx`) wraps `/admin`, `/admin/payments`,
+`/admin/rollovers` as a single nested route group. "Admin," for this
+guard's purposes, means `app_admin` OR pot-admin-of-at-least-one-pot
+(`useIsAdmin()`, `hooks/useAdmin.js`) — not `app_admin` alone. This was a
+deliberate choice, not the obvious one: `AdminPayments`/`AdminRollovers`
+are genuinely built for any pot organiser (each already scopes its own
+content to the caller's own pots via existing RLS — `usePotsForAdmin()`'s
+`pot_members` join, `useDraftRolloverPots()`'s created_by/pot_members OR),
+so gating the whole subtree to `app_admin` only would have blocked every
+real pot organiser from tools already meant for them. `AdminDashboard`'s
+own "Manual jobs" section — genuinely platform-wide, no per-pot scoping —
+is separately hidden for non-`app_admin`s specifically, matching what the
+backend now actually allows for those four functions, so a pot-only-admin
+never sees buttons that would just 401. The "Admin" nav link
+(`TopNav.jsx`/`BottomNav.jsx`) is now also conditionally shown — an
+additional, explicitly-labeled-as-insufficient-alone layer, per the brief's
+own "do not rely only on hiding navigation" instruction; the route guard is
+what actually blocks access, verified independently of whether the link is
+visible.
+
+**A real, if minor, live finding**: the live `cron.job` table has drifted
+from `supabase/migrations/003_cron_jobs.sql`/`006_fix_cron_job_headers.sql`
+— an `lock-due-entries-every-minute` job exists with no corresponding
+migration found, and `sync-live-events-every-2-min` is active and
+"succeeding" every 2 minutes despite calling a function that doesn't
+exist (`pg_net`'s async `http_post` marks the enqueue itself successful,
+not the downstream HTTP response — the exact distinction `/health`'s own
+skill guidance calls out). Neither is a security issue and neither was
+touched, both out of scope for "do not redesign the scheduler
+architecture" — flagged here since it was discovered while verifying this
+sprint's own fix against live state, not assumed away.
+
+**Verification performed**: full suite 336/336 unchanged (no existing test
+touched — these four functions have no dedicated `.test.ts` files, per
+this codebase's own established convention that dispatcher-driving Edge
+Functions rely on live verification rather than a fake-DB unit harness,
+same as `reinstate.ts`'s own precedent). `deno check` clean on every
+touched/new file, including confirming `sync-fixtures/index.ts`'s
+pre-existing 31 type errors (`ISSUE-38`) were unchanged by this fix — same
+count before and after, not newly introduced. `npm run build` clean.
+**Live-verified**: direct HTTP calls confirmed the anon key now gets `401`
+on all four functions (previously `200`) and the service-role key still
+succeeds (`sync-fixtures`'s `500` is a pre-existing, unrelated
+`competitionId` error, confirmed by its response body); the real,
+unmodified cron jobs kept succeeding every 1-3 minutes throughout,
+confirmed via `AdminDashboard.jsx`'s own live sync log. Real browser:
+anonymous → `/admin/payments` redirected to `/sign-in`; a signed-in user
+with zero admin relationships anywhere → "Not authorised," "Admin" nav
+link correctly absent; a real pot admin (no `app_admin` claim) → granted
+access, "Manual jobs" correctly hidden; the same user, given a temporary
+`app_admin` claim (reverted and independently re-confirmed afterward
+against `auth.users.raw_app_meta_data`) → "Manual jobs" visible and
+"Compute live scores" successfully triggered end-to-end through the real
+UI. No test data rows were created this pass (every backend check was a
+pure HTTP auth-boundary probe; the one live UI mutation — an extra
+`compute-scores` tick — is the exact same idempotent operation cron
+already performs every 3 minutes, not test pollution requiring cleanup);
+the one genuinely temporary change (`app_metadata.role`) was reverted and
+independently re-verified.
+
+**What this rules out**: no anonymous or non-admin caller can trigger
+settlement, scoring, deadline computation, or an external-API-billed
+fixture sync, directly or through the UI, going forward. No new product
+feature, no GameEngine change, no payment or rollover redesign — confirmed
+by the file list below touching only auth boundaries.

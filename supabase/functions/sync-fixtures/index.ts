@@ -1,6 +1,7 @@
 // supabase/functions/sync-fixtures/index.ts
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { isAuthorizedAdminOrCron } from '../_shared/adminOrCronAuth.ts'
 
 const API_BASE = 'https://v3.football.api-sports.io'
 const DEFAULT_COMPETITION_ID = 'WC'
@@ -100,6 +101,14 @@ function deriveGameweekName(roundName: string, fallbackNum: number) {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
+  }
+
+  // ISSUE-26 fix — see _shared/adminOrCronAuth.ts for the full reasoning.
+  // Doubly important here: this function also calls the external
+  // api-football service, so an unauthenticated caller could previously
+  // run up the external API bill in addition to mutating fixture data.
+  if (!(await isAuthorizedAdminOrCron(req))) {
+    return jsonResponse({ error: 'Unauthorized' }, 401)
   }
 
   const sb = createClient(

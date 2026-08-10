@@ -1,5 +1,6 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
+import { useIsAdmin } from './hooks/useAdmin'
 import AppShell from './components/layout/AppShell'
 import Landing from './pages/Landing'
 import SignIn from './pages/auth/SignIn'
@@ -14,6 +15,7 @@ import AdminPayments from './pages/AdminPayments'
 import AdminRollovers from './pages/AdminRollovers'
 import Profile from './pages/Profile'
 import NotFound from './pages/NotFound'
+import NotAuthorized from './pages/NotAuthorized'
 import ToastContainer from './components/ui/ToastContainer'
 import Spinner from './components/ui/Spinner'
 import PotManager from './components/pot/PotManager'
@@ -34,6 +36,35 @@ function ProtectedRoute({ children }) {
   if (!user) return <Navigate to="/sign-in" replace />
 
   return children
+}
+
+// Launch Readiness Sprint 1A — Security & Authorisation (2026-08-10,
+// resolves ISSUE-9). Every /admin/* route previously sat behind
+// ProtectedRoute alone (signed-in required) with no admin check at all —
+// any authenticated player could navigate straight to /admin/payments or
+// /admin/rollovers. This is frontend defense-in-depth only, never the
+// actual authorization boundary — every admin Edge Function and RLS
+// policy underneath still enforces its own check regardless of whether
+// this guard exists ("the backend remains the source of truth").
+// Re-checks !user even though this is always nested inside
+// ProtectedRoute today — cheap insurance against this guard someday being
+// used somewhere ProtectedRoute doesn't already wrap.
+function AdminRoute() {
+  const { user, loading: authLoading } = useAuth()
+  const { isAdmin, isLoading: adminLoading } = useIsAdmin()
+
+  if (authLoading || (!!user && adminLoading)) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-pitch-950">
+        <Spinner size="lg" />
+      </div>
+    )
+  }
+
+  if (!user) return <Navigate to="/sign-in" replace />
+  if (!isAdmin) return <NotAuthorized />
+
+  return <Outlet />
 }
 
 export default function App() {
@@ -61,9 +92,11 @@ export default function App() {
           <Route path="/pot/:potId" element={<PotDetail />} />
           <Route path="/pot/:potId/gameweek/:gameweekId" element={<GameweekPage />} />
           <Route path="/pot/:potId/picks" element={<PicksPage />} />
-          <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/admin/payments" element={<AdminPayments />} />
-          <Route path="/admin/rollovers" element={<AdminRollovers />} />
+          <Route element={<AdminRoute />}>
+            <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/admin/payments" element={<AdminPayments />} />
+            <Route path="/admin/rollovers" element={<AdminRollovers />} />
+          </Route>
           <Route path="/profile" element={<Profile />} />
         </Route>
 
