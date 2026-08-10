@@ -8,7 +8,8 @@
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
-import { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
+import { resolveNextSeasonLeague, resolveSeasonGameweekBounds } from '../season-resolution.ts'
+import { Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
 
 // GE-4.8: notifications.type is free text at the schema level — each mode
 // chooses and documents its own catalog rather than the DB enforcing one.
@@ -629,15 +630,24 @@ export class Pick5Engine implements GameEngine {
   // not a gameweekId, so it identifies "the most recently settled gameweek" from
   // pot_standings_snapshots itself — correct as long as it's only ever called
   // right after that gameweek's settle()/generateStandings() pair has run, which
-  // is the only way it's invoked (see settle()'s own comment on why this isn't
-  // wired in yet — Slice 7 doesn't call this method from anywhere; it exists
-  // standalone, ready for Slice 8 to wire in alongside awardPrize()).
+  // is the only way it's invoked.
   //
-  // Winners are every user at rank 1 for that gameweek — possibly more than one,
-  // by design, since Slice 6's tie-break rule is "ties share a rank," not a forced
-  // single winner. Splitting a prize among multiple winners is awardPrize()'s job.
+  // Product rule revision, 2026-08-09 (docs/decisions.md § Pick 5 jackpot and
+  // season rollover — approved "Design A"): a Pick 5 entry only wins with
+  // EXACTLY 5/5, never merely the best score of the week. Changed from
+  // `.eq('rank', 1)` to `.eq('score', PICK5_PICK_COUNT)` — the smallest
+  // possible change, since pot_standings_snapshots.score for a Pick 5
+  // gameweek row already IS picks_won (generateStandings() writes it
+  // directly from that value, unchanged by this revision). Rank and "5/5"
+  // are now genuinely different concepts: the leaderboard's rank 1 can be a
+  // 3/5 week with no winner at all — generateStandings()'s own ranking is
+  // deliberately left untouched, since "who did best this week" is still a
+  // meaningful thing to show even when nobody won the jackpot. Multiple
+  // simultaneous 5/5s remain legitimate joint winners, exactly as multiple
+  // rank-1 ties were before — splitting the prize among them is still
+  // awardPrize()'s job, unchanged.
   //
-  // Deliberately does not read pot_prizes at all — "who ranked first" and
+  // Deliberately does not read pot_prizes at all — "who hit 5/5" and
   // "is there a prize configured to award them" are different questions;
   // conflating them here would make this method's correctness depend on prize
   // configuration existing, which it doesn't yet (see session-log.md — no
@@ -653,7 +663,7 @@ export class Pick5Engine implements GameEngine {
       .select('user_id')
       .eq('pot_id', potId)
       .eq('gameweek_id', gameweekId)
-      .eq('rank', 1)
+      .eq('score', PICK5_PICK_COUNT)
 
     if (winnersError) {
       throw new Error(`Failed to look up winners: ${winnersError.message}`)
@@ -683,23 +693,202 @@ export class Pick5Engine implements GameEngine {
     return latestGameweek ? (latestGameweek as { gameweek_id: number }).gameweek_id : null
   }
 
+  // Product rule revision, 2026-08-09 (docs/decisions.md § Pick 5 jackpot
+  // and season rollover). Finds the most recent pot_prizes row for this pot
+  // that concluded before the given gameweek — the jackpot's own carry
+  // history. Naturally skips gaps (a gameweek with zero entries never gets
+  // a pot_prizes row at all — settle()'s own per-pot loop only ever
+  // processes pots with at least one entry that gameweek), since this
+  // looks for "the most recent EXISTING row before this one," not "the row
+  // for gameweekId - 1" specifically. Fetches every row and filters/finds
+  // in TypeScript rather than a server-side "less than" filter — the same
+  // "fetch, then compare in code" style already used elsewhere in this
+  // file (rankWithTies(), upsertStandingsGroup()), since this table's
+  // per-pot row count is always small (at most one per gameweek in a
+  // season).
+  private async getMostRecentPriorPrizeRow(
+    ctx: GameEngineContext,
+    potId: string,
+    currentGameweekId: number
+  ): Promise<{ gross_amount: number; admin_fee_amount: number; charity_fee_amount: number; rollover: boolean } | null> {
+    const { data: rows, error } = await ctx.supabase
+      .from('pot_prizes')
+      .select('gameweek_id, gross_amount, admin_fee_amount, charity_fee_amount, rollover')
+      .eq('pot_id', potId)
+      .eq('scope', 'gameweek')
+      .order('gameweek_id', { ascending: false })
+
+    if (error) {
+      throw new Error(`Failed to look up prior prize history: ${error.message}`)
+    }
+
+    type PriorRow = { gameweek_id: number; gross_amount: number; admin_fee_amount: number; charity_fee_amount: number; rollover: boolean }
+    const previous = ((rows ?? []) as PriorRow[]).find((r) => r.gameweek_id !== currentGameweekId)
+    return previous ?? null
+  }
+
+  // Whether gameweekId is the last (highest-numbered) gameweek in the pot's
+  // own league/season — the automatic trigger for rule 2's season-end
+  // rollover. Pick 5 deliberately never exposes end_gameweek_id as
+  // organiser-configurable (unlike LMS/Predictor — docs/decisions.md §
+  // Pick 5 jackpot and season rollover: "do not expose end_gameweek_id for
+  // Pick 5"); this method always recomputes the season's real final
+  // gameweek live rather than trusting any stored column, including on a
+  // rollover pot, whose own end_gameweek_id (corrections pass, 2026-08-10)
+  // is populated automatically for the organiser's information only, never
+  // read back by this method. Ordered by number, not
+  // gameweek_id — number is the actual authoritative season-week-index;
+  // id ordering (used elsewhere in this file, e.g.
+  // getMostRecentGameweekWithStandings()) only coincides with it as an
+  // implementation detail of how gameweeks happen to be inserted.
+  private async isFinalGameweekOfSeason(
+    ctx: GameEngineContext,
+    leagueId: number,
+    seasonId: number,
+    gameweekId: number
+  ): Promise<boolean> {
+    const { data: lastGameweek, error } = await ctx.supabase
+      .from('gameweeks')
+      .select('id')
+      .eq('league_id', leagueId)
+      .eq('season_id', seasonId)
+      .order('number', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (error) {
+      throw new Error(`Failed to look up the season's final gameweek: ${error.message}`)
+    }
+
+    return (lastGameweek as { id: number } | null)?.id === gameweekId
+  }
+
+  // Mirrors LmsEngine.createRolloverPot() as closely as GE-18's mode
+  // isolation allows (per the repo owner's explicit "reuse the LMS
+  // rollover lifecycle wherever practical... do not invent a second
+  // lifecycle" instruction) — private to this engine, not a shared/
+  // imported helper, same as every other mode-specific duplicate in this
+  // codebase. Same idempotency guard (an existing rollover_source_pot_id
+  // match short-circuits before creating a duplicate on retry), same
+  // "draft, never auto-activated" status — the organiser reviews and
+  // activates it later, identical to LMS's own lifecycle — same
+  // "(Rollover #N)" name derivation. `resolveNextSeasonLeague()` is shared
+  // with `LmsEngine` (`../season-resolution.ts`) — no mode-specific
+  // variation exists in "find next season's matching league," so GE-18's
+  // duplicate-small-logic convention doesn't apply here.
+  //
+  // Corrections pass, 2026-08-10 (docs/decisions.md § Pick 5 jackpot and
+  // season rollover): the rollover pot must be created with its
+  // `start_gameweek_id`/`end_gameweek_id` already resolved to the next
+  // season's first/final gameweek — never left null. This is unambiguous
+  // for Pick 5 specifically (rule 3: no organiser-configurable cutoff,
+  // always the whole season) in a way it is NOT for LMS (see
+  // `LmsEngine.createRolloverPot()`'s own comment for why LMS's
+  // `end_gameweek_id` is deliberately NOT resolved the same way).
+  // `end_gameweek_id` being populated here is informational only —
+  // `awardPrize()`/`isFinalGameweekOfSeason()` still always recompute the
+  // season's final gameweek live rather than trusting a stored column,
+  // unchanged by this correction.
+  private async createPick5RolloverPot(
+    ctx: GameEngineContext,
+    sourcePotId: string,
+    sourcePot: {
+      name: string
+      created_by: string
+      league_id: number
+      entry_fee: number
+      admin_fee_type: 'none' | 'fixed' | 'percentage'
+      admin_fee_amount: number | null
+      admin_fee_percentage: number | null
+      charity_fee_type: 'none' | 'fixed' | 'percentage'
+      charity_fee_amount: number | null
+      charity_fee_percentage: number | null
+      rollover_generation: number
+    },
+    carryOverAmount: number
+  ): Promise<void> {
+    const { data: existingRolloverPot, error: existingRolloverError } = await ctx.supabase
+      .from('pots')
+      .select('id')
+      .eq('rollover_source_pot_id', sourcePotId)
+      .maybeSingle()
+
+    if (existingRolloverError) {
+      throw new Error(`Failed to check for an existing rollover pot: ${existingRolloverError.message}`)
+    }
+    if (existingRolloverPot) {
+      return // a prior, since-failed awardPrize() attempt already created this — do not create a second one
+    }
+
+    const nextLeague = await resolveNextSeasonLeague(ctx, sourcePot.league_id)
+    if (!nextLeague) {
+      throw new Error(
+        `Cannot create a Pick 5 rollover pot for ${sourcePotId}: no next-season league found yet for league ${sourcePot.league_id}. ` +
+          `Retry once next season's league data has been synced.`
+      )
+    }
+
+    const bounds = await resolveSeasonGameweekBounds(ctx, nextLeague.id, nextLeague.season_id)
+    if (!bounds) {
+      throw new Error(
+        `Cannot create a Pick 5 rollover pot for ${sourcePotId}: next season's league ${nextLeague.id} has no gameweeks synced yet. ` +
+          `Retry once its fixture calendar has been synced.`
+      )
+    }
+
+    const baseName = sourcePot.name.replace(/\s*\(Rollover #\d+\)\s*$/, '')
+    const newGeneration = sourcePot.rollover_generation + 1
+    const newName = `${baseName} (Rollover #${newGeneration})`
+
+    const { error: potInsertError } = await ctx.supabase.from('pots').insert({
+      name: newName,
+      season_id: nextLeague.season_id,
+      league_id: nextLeague.id,
+      created_by: sourcePot.created_by,
+      game_type: 'pick5',
+      status: 'draft',
+      entry_fee: sourcePot.entry_fee,
+      admin_fee_type: sourcePot.admin_fee_type,
+      admin_fee_amount: sourcePot.admin_fee_amount,
+      admin_fee_percentage: sourcePot.admin_fee_percentage,
+      charity_fee_type: sourcePot.charity_fee_type,
+      charity_fee_amount: sourcePot.charity_fee_amount,
+      charity_fee_percentage: sourcePot.charity_fee_percentage,
+      rollover_source_pot_id: sourcePotId,
+      carry_over_amount: carryOverAmount,
+      rollover_generation: newGeneration,
+      start_gameweek_id: bounds.firstGameweekId,
+      end_gameweek_id: bounds.finalGameweekId,
+    })
+
+    if (potInsertError) {
+      throw new Error(`Failed to create Pick 5 rollover pot: ${potInsertError.message}`)
+    }
+  }
+
   // GE-6: "Split net prize pool equally." Money-critical — every branch here
   // was an explicit decision, not an inferred default (docs/decisions.md §
-  // Prize pool deductions):
+  // Prize pool deductions and, since 2026-08-09, § Pick 5 jackpot and season
+  // rollover — "Design A", approved by the repo owner):
   //   - pot_prizes row created lazily, here, at award time (not pre-created
   //     anywhere else — docs/decisions.md § pot_prizes row creation is lazy).
-  //   - gross = entry_fee x count(this instance's verified-paid, settled
+  //   - weekGross = entry_fee x count(this instance's verified-paid, settled
   //     entries) — read directly from settle()'s already-finalized state,
   //     never tracked separately, so settlement stays the single source of
-  //     truth.
-  //   - fees are the CALCULATED euro amounts for this instance, derived from
-  //     the pot's config at this moment — never the config itself (GE-4.1
-  //     vs GE-4.4).
-  //   - net = gross - adminFee - charityFee; only net is ever distributed,
-  //     never gross.
-  //   - zero eligible winners: fails loudly (Pick5NoEligibleWinnersError),
-  //     never silently skips or invents a default.
-  //   - fees exceeding gross (net would be negative): fails loudly
+  //     truth. This is only THIS gameweek's own fresh contribution — see
+  //     carryIn below for the accumulated jackpot.
+  //   - fees are the CALCULATED euro amounts for THIS gameweek's weekGross
+  //     only, derived from the pot's config at this moment — never the
+  //     config itself (GE-4.1 vs GE-4.4), and never re-applied to a
+  //     carried-forward balance (see the carryIn comment below for why).
+  //   - weekNet = weekGross - adminFee - charityFee.
+  //   - zero winners (nobody hit exactly 5/5): the normal, common case
+  //     now, not an error — the jackpot (weekNet + any carry-in) rolls
+  //     forward into the next gameweek, or into a new season's rollover
+  //     pot if this was the season's own final gameweek. Matches
+  //     LmsEngine/PredictorEngine's own "not concluded yet" philosophy,
+  //     not this method's own pre-2026-08-09 "should be impossible" one.
+  //   - fees exceeding weekGross (weekNet would be negative): fails loudly
   //     (Pick5PrizePoolExceededError) rather than clamping — the DB's own
   //     `net_amount >= 0` CHECK constraint is the backstop if this method's
   //     own pre-check is ever bypassed.
@@ -707,21 +896,19 @@ export class Pick5Engine implements GameEngine {
   //     leftover remainder (at most winnerCount - 1 cents) is never paid to
   //     anyone.
   //   - idempotent: a gameweek whose pot_prizes row is already `is_settled`
-  //     is left untouched and this method returns without re-awarding.
+  //     is left untouched and this method returns without re-processing.
   //
-  // Hardening sprint, 2026-08-06 (architecture review finding): the
-  // pot_prizes write is deliberately the LAST write in this method, not
-  // the first — mirrors the identical correction already applied to
-  // LmsEngine.awardPrize(). is_settled=true is the exact flag this
-  // method's own idempotency check, above, trusts as "this gameweek has
-  // already been awarded." Writing it only once every payout has already
-  // succeeded means a payout failing partway through (winner 2 of 3, say)
-  // leaves the gameweek safely retryable — a retry re-derives the same
-  // winners/amounts and simply re-applies the same payout_amount values
-  // (harmless; UPDATEs are naturally idempotent), rather than getting
-  // permanently stuck: with the old ordering, is_settled was already true
-  // by the time any payout could fail, so every future call would
-  // short-circuit before ever reaching the unpaid winner. See
+  // Hardening sprint, 2026-08-06 (architecture review finding, still
+  // honored here): the pot_prizes write is deliberately the LAST write in
+  // this method, in BOTH the winner and no-winner branches — mirrors the
+  // identical correction already applied to LmsEngine.awardPrize().
+  // is_settled=true is the exact flag this method's own idempotency check,
+  // above, trusts as "this gameweek has already been processed." Writing
+  // it only once every payout (or rollover-pot creation) has already
+  // succeeded means a partial failure leaves the gameweek safely
+  // retryable — a retry re-derives the identical winners/carryIn/amounts
+  // and simply re-applies them (harmless; every write here is naturally
+  // idempotent), rather than getting permanently stuck. See
   // docs/decisions.md § LMS prize awarding: transactionality correction
   // for the original investigation this reuses.
   async awardPrize(ctx: GameEngineContext, potId: string): Promise<void> {
@@ -745,13 +932,10 @@ export class Pick5Engine implements GameEngine {
     }
 
     const winners = await this.determineWinner(ctx, potId)
-    if (winners.length === 0) {
-      throw new Pick5NoEligibleWinnersError(potId, gameweekId)
-    }
 
     const { data: pot, error: potError } = await ctx.supabase
       .from('pots')
-      .select('entry_fee, admin_fee_type, admin_fee_amount, admin_fee_percentage, charity_fee_type, charity_fee_amount, charity_fee_percentage')
+      .select('name, created_by, league_id, season_id, entry_fee, admin_fee_type, admin_fee_amount, admin_fee_percentage, charity_fee_type, charity_fee_amount, charity_fee_percentage, carry_over_amount, rollover_generation')
       .eq('id', potId)
       .single()
 
@@ -770,7 +954,11 @@ export class Pick5Engine implements GameEngine {
       throw new Error(`Failed to count settled entries: ${settledEntriesError.message}`)
     }
 
-    type PotFeeConfig = {
+    type PotConfig = {
+      name: string
+      created_by: string
+      league_id: number
+      season_id: number
       entry_fee: number
       admin_fee_type: 'none' | 'fixed' | 'percentage'
       admin_fee_amount: number | null
@@ -778,47 +966,130 @@ export class Pick5Engine implements GameEngine {
       charity_fee_type: 'none' | 'fixed' | 'percentage'
       charity_fee_amount: number | null
       charity_fee_percentage: number | null
+      carry_over_amount: number
+      rollover_generation: number
     }
-    const potConfig = pot as PotFeeConfig
+    const potConfig = pot as PotConfig
 
-    const grossAmount = roundToCents(potConfig.entry_fee * (settledEntries?.length ?? 0))
-    const adminFeeAmount = calculateFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, grossAmount)
-    const charityFeeAmount = calculateFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, grossAmount)
-    const netAmount = roundToCents(grossAmount - adminFeeAmount - charityFeeAmount)
+    // Deliberately named "week*", not "gross"/"net" — these describe ONLY
+    // this gameweek's own fresh entry fees, never re-taxed against a
+    // carried-forward balance. This is a deliberate divergence from
+    // LmsEngine.awardPrize()'s own carry_over_amount handling (which folds
+    // its one-time carry-in into the SAME figure fees are calculated
+    // against, since an LMS rollover pot only ever concludes once): the
+    // approved Pick 5 design is explicit — "the full net jackpot
+    // carries... the next week's entry fees are added on top" — the carry
+    // is already net and stays that way. Reusing LMS's approach here would
+    // mean the same rolling balance gets fee-deducted again on every
+    // consecutive no-winner week, quietly eroding it, which the approved
+    // wording doesn't support.
+    const weekGross = roundToCents(potConfig.entry_fee * (settledEntries?.length ?? 0))
+    const weekAdminFee = calculateFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, weekGross)
+    const weekCharityFee = calculateFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, weekGross)
+    const weekNet = roundToCents(weekGross - weekAdminFee - weekCharityFee)
 
-    if (netAmount < 0) {
-      throw new Pick5PrizePoolExceededError(potId, gameweekId, grossAmount, adminFeeAmount, charityFeeAmount)
+    if (weekNet < 0) {
+      throw new Pick5PrizePoolExceededError(potId, gameweekId, weekGross, weekAdminFee, weekCharityFee)
     }
 
-    const perWinnerAmount = floorToCents(netAmount / winners.length)
+    // carryIn: the immediately preceding gameweek's unclaimed net_amount
+    // (0 if that gameweek had a winner, or none exists), OR — only for
+    // this pot's very first-ever settled gameweek, when no prior
+    // pot_prizes row exists at all — pots.carry_over_amount, the one-time
+    // balance a rollover pot was created with (mirrors
+    // LmsEngine.awardPrize()'s own "added once, at the start" reading of
+    // that column). Every later gameweek finds a real prior row and never
+    // re-reads carry_over_amount again.
+    const priorRow = await this.getMostRecentPriorPrizeRow(ctx, potId, gameweekId)
+    const carryIn = priorRow
+      ? priorRow.rollover
+        ? roundToCents(priorRow.gross_amount - priorRow.admin_fee_amount - priorRow.charity_fee_amount)
+        : 0
+      : potConfig.carry_over_amount
 
-    for (const userId of winners) {
-      const { error: payoutError } = await ctx.supabase
-        .from('game_entries')
-        .update({ payout_amount: perWinnerAmount })
-        .eq('pot_id', potId)
-        .eq('gameweek_id', gameweekId)
-        .eq('user_id', userId)
+    const totalAvailable = roundToCents(carryIn + weekNet)
+    // Stores the FULL pool this gameweek's decision was made against
+    // (carry-in + this week's fresh gross), not just the fresh portion —
+    // so that net_amount (the generated gross - admin_fee - charity_fee
+    // column) equals totalAvailable exactly, with no separate
+    // carry-tracking column needed anywhere. admin/charity fee amounts
+    // stored below are still only ever this week's own calculated values.
+    const prizeGrossAmount = roundToCents(carryIn + weekGross)
 
-      if (payoutError) {
-        throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+    if (winners.length === 0) {
+      // No 5/5 this week — the normal, common case now. The jackpot
+      // carries forward: this row is marked rollover=true (the same
+      // column/meaning 013_lms_wipeout_and_rollover.sql already
+      // established for LMS's own wipeout-with-no-winner case) so the
+      // NEXT gameweek's own awardPrize() call finds it and adds its
+      // net_amount back in as carryIn, above.
+      const isFinal = await this.isFinalGameweekOfSeason(ctx, potConfig.league_id, potConfig.season_id, gameweekId)
+
+      if (isFinal) {
+        // Rule 2: the season ends with nobody at 5/5 — automatically
+        // create next season's rollover pot (draft, never auto-activated;
+        // the organiser reviews and activates it later, identical to
+        // LMS's own lifecycle — "do not invent a second lifecycle").
+        // Runs BEFORE the trailing pot_prizes write below, same
+        // write-ordering discipline as the payout loop in the winner
+        // branch: a retry after a failure here re-derives the identical
+        // winners/carryIn/isFinal, and createPick5RolloverPot()'s own
+        // idempotency guard (checked by rollover_source_pot_id) prevents
+        // a duplicate pot either way.
+        await this.createPick5RolloverPot(
+          ctx,
+          potId,
+          {
+            name: potConfig.name,
+            created_by: potConfig.created_by,
+            league_id: potConfig.league_id,
+            entry_fee: potConfig.entry_fee,
+            admin_fee_type: potConfig.admin_fee_type,
+            admin_fee_amount: potConfig.admin_fee_amount,
+            admin_fee_percentage: potConfig.admin_fee_percentage,
+            charity_fee_type: potConfig.charity_fee_type,
+            charity_fee_amount: potConfig.charity_fee_amount,
+            charity_fee_percentage: potConfig.charity_fee_percentage,
+            rollover_generation: potConfig.rollover_generation,
+          },
+          totalAvailable
+        )
       }
     }
 
-    // Written LAST, deliberately — see this method's own comment above for
-    // why. is_settled=true here is what makes every future call treat this
-    // gameweek as concluded, so nothing above this line may be allowed to
-    // run again "for free" after it — the payout loop above is a naturally
-    // idempotent UPDATE, safe to repeat on a retry.
+    const perWinnerAmount = winners.length > 0 ? floorToCents(totalAvailable / winners.length) : 0
+
+    if (winners.length > 0) {
+      // Award the ENTIRE accumulated jackpot (this week's fresh net plus
+      // every prior unclaimed week's carry), then reset — the next
+      // gameweek's own carryIn lookup will find this row's rollover=false
+      // (the default, set explicitly below) and correctly start fresh.
+      for (const userId of winners) {
+        const { error: payoutError } = await ctx.supabase
+          .from('game_entries')
+          .update({ payout_amount: perWinnerAmount })
+          .eq('pot_id', potId)
+          .eq('gameweek_id', gameweekId)
+          .eq('user_id', userId)
+
+        if (payoutError) {
+          throw new Error(`Failed to write payout for user ${userId}: ${payoutError.message}`)
+        }
+      }
+    }
+
+    // Written LAST, deliberately, in both branches — see this method's own
+    // comment above for why.
     const prizeRow = {
       pot_id: potId,
       scope: 'gameweek' as const,
       gameweek_id: gameweekId,
-      gross_amount: grossAmount,
-      admin_fee_amount: adminFeeAmount,
-      charity_fee_amount: charityFeeAmount,
+      gross_amount: prizeGrossAmount,
+      admin_fee_amount: weekAdminFee,
+      charity_fee_amount: weekCharityFee,
       is_settled: true,
       settled_at: ctx.now().toISOString(),
+      rollover: winners.length === 0,
     }
 
     // Two-step get-or-create-then-write by real PK, same pattern established
@@ -835,7 +1106,7 @@ export class Pick5Engine implements GameEngine {
     // transient database/network failure the same way. Now throws a
     // generic Error for a write failure, matching LmsEngine.awardPrize()'s
     // own pattern — Pick5PrizePoolExceededError is reserved for its one
-    // actual meaning: the netAmount < 0 pre-check above.
+    // actual meaning: the weekNet < 0 pre-check above.
     if (existingPrize) {
       const { error: updateError } = await ctx.supabase
         .from('pot_prizes')
@@ -853,6 +1124,10 @@ export class Pick5Engine implements GameEngine {
       }
     }
 
+    if (winners.length === 0) {
+      return
+    }
+
     // GE-8.7/decisions.md § Notifications: called after the trailing
     // pot_prizes write above, not from inside the payout loop the way this
     // method used to (hardening sprint, 2026-08-06 — moved for the same
@@ -867,7 +1142,10 @@ export class Pick5Engine implements GameEngine {
     // itself still throws on error (like every other GameEngine method) —
     // the try/catch boundary belongs here, at the one call site that knows
     // this specific write is allowed to fail silently, not inside
-    // notifyUsers() itself.
+    // notifyUsers() itself. No no-winner notification event exists — like
+    // LMS's own rollover, considered and deliberately not built
+    // speculatively (docs/decisions.md § Pick 5 jackpot and season
+    // rollover); a future addition if actually asked for.
     for (const userId of winners) {
       try {
         await this.notifyUsers(ctx, {

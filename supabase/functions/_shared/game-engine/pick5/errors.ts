@@ -9,18 +9,16 @@ export class Pick5ValidationError extends Error {
   }
 }
 
-// Thrown by Pick5Engine.awardPrize() when a gameweek has settled entries but
-// zero rank-1 winners (should be structurally impossible if any entry
-// settled — generateStandings() always ranks at least one user when it has
-// input — but this is money: fail loudly and specifically rather than
-// silently skip, per the repo owner's explicit "do not invent behaviour"
-// instruction, docs/decisions.md § Prize pool deductions.
-export class Pick5NoEligibleWinnersError extends Error {
-  constructor(potId: string, gameweekId: number) {
-    super(`No eligible winners found for pot ${potId}, gameweek ${gameweekId} — cannot award a prize. This needs a product decision, not an invented default.`)
-    this.name = 'Pick5NoEligibleWinnersError'
-  }
-}
+// Pick5NoEligibleWinnersError removed, 2026-08-09 (product rule revision —
+// docs/decisions.md § Pick 5 jackpot and season rollover). It used to be
+// thrown whenever a gameweek had settled entries but zero rank-1 winners,
+// on the reasoning that this "should be structurally impossible." Under
+// the new win condition (exactly 5/5, not merely rank 1), zero winners is
+// the normal, overwhelmingly common weekly outcome — awardPrize() now
+// treats it as a silent no-op (the jackpot carries forward), the same
+// philosophy LmsEngine/PredictorEngine already use for their own
+// "not concluded yet" cases. Not repurposed for anything else; deleted
+// outright rather than left unused.
 
 // Thrown by Pick5Engine.awardPrize() when the pot's configured fees would
 // exceed the gross prize pool (net_amount would go negative). The

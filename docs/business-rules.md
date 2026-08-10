@@ -1,6 +1,6 @@
 # Business Rules
 
-Last reviewed: 2026-08-05.
+Last reviewed: 2026-08-10.
 
 This document describes **what the game's rules are**, in plain language, for anyone
 who needs to reason about the product without reading code — a support conversation,
@@ -88,6 +88,53 @@ automatically from how many picks share a `(entry_id, player_id)` pair (see
 `compute-scores` compares goal counts against thresholds
 ([api.md § compute-scores](./api.md#post-functionsv1compute-scores)).
 
+## Pick 5 jackpot and prizes
+
+**Decided 2026-08-09** — see
+[decisions.md § Pick 5 jackpot and season rollover](./decisions.md#pick-5-jackpot-and-season-rollover)
+for the full review and approved design. This replaces Pick 5's original rule, under
+which the gameweek's rank-1 leaderboard position(s) won that week's prize outright,
+however low the score.
+
+**A gameweek only has a winner if a member scores 5/5** — all five picks won, not
+merely the best score of the week. The gameweek leaderboard (rank by `picks_won`) is
+still computed and displayed every week regardless — rank and "winning the jackpot"
+are now two separate concepts. Every member who hits 5/5 in the same gameweek is a
+winner and splits the jackpot equally (floored to the cent; any unallocated remainder
+from an uneven split is paid to no one, same rounding rule as every other prize split
+in this app).
+
+**The jackpot accumulates until someone hits 5/5**:
+
+- Each gameweek's prize pool starts with that gameweek's own entry fees.
+- If nobody scores 5/5, nobody wins. The full **net** prize (after admin/charity fees)
+  carries into the following gameweek, on top of that gameweek's own fresh entry fees.
+  Fees are applied only to each gameweek's own fresh entry-fee gross — never
+  re-applied to money already carried forward, so a long accumulation is never taxed
+  more than once. This repeats for as many consecutive gameweeks as nobody hits 5/5.
+- Once someone (or several people, simultaneously) hits 5/5, the entire accumulated
+  jackpot is awarded and split among that gameweek's winners, and the jackpot resets —
+  the following gameweek starts again using only its own entry fees.
+
+**Pick 5 always ends on the final gameweek of the selected league season** — there is
+no organiser-configurable end gameweek for Pick 5 (unlike LMS/Score Predictor, which
+do have one). The final gameweek is determined automatically from the pot's league and
+season.
+
+**If nobody hits 5/5 before the season's final Pick 5 gameweek**, the accumulated
+jackpot automatically rolls into a new pot for the following season, in the same
+league. The new pot is created immediately, in **draft** status — it is never
+auto-activated. An organiser must review its settings and explicitly activate it
+before it can be joined or played, same as manually creating any other pot. This
+reuses the Last Man Standing rollover lifecycle (one pot, one draft state, one
+organiser-activation step) rather than inventing a second one. **Corrected
+2026-08-10**: the rollover pot's start and final gameweek are resolved and set
+automatically at creation time (the next season's first and last gameweek
+respectively) — never left blank for the organiser to fill in. Last Man Standing's
+own rollover pot does not do this (see [§ Last Man Standing](#last-man-standing) —
+its end gameweek is an arbitrary organiser cutoff, not necessarily a season's last
+gameweek, so there's no equivalent automatic value to resolve).
+
 ## How ties are resolved
 
 **Not currently defined.** `settle-gameweek` ranks pot members by `picks_won`
@@ -166,6 +213,41 @@ prize for Pick 5, or the whole competition's prize for LMS/Predictor) —
 money that's already been distributed is never clawed back or re-split.
 Applies to all three modes, including Pick 5. Full reasoning:
 [decisions.md § Late Payment Override](./decisions.md#late-payment-override).
+
+**Record payment received (Pick 5), decided 2026-08-09, corrected 2026-08-10.**
+There is no payment gateway and no in-app payment of any kind — a player never pays
+through the application and never marks their own entry paid. The organiser
+collects money entirely off-platform (cash, bank transfer, Revolut, PayPal, etc.);
+the application only **records** a payment that has already been received. Two
+admin actions exist, and only two:
+
+- **Mark paid for this week** — a quick, one-click action against a single member
+  and a single already-selected gameweek (unchanged from the original Payment
+  Verification design above).
+- **Record payment received** — the organiser enters a member and an amount
+  received, nothing else. The amount **must be an exact multiple of the pot's
+  weekly entry fee** (entry fee €5: €5, €10, €20, €35 are valid; €17, €22 are
+  rejected with a clear error explaining the multiple-of-the-entry-fee rule and
+  suggesting the nearest valid amounts). The number of weeks is the amount divided
+  by the entry fee — the organiser never calculates or enters a week count, and
+  never ticks individual weeks. The app shows a preview ("£25 received. This will
+  mark 5 future Pick 5 weeks as paid.") before anything is written; confirming
+  materializes that many ordinary `entry_payments` rows, marked paid, allocated to
+  the member's next **unpaid** eligible upcoming Pick 5 gameweeks — a gameweek
+  already marked paid (by a prior individual mark-paid, or an earlier payment
+  record) is skipped, so the payment extends coverage by that many genuinely new
+  weeks rather than wasting allocation re-confirming a week already covered. If the
+  season doesn't have that many eligible unpaid gameweeks left, whatever number does
+  exist is materialized — the remainder is not carried anywhere or refunded.
+
+This introduces **no balance, wallet, credit, or stored-value concept of any
+kind** — recording a payment is nothing more than several ordinary weekly payment
+records created in one action, and each of those weeks still shows and behaves
+exactly like any other verified weekly payment (including remaining eligible for
+the Late Payment Override reinstatement flow described below, if it's ever voided
+and later needs correcting). A player's own view is read-only: paid/unpaid status
+only — a player can never mark themselves paid, edit payment status, or enter a
+payment amount anywhere in the app.
 
 **Implemented, 2026-08-05**: a pot admin (or app admin) can now actually verify
 payments, both ways, through `/admin/payments` — `pages/AdminPayments.jsx`. Single
@@ -296,7 +378,14 @@ exactly one survivor over several gameweeks).
   carry-over amount is added on top of collected entry fees to form the new
   prize pool, it is never a substitute for anyone paying in. Example: a
   finished pot rolls over €300; the new pot collects €220 in entry fees;
-  that new pot's prize pool is €520. The new pot gets a sensible default
+  that new pot's prize pool is €520 — and any admin/charity fee configured
+  on the new pot is calculated against the €220 in fresh entry fees only,
+  never against the carried-over €300 (**corrected 2026-08-10** — the new
+  pot's fees used to be calculated against the full €520, silently taxing
+  the same €300 a second time on top of whatever it was already taxed when
+  it first rolled over; see
+  [decisions.md § Pick 5 jackpot and season rollover — corrections](./decisions.md#pick-5-jackpot-and-season-rollover--corrections)).
+  The new pot gets a sensible default
   name derived from the old one — e.g. "Premier League LMS" becomes
   "Premier League LMS (Rollover #1)"; rolling that pot over again becomes
   "Premier League LMS (Rollover #2)", never a stacked "(Rollover #1)
@@ -320,15 +409,23 @@ eliminated that gameweek — they simply ran out of season to play).
 
 **Late entry.** Joining an LMS pot after it has started is **not allowed**,
 with one exception: a **rollover pot** — one the Game Engine created
-automatically after a Roll Prize wipeout, above. While that pot is still in
+automatically after a Roll Prize wipeout, above. The rollover pot's league
+and season are resolved automatically to the **following season's**
+matching league (**bug fixed 2026-08-10** — this previously silently
+stayed in the source pot's own season/league despite this document already
+describing "the following season's first gameweek" as an option; see
+[decisions.md § Pick 5 jackpot and season rollover — corrections](./decisions.md#pick-5-jackpot-and-season-rollover--corrections)
+for the finding and fix). While that pot is still in
 its draft (pre-launch) phase, the organiser may rename it (the
 auto-generated default is just a starting point), invite players, verify
-their payments, and choose the competition's starting gameweek — the next
-gameweek, any future gameweek, or even the following season's first
-gameweek, so a nearly-finished season doesn't force an awkward immediate
-restart. Nothing starts automatically — the organiser must explicitly
-activate the pot once ready. Anyone may join during this draft phase. **Once
-the organiser
+their payments, and choose the competition's starting **and** final
+gameweek — both are left unset by the automatic rollover, unlike Pick 5's
+own rollover pot (whose season always runs start-to-finish with no
+organiser-configurable cutoff, so both can be resolved automatically; LMS's
+end gameweek is an arbitrary organiser choice within a season, so there's
+no equivalent value to auto-resolve). Nothing starts automatically — the
+organiser must explicitly activate the pot once ready. Anyone may join
+during this draft phase. **Once the organiser
 opens (activates) the pot, normal LMS entry rules apply — no further
 joining, ever, same as any other pot.** There is no cumulative billing and
 no catch-up payment at any point: everyone entering a rollover competition,

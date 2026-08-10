@@ -1,6 +1,6 @@
 # Decisions
 
-Last reviewed: 2026-08-03. This project has no prior ADRs, design docs, or commit
+Last reviewed: 2026-08-10. This project has no prior ADRs, design docs, or commit
 history to draw explicit rationale from (see
 [current-state.md ISSUE-5](./current-state.md#issue-5--repository-has-no-git-history-secrets-arent-excluded-from-version-control)).
 The entries below are **decisions inferred from the code as it exists**, framed as
@@ -3499,3 +3499,362 @@ competitions" needed no new code at all — `Dashboard.jsx`'s existing
 `usePots()` already lists every pot a user is a member of. All test data
 (1 pot, 2 users) removed by exact ID, independently re-verified as zero
 residue.
+
+---
+
+## Pick 5 jackpot and season rollover
+
+**Decision, 2026-08-09** (repo owner decision, following a design-review-only
+session covering five candidate product rules — Pick 5's original "rank 1 wins
+that week's prize" rule, whatever the winning score, is replaced outright):
+
+- **Jackpot behaviour ("Design A")**: a Pick 5 gameweek only has a winner if a
+  member scores exactly 5/5 — rank 1 alone no longer wins anything. Each
+  gameweek's prize pool starts with that gameweek's own entry fees. If nobody
+  hits 5/5, nobody is paid; the full **net** prize (after fees) carries into
+  the following gameweek, on top of that gameweek's own fresh entry fees, and
+  this repeats for as many consecutive no-winner gameweeks as it takes. Once
+  someone (or several people simultaneously) hits 5/5, the entire accumulated
+  jackpot is awarded and split, and the jackpot resets to zero — the next
+  gameweek starts fresh with only its own entry fees.
+- **Season rollover**: if the season ends with nobody having hit 5/5, the
+  accumulated jackpot automatically rolls into a new pot for the following
+  season, in the same league. The new pot is created immediately in `draft`
+  status and never auto-activated — an organiser must review and activate it,
+  same as any manually-created pot. Explicitly reuses the LMS rollover
+  lifecycle (one pot, one draft state, one organiser-activation step) rather
+  than inventing a second one.
+- **End of season**: Pick 5 gets no organiser-configurable `end_gameweek_id`
+  (unlike LMS/Score Predictor, which keep theirs unchanged). Pick 5 always
+  ends on the final gameweek of the pot's own league/season, determined
+  automatically.
+- **Payments**: no balances, wallets, credit accounts, or stored value of any
+  kind — reaffirms
+  [§ Payment Verification, not payment processing](#payment-verification-not-payment-processing)
+  rather than reopening it. A prepayment (e.g. entry fee €5, player hands
+  over €50) is materialized immediately as N ordinary `entry_payments` rows
+  for the next N upcoming gameweeks, N = floor(amount / entry_fee) — still an
+  admin attestation, still no payment gateway, nothing new stored anywhere.
+
+**Schema change — the smallest one available**: migration
+`023_pick5_jackpot_rollover.sql` drops
+`pots_rollover_source_lms_only` (added by `013_lms_wipeout_and_rollover.sql`,
+which hard-restricted `rollover_source_pot_id` to
+`game_type = 'last_man_standing'`) and replaces it with
+`pots_rollover_source_lms_or_pick5_only`, widening the same check to also
+allow `'pick5'`. No new columns, no new tables. `pot_prizes.rollover`
+(already existed) is reused unchanged for Pick 5's weekly no-winner case;
+`pot_prizes.gross_amount` (already a plain numeric, `net_amount` already a
+generated column) is simply computed as `carryIn + weekGross` instead of
+`weekGross` alone, so a whole gameweek's worth of carry-forward state needs
+zero new storage. The `rollover_source_pot_id`/`carry_over_amount`/
+`rollover_generation` columns' existing service-role-only INSERT-privilege
+restriction (also from `013_lms_wipeout_and_rollover.sql`) was never
+mode-scoped in the first place, so it already covered Pick 5 automatically
+once the CHECK constraint was widened — confirmed live (see Verification
+below), not assumed.
+
+**Implementation, `Pick5Engine` (`supabase/functions/_shared/game-engine/pick5/`)**:
+
+- `determineWinner()` — the entire behavioural change reduces to a one-line
+  filter swap: `.eq('rank', 1)` became `.eq('score', PICK5_PICK_COUNT)`.
+  `pot_standings_snapshots.score` for a Pick 5 gameweek row already equals
+  `picks_won` exactly (written unchanged by `generateStandings()`, which is
+  untouched by this revision — the rank-1 leaderboard is still computed and
+  displayed every week regardless of who, if anyone, wins the jackpot; rank
+  and "won the jackpot" are now decoupled concepts on purpose).
+- `Pick5NoEligibleWinnersError` was deleted outright, not just stopped being
+  thrown. Under the old rule, zero winners was a structural impossibility
+  (someone is always rank 1) and its occurrence meant a real bug — worth
+  failing loudly for. Under the new rule, zero winners is the ordinary,
+  overwhelmingly common weekly outcome (most weeks nobody hits 5/5) —
+  `awardPrize()` now treats it as a silent no-op that writes a
+  `pot_prizes` row with `rollover: true` and no payouts, the same
+  "in-progress is normal, not an error" philosophy `LmsEngine.awardPrize()`
+  and `PredictorEngine.awardPrize()` already used for their own "not
+  concluded yet" cases (both engines' own comments referencing the old
+  Pick 5 error were updated to note the three engines now share this
+  philosophy).
+- Four new private methods: `getMostRecentPriorPrizeRow()` (finds the prior
+  gameweek's `pot_prizes` row to determine `carryIn`, fetching all rows for
+  the pot ordered by `gameweek_id` descending and filtering in TypeScript —
+  the established convention in this codebase for "less than" comparisons,
+  since the fake-DB test harness has no `lt`/`gt` primitive);
+  `isFinalGameweekOfSeason()` (the pot's league/season's highest-`number`
+  gameweek, compared by id); `resolveNextSeasonLeague()` (see below);
+  `createPick5RolloverPot()` (idempotent via a
+  `rollover_source_pot_id` existence check, same `"(Rollover #N)"`
+  name-derivation regex as `LmsEngine.createRolloverPot()`, `status: 'draft'`,
+  never sets `start_gameweek_id`/`end_gameweek_id`).
+
+**Deliberate divergence from `LmsEngine.awardPrize()`'s own carry-over
+handling**: LMS re-taxes its `carry_over_amount` — it adds the carried
+amount to the fresh gross *before* computing fees, so admin/charity fees are
+computed against the combined total. Pick 5 does not: fees are computed only
+against each gameweek's own fresh entry-fee gross, and the (already-net)
+carried-in balance is added afterward, untaxed. This is a deliberate choice,
+not an oversight — LMS's carry-over is a one-time, terminal event (a rollover
+pot concludes once), so re-taxing it happens at most once. Pick 5's jackpot
+can compound across many consecutive no-winner gameweeks; taxing the same
+money again on every one of those weeks would silently erode the pot below
+what "the full net jackpot carries" (the approved rule's own wording)
+promises. Verified live across three consecutive gameweeks with a 10% fixed
+admin fee (see below) — the fee was charged once, on each week's own fresh
+gross only, never on the accumulated carry.
+
+**Gap discovered, not fixed**: `LmsEngine.createRolloverPot()` does not
+actually resolve "next season" — it copies `season_id`/`league_id` unchanged
+from the source pot, despite `business-rules.md`'s own description of LMS
+rollover implying a following-season pot. This means LMS's existing rollover
+has never actually supported crossing a season boundary. Pick 5 could not
+reuse this method as-is (its own product rule explicitly requires rolling
+into next season), so a genuinely new `resolveNextSeasonLeague()` helper was
+written for Pick 5 only — it resolves the source league's `name`/`country`,
+finds the season with the smallest `year_start` strictly greater than the
+source season's, and looks up the league row matching `(name, country,
+next_season_id)`, returning `null` (causing `createPick5RolloverPot()` to
+throw a retry-friendly error) if any step finds nothing. The pre-existing LMS
+gap itself was deliberately left alone — out of scope for this revision, not
+rediscovered by it; flagged here so it isn't lost. See
+[current-state.md](./current-state.md) for whether an `ISSUE-N` has been
+opened for it.
+
+**Prepayment implementation**: a new `admin-actions` action, `prepay_weeks`
+(`supabase/functions/admin-actions/prepay.ts`), reuses `index.ts`'s own
+`upsertEntryPayment()` get-or-create-by-id helper (now exported) rather than
+a bulk insert — each of the N target gameweeks is written the same way a
+single `mark_paid` call would write it. The target gameweek set (the pot's
+league/season's `status = 'upcoming'` gameweeks, ordered by `number`
+ascending, first N) is a deterministic function of the pot's own schedule and
+the amount paid, not of which rows already exist — so a retry (the same lump
+sum submitted twice) safely re-affirms the identical N rows rather than
+computing a different, shifted set. No new authorization logic: `prepay_weeks`
+is pot-scoped, so it flows through `index.ts`'s existing top-level
+pot-admin-or-app-admin gate, same as `mark_paid`/`mark_unpaid`/
+`reinstate_entry`.
+
+**Verification performed**:
+
+- **Unit**: 74 tests in `pick5/engine.test.ts` (up from the pre-revision
+  count), covering: exact-5/5 winner determination and its "rank 1 but not
+  5/5" negative case; fee math (fixed/percentage, admin/charity, combined);
+  even and uneven multi-winner splits; the new no-winner/rollover-marking
+  path; idempotency for both the winner and no-winner paths; jackpot
+  accumulation across one, two, and three consecutive no-winner gameweeks;
+  jackpot reset the gameweek immediately after a win; fees applying only to
+  fresh gross, never the carry; automatic draft rollover-pot creation on a
+  season's true final gameweek and its absence on a mid-season no-winner
+  week; rollover-pot-creation idempotency after a simulated partial-failure
+  retry; a freshly-rolled-over pot correctly picking up its own
+  `carry_over_amount` as `carryIn` on its first gameweek; the pre-existing
+  partial-write retry-safety and `notifyUsers()` wiring tests, updated for
+  the new win condition. Full repo suite: 322 tests, 0 failures
+  (`deno test supabase/functions/`). `deno check` clean on every touched
+  file and the whole `game-engine/` tree (a pre-existing, unrelated 31-error
+  failure in `sync-fixtures/index.ts` was confirmed present on unmodified
+  `main` via `git stash` before and after this work — not introduced by it,
+  not fixed by it, out of scope).
+- **Live** (local Supabase, real Postgres, real service-role client, real
+  HTTP through Kong — not the fake-DB unit harness): a dedicated, isolated
+  test pot (`entry_fee: 10`, no fees) plus a dedicated new season/league
+  (so `resolveNextSeasonLeague()` had a real target to resolve) were created
+  for this verification only. Two consecutive no-winner gameweeks confirmed
+  accumulation (`gross_amount` 20 → 40); a third gameweek with two
+  simultaneous 5/5 winners confirmed an even split (30/30) and jackpot reset
+  (`rollover: false`); a fourth gameweek — the season's real final
+  gameweek, seeded as another no-winner week — confirmed automatic rollover
+  pot creation: `status: 'draft'`, `league_id`/`season_id` resolved to the
+  newly-created next season and league, `carry_over_amount` matching the
+  unclaimed net exactly, `start_gameweek_id`/`end_gameweek_id` both left
+  null. Re-running `awardPrize()` against the same already-settled gameweek
+  confirmed idempotency (`pot_prizes` count and rollover-pot count both
+  unchanged). `prepay_weeks` was called over real HTTP with a real signed-in
+  admin session (€30 against a €10 entry fee): materialized exactly 3
+  `entry_payments` rows for the next 3 upcoming gameweeks; a second identical
+  call confirmed idempotency (still exactly 3 rows, same gameweek ids). The
+  pre-existing `mark_paid` action was smoke-tested over the same real HTTP
+  path against the same pot to confirm the new import/switch-case addition
+  in `admin-actions/index.ts` didn't regress it. All test data (1 pot, 1
+  rollover pot, 2 pot members, 1 season, 1 league, 8 game entries, 8
+  standings snapshots, 4 prize rows, 4 payment rows) removed by exact ID
+  after verification; zero residue independently re-confirmed by re-querying
+  every touched table by the same exact ids afterward. `npm run build`
+  (frontend) succeeded cleanly with the new `AdminPayments.jsx` "Prepay
+  multiple weeks" section and `usePrepayWeeks()` hook included.
+
+**What this rules out**: an organiser can no longer configure a Pick 5 pot's
+end gameweek — any UI or API surface that previously allowed setting Pick 5's
+`end_gameweek_id` must not (LMS/Score Predictor are unaffected). A gameweek's
+displayed rank-1 leaderboard position no longer implies that member won
+anything financially that week — any UI copy implying "leaderboard winner"
+for Pick 5 should be checked against this if it hasn't already been updated
+alongside this change.
+
+---
+
+## Pick 5 jackpot and season rollover — corrections
+
+**Decision, 2026-08-10** — a pre-commit review of the slice above, against
+the same repo owner's confirmed product rules, found four genuine
+corrections needed before this work could ship. All four are implemented,
+unit-tested, and live-verified; the original entry above is left
+unmodified as the historical record of what was first implemented — this
+entry records what was found and changed.
+
+**1. The Pick 5 rollover pot must not leave `start_gameweek_id`/
+`end_gameweek_id` null.** The original implementation left both unset,
+reasoning that Pick 5 never stores an organiser-configurable end gameweek
+at all (rule 3). That reasoning conflated two different things: rule 3 is
+about not exposing end_gameweek_id as *organiser-configurable* for an
+*active* pot — it says nothing about a *draft rollover pot* being
+incomplete. Since Pick 5's season always runs start-to-finish with no
+organiser cutoff, "first gameweek" and "final gameweek" of the resolved
+next season are unambiguous, so there is no reason not to resolve and
+store them automatically. `createPick5RolloverPot()` now calls a new
+`resolveSeasonGameweekBounds()` helper (`../season-resolution.ts`) and
+sets both. This is purely informational for the organiser reviewing the
+draft pot — `awardPrize()`/`isFinalGameweekOfSeason()` still always
+recompute the season's real final gameweek live rather than trusting the
+stored column, unchanged.
+
+**2. A genuine LMS bug, not a pre-existing gap to leave alone.** The
+original entry above flagged, but explicitly did not fix, that
+`LmsEngine.createRolloverPot()` copies `season_id`/`league_id` unchanged
+from the source pot — despite `business-rules.md` already describing LMS
+rollover as an organiser choosing "the following season's first gameweek."
+Reviewed again as explicitly requested this pass: confirmed as a genuine
+bug (the documented behavior was never implemented), not a deliberate
+design choice, and fixed. `resolveNextSeasonLeague()` — the exact same
+season/league-matching logic Pick 5's rollover already needed — was
+extracted from `pick5/engine.ts` into a new shared module,
+`_shared/game-engine/season-resolution.ts`, and both `LmsEngine` and
+`Pick5Engine` now import it. This is a deliberate exception to GE-18's
+"duplicate small logic, never cross-import between mode engines"
+convention: GE-18 exists to stop modes from coupling to each other's
+*business* logic, not to force a third, diverging copy of a lookup that
+has zero mode-specific variation (a league/season boundary means the same
+thing regardless of game type). `LmsEngine.createRolloverPot()`'s
+`end_gameweek_id` is deliberately NOT auto-resolved the way Pick 5's is
+(see point 1) — an LMS end gameweek is an arbitrary organiser-chosen
+cutoff within a season, not necessarily that season's actual final
+gameweek, and carrying the OLD season's gameweek id into the NEW season's
+pot would silently reference the wrong season's fixtures; it's now
+explicitly set to `null` (previously it silently copied the stale value)
+so the organiser configures it during the draft pot's own pre-launch
+review, exactly like `start_gameweek_id` already was.
+
+**3. Carry-over fee alignment: no genuine reason for the divergence, so
+LMS was changed to match Pick 5, not documented as intentional.** The
+original entry framed Pick 5's "never re-tax the carry" rule as a
+deliberate divergence from `LmsEngine.awardPrize()`'s own fee-on-carry
+behavior, justified by LMS's carry-over being "a one-time, terminal
+event." Re-examined under this pass's explicit instruction to determine
+whether that reason is genuine: it doesn't hold up. LMS's carry-over is
+only a one-time event *for a single pot* — but a rollover chain (wipeout →
+new pot → wipeout again → new pot again) re-taxes the same original money
+at every generation, which is exactly the same compounding problem Pick
+5's own weekly carry was designed to avoid within a single pot. There is
+no principled reason the two should differ. `LmsEngine.awardPrize()` is
+now aligned: `adminFeeAmount`/`charityFeeAmount` are computed against this
+competition's own fresh entry-fee gross only (`entry_fee × non-void
+entries`), never against `carry_over_amount`. `pot_prizes.gross_amount`'s
+*stored* value is unaffected (still `freshGross + carry_over_amount`,
+the full combined total) — only what the fee percentage/fixed amount is
+calculated against changes. Live-verified: a 10% admin fee against a
+€20 fresh gross + €20 carried-in pot now charges €2 (10% of the fresh €20
+only), not €4 (10% of the combined €40).
+
+**4. "Prepay" was the wrong mental model — replaced with "record payment
+received."** The original `prepay_weeks` action always targeted "the next
+N upcoming gameweeks," regardless of whether some were already paid (e.g.
+via an earlier individual mark-paid, or an earlier payment record) — a
+repeat call with the same amount would re-confirm already-paid weeks
+instead of extending coverage, silently under-covering the amount actually
+received. Renamed to `record_payment` (`admin-actions/recordPayment.ts`)
+and corrected:
+- **Validation**: the amount must be an exact integer-cents multiple of
+  the pot's entry fee (validated via integer cents, not raw float
+  division — `amount / entryFee` can drift for values like 4.35 / 0.05).
+  An invalid amount is rejected with a message naming the nearest valid
+  amounts above/below, computed by a new pure function,
+  `computePaymentAllocation()` (`admin-actions/paymentAllocation.ts`),
+  split out and unit-tested the same way `bulkPayments.ts`'s
+  `classifyBulkPaymentRows()` already is (`recordPayment.ts` itself does
+  only DB I/O, live-verified only, same convention every
+  dispatcher-driving Edge Function in this codebase already follows).
+- **Target selection**: now explicitly skips any gameweek already marked
+  paid for that user before taking the next N — a payment extends
+  coverage by N genuinely new weeks, it doesn't waste allocation
+  re-confirming ones already covered.
+- **Write path**: switched from a loop of individual
+  `upsertEntryPayment()` get-or-create-by-id calls to a single
+  multi-row `upsert(..., { onConflict: 'pot_id,user_id,gameweek_id' })`
+  call (matching `bulk_verify_payments`' own established shape) — a
+  single `INSERT ... ON CONFLICT` statement is atomic, so a write failure
+  can never leave some of the N target weeks recorded and others not.
+  This structurally eliminates the partial-write retry-safety concern the
+  original get-or-create loop would otherwise have needed a dedicated
+  test for.
+- **Preview before writing**: `dry_run` (default `true`) computes and
+  returns the target week count/ids without writing anything, so the
+  admin UI can show "£25 received. This will mark 5 future Pick 5 weeks
+  as paid." and require a second, explicit confirm — the exact same
+  dry-run/confirm shape `bulk_verify_payments` already established, reused
+  rather than inventing a second confirmation pattern.
+- **Frontend**: `AdminPayments.jsx`'s section renamed "Record payment
+  received" with a preview step; `PaymentTable.jsx`'s per-row button
+  renamed "Mark paid for this week" for clarity. `usePrepayWeeks()`
+  renamed `useRecordPayment()`, now takes a `dryRun` flag.
+
+**A known, accepted limitation, not solved and not silently ignored**:
+skip-already-paid allocation is fundamentally in tension with blind-retry
+idempotency at the *request* level. If the exact same "record £X" request
+is somehow submitted twice in immediate succession — a double-click before
+the first response returns, or a client-side retry after a dropped
+connection whose write actually landed — the second call will find the
+first N weeks already paid, correctly skip them, and allocate the *next*
+N weeks instead of no-opping, extending coverage by 2×N rather than N.
+This is the deliberate, correct behavior for "the organiser is recording a
+second, genuinely new payment" and the *wrong* behavior for "the client
+accidentally resubmitted." There is no request-level idempotency key to
+distinguish the two, and adding one (or a debounce/duplicate-submission
+guard) was judged out of scope for this pass — over-engineering for a
+low-frequency, admin-only, always-reviewed-via-confirmation-preview
+action, whose worst case (a few extra prepaid weeks) is visible in the
+preview before it's written and trivially correctable afterward via "mark
+unpaid." Flagged here rather than left undocumented.
+
+**Verification performed**: 8 new unit tests for
+`computePaymentAllocation()` (exact multiples, non-multiples with
+suggested corrections, floating-point-risky inputs, zero entry fee,
+skip-already-paid, running out of eligible gameweeks, idempotent given
+identical inputs). LMS's own `awardPrize()`/rollover test harness extended
+with `leagues`/`seasons` fake tables (the same shape Pick 5's harness
+already had); every existing LMS rollover test updated to supply a real
+next-season league/season fixture (previously implicit, since the source
+pot's own league/season was silently reused); two new LMS tests added — a
+retry-friendly failure when no next-season league exists yet, and the
+carry-over fee-alignment case. Full repo suite: 334 tests, 0 failures.
+`deno check` clean on every touched file. `npm run build` clean.
+**Live-verified** (local Supabase, real Postgres, real service-role
+client, real HTTP through Kong): a dedicated Pick 5 pot and a dedicated
+LMS pot, both pointed at the same dedicated new season/league, confirmed
+both engines resolve to the *identical* next-season league via the shared
+helper; the Pick 5 rollover pot's `start_gameweek_id`/`end_gameweek_id`
+matched the new season's real first/final gameweek ids exactly; a real
+two-generation LMS rollover chain (source pot wipes out with no fee →
+rollover pot, itself configured with a 10% admin fee and a real
+single-survivor outcome) confirmed the fee-alignment fix — `admin_fee_amount`
+was exactly 2 (10% of the fresh €20 gross), not 4; `record_payment`
+exercised end-to-end over real HTTP: a non-multiple amount was rejected
+with the exact suggested-amounts message, a dry-run preview correctly
+skipped an already-individually-paid gameweek, confirming wrote exactly
+the previewed rows, and an identical second call correctly extended
+coverage to the next batch of unpaid weeks rather than re-writing the
+first (the accepted limitation above, confirmed to behave exactly as
+designed, not as an uncontrolled bug); the pre-existing `mark_paid` action
+was smoke-tested unaffected. All test data (2 pots, 2 rollover pots, 6
+pot members, 1 season, 1 league, 3 gameweeks, 6 game entries, 4
+game_entry_lms rows, 2 pot_standings_snapshots, 3 pot_prizes rows, 4
+entry_payments rows) removed by exact ID, independently re-verified as
+zero residue.

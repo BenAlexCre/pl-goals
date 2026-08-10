@@ -6,6 +6,7 @@ import {
   usePaymentStatus,
   useMarkPayment,
   useBulkVerifyPayments,
+  useRecordPayment,
 } from '../hooks/useAdmin'
 import { parsePaymentCsv } from '../utils/csv'
 import Card from '../components/ui/Card'
@@ -87,6 +88,48 @@ export default function AdminPayments() {
       addToast({ type: 'error', message: err.message })
     } finally {
       setLoadingUserId(null)
+    }
+  }
+
+  // --- Record payment received (Pick 5 only) ---
+  // The organiser enters who paid and how much — the app calculates how
+  // many weeks that covers and previews it before writing anything,
+  // mirroring the CSV import's own preview/confirm shape below.
+  const recordPayment = useRecordPayment()
+  const [paymentUserId, setPaymentUserId] = useState('')
+  const [paymentAmount, setPaymentAmount] = useState('')
+  const [paymentPreview, setPaymentPreview] = useState(null) // { weeks_requested, weeks_materialized, gameweek_ids }
+  const [paymentApplied, setPaymentApplied] = useState(false)
+
+  useEffect(() => {
+    setPaymentUserId('')
+    setPaymentAmount('')
+    setPaymentPreview(null)
+    setPaymentApplied(false)
+  }, [selectedPotId])
+
+  async function handlePreviewPayment() {
+    const amount = Number(paymentAmount)
+    if (!paymentUserId || !amount || amount <= 0) return
+    setPaymentApplied(false)
+    try {
+      const result = await recordPayment.mutateAsync({ potId: selectedPotId, userId: paymentUserId, amount, dryRun: true })
+      setPaymentPreview(result)
+    } catch (err) {
+      setPaymentPreview(null)
+      addToast({ type: 'error', message: err.message })
+    }
+  }
+
+  async function handleConfirmPayment() {
+    if (!paymentPreview) return
+    try {
+      const result = await recordPayment.mutateAsync({ potId: selectedPotId, userId: paymentUserId, amount: Number(paymentAmount), dryRun: false })
+      setPaymentPreview(result)
+      setPaymentApplied(true)
+      addToast({ type: 'success', message: `${paymentAmount} received — ${result.weeks_materialized} week(s) marked paid` })
+    } catch (err) {
+      addToast({ type: 'error', message: err.message })
     }
   }
 
@@ -239,6 +282,75 @@ export default function AdminPayments() {
               />
             )}
           </section>
+
+          {selectedPot?.game_type === 'pick5' && (
+            <section>
+              <h2 className="mb-3 text-lg font-semibold text-white">Record payment received</h2>
+              <Card className="p-5 space-y-4">
+                <p className="text-sm text-white/45">
+                  The organiser collects payment off-platform (cash, bank transfer, Revolut, PayPal, etc.) — this
+                  only records that it was received. Enter who paid and how much; the amount must be an exact
+                  multiple of the weekly entry fee ({selectedPot?.entry_fee ?? '—'}), and the app allocates it
+                  automatically to that many future unpaid Pick 5 weeks. No individual week-ticking required.
+                </p>
+                <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto]">
+                  <select
+                    value={paymentUserId}
+                    onChange={(e) => { setPaymentUserId(e.target.value); setPaymentPreview(null); setPaymentApplied(false) }}
+                    disabled={paymentTableRows.length === 0}
+                    className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50 disabled:opacity-50"
+                  >
+                    <option value="">Select a member</option>
+                    {paymentTableRows.map((row) => (
+                      <option key={row.user_id} value={row.user_id}>{row.display_name}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={paymentAmount}
+                    onChange={(e) => { setPaymentAmount(e.target.value); setPaymentPreview(null); setPaymentApplied(false) }}
+                    placeholder="Amount received"
+                    className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
+                  />
+                  <Button
+                    variant="secondary"
+                    onClick={handlePreviewPayment}
+                    loading={recordPayment.isPending && !paymentApplied}
+                    disabled={!paymentUserId || !paymentAmount}
+                  >
+                    Preview
+                  </Button>
+                </div>
+
+                {paymentPreview && !paymentApplied && (
+                  <div className="rounded-xl border border-white/8 bg-black/10 p-4 space-y-3">
+                    <p className="text-sm text-white">
+                      {paymentAmount} received. This will mark {paymentPreview.weeks_materialized} future Pick 5 week
+                      {paymentPreview.weeks_materialized === 1 ? '' : 's'} as paid.
+                      {paymentPreview.weeks_materialized < paymentPreview.weeks_requested && (
+                        <span className="text-amber">
+                          {' '}Only {paymentPreview.weeks_materialized} of {paymentPreview.weeks_requested} requested
+                          weeks are available — fewer eligible gameweeks remain this season.
+                        </span>
+                      )}
+                    </p>
+                    <Button onClick={handleConfirmPayment} loading={recordPayment.isPending}>
+                      <CheckCircle2 size={16} />
+                      Confirm
+                    </Button>
+                  </div>
+                )}
+
+                {paymentApplied && paymentPreview && (
+                  <p className="text-sm text-accent">
+                    Recorded — {paymentPreview.weeks_materialized} week{paymentPreview.weeks_materialized === 1 ? '' : 's'} marked paid.
+                  </p>
+                )}
+              </Card>
+            </section>
+          )}
 
           <section className="space-y-4">
             <h2 className="text-lg font-semibold text-white">Bulk CSV import</h2>

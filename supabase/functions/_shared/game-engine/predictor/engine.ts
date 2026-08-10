@@ -1273,9 +1273,10 @@ export class PredictorEngine implements GameEngine {
 
     const winners = await this.determineWinner(ctx, potId)
     if (winners.length === 0) {
-      // Deliberately silent, matching LmsEngine.awardPrize()'s philosophy,
-      // not Pick5Engine's (which throws Pick5NoEligibleWinnersError on
-      // zero winners): "season not concluded yet" is Predictor's normal,
+      // Deliberately silent, matching LmsEngine.awardPrize()'s philosophy
+      // (and, since 2026-08-09, Pick5Engine's own zero-winners case too —
+      // see docs/decisions.md § Pick 5 jackpot and season rollover):
+      // "season not concluded yet" is Predictor's normal,
       // overwhelmingly common state (this method is intended to be called
       // on every settle() tick, same as LMS), and a genuinely-concluded
       // pot with zero eligible entries has zero money to award either

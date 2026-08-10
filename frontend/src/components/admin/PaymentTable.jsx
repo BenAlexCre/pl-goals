@@ -36,7 +36,7 @@ export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, load
                   loading={loadingUserId === row.user_id}
                   onClick={() => onMarkPaid(row)}
                 >
-                  Mark paid
+                  Mark paid for this week
                 </Button>
               )}
             </div>

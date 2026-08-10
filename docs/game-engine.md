@@ -1,6 +1,6 @@
 # Game Engine — Architectural Specification
 
-Last reviewed: 2026-08-05. Status: **authoritative.** This document is now the blueprint
+Last reviewed: 2026-08-10. Status: **authoritative.** This document is now the blueprint
 every migration, Edge Function, frontend page, RLS policy, and test is measured against.
 Milestone 1 (this specification) and Milestone 2 (shared schema) are complete and have
 passed a full architectural review — see [schema-review.md](./schema-review.md) for the
@@ -246,6 +246,39 @@ which had this manual — see
 Explicit, not inferred from "no `game_entries` row in this pot has
 `payout_amount > 0`" — same GE-13 reasoning already applied to
 `pot_scope`/`entry_scope`. False for every ordinary settled row.
+
+**Widened to Pick 5, 2026-08-09** (`023_pick5_jackpot_rollover.sql`) — see
+[decisions.md § Pick 5 jackpot and season rollover](./decisions.md#pick-5-jackpot-and-season-rollover).
+`rollover` was written above as an LMS-specific column in practice (never
+schema-enforced as such); it's now also `true` on any Pick 5 gameweek
+`pot_prizes` row where nobody hit 5/5 — the weekly jackpot-carry case, not
+just LMS's wipeout case. `pots.rollover_source_pot_id`'s own CHECK constraint
+(`pots_rollover_source_lms_only` → `pots_rollover_source_lms_or_pick5_only`)
+was widened identically, and no other schema change was needed: Pick 5's
+`gross_amount` for a carried gameweek is simply computed as
+`carryIn + weekGross` before being written, so `net_amount` (already
+generated) is automatically correct with zero new columns. `Pick5Engine`'s
+own automatic rollover-pot creation (season's final gameweek, still no
+winner) follows `LmsEngine.createRolloverPot()`'s pattern — draft status,
+idempotent via `rollover_source_pot_id` existence — but resolves the new
+pot's `league_id`/`season_id` to the *next* season via `resolveNextSeasonLeague()`.
+
+**Corrected 2026-08-10** (docs/decisions.md § Pick 5 jackpot and season
+rollover — corrections): `resolveNextSeasonLeague()` is no longer
+Pick-5-only — it's a shared helper, `_shared/game-engine/season-resolution.ts`,
+imported by both `Pick5Engine` and `LmsEngine`. `LmsEngine.createRolloverPot()`
+previously copied `season_id`/`league_id` unchanged from the source pot
+(a genuine bug, not a deliberate gap — confirmed and fixed this pass, not
+left alone) despite `business-rules.md` already describing LMS rollover as
+crossing into a following season. The same module also exports
+`resolveSeasonGameweekBounds()` (first/final gameweek of a league/season),
+used only by `Pick5Engine.createPick5RolloverPot()` to populate the new
+pot's `start_gameweek_id`/`end_gameweek_id` automatically — Pick 5's
+season always runs start-to-finish with no organiser-configurable cutoff,
+so those bounds are unambiguous; LMS's own rollover pot deliberately
+leaves both null for the organiser to set, since an LMS end gameweek is an
+arbitrary organiser-chosen cutoff, not necessarily a season's actual final
+gameweek.
 
 ### GE-4.5 `game_entries` — the shared parent
 
@@ -663,13 +696,19 @@ short-circuiting the whole method, same as Pick 5's version. Per outcome:
   this pot's `pot_prizes` row is written with `rollover = true`, and
   `createRolloverPot()` automatically creates the new pot per the design
   above: config copied (`entry_fee`/`wipeout_resolution`/
-  `season_end_tie_rule`/fee columns/`end_gameweek_id`), `rollover_source_pot_id`
+  `season_end_tie_rule`/fee columns), `rollover_source_pot_id`
   set to the old pot, `carry_over_amount` set to the old pot's `net_amount`,
   `rollover_generation = old + 1`, a default name derived by stripping any
   existing `"(Rollover #N)"` suffix from the old name and appending the new
   generation's (so a rollover-of-a-rollover never accumulates suffixes),
   `status = 'draft'` (never activated), and exactly one `pot_members` row —
-  the old pot's organiser, as admin. A compensating rollback (delete the
+  the old pot's organiser, as admin. **`season_id`/`league_id` are resolved
+  to the following season's matching league, `end_gameweek_id` is left
+  `null` (corrected 2026-08-10 — both previously copied unchanged/stale
+  from the source pot; see [GE-4.4](#ge-44-pot_prizes)'s own correction
+  note and [decisions.md § Pick 5 jackpot and season rollover —
+  corrections](./decisions.md#pick-5-jackpot-and-season-rollover--corrections)).**
+  A compensating rollback (delete the
   new pot) runs if that membership insert fails, same pattern
   `get-or-create-lms-entry` already established for a multi-step write with
   no cross-table transaction available.
@@ -680,10 +719,14 @@ short-circuiting the whole method, same as Pick 5's version. Per outcome:
   `LmsFinalPredictionNotImplementedError` rather than guessing, per the
   repo owner's explicit "do NOT implement Final Prediction yet" instruction
   (see the Season-end tie section above).
-- **`in_progress`** — a silent no-op, deliberately *not* an error (unlike
-  Pick 5's `Pick5NoEligibleWinnersError`, which fires on a structurally
-  different, genuinely anomalous case). `awardPrize()` is now called
-  unconditionally every gameweek from `settle()`, same as
+- **`in_progress`** — a silent no-op, not an error. Originally contrasted
+  here against Pick 5's old `Pick5NoEligibleWinnersError`, which threw on a
+  structurally anomalous zero-winners case; that error class was deleted
+  2026-08-09 (decisions.md § Pick 5 jackpot and season rollover) once Pick
+  5's own win condition changed to require 5/5 — zero winners is now the
+  normal, common weekly outcome there too, and `Pick5Engine.awardPrize()`
+  now shares this exact same silent-no-op philosophy. `awardPrize()` is now
+  called unconditionally every gameweek from `settle()`, same as
   `generateStandings()` — "not concluded yet" is LMS's normal, common
   state, so most calls correctly finding nothing to do must stay silent.
 
@@ -704,6 +747,16 @@ Full reasoning: [decisions.md § LMS prize awarding](./decisions.md#lms-prize-aw
 No schema change — every column used (`pot_prizes.rollover`,
 `pots.rollover_source_pot_id`/`carry_over_amount`/`rollover_generation`)
 already existed from `013_lms_wipeout_and_rollover.sql`.
+
+**Corrected 2026-08-10** (decisions.md § Pick 5 jackpot and season
+rollover — corrections): `adminFeeAmount`/`charityFeeAmount` are now
+calculated against this pot's own fresh entry-fee gross
+(`entry_fee × non-void entries`) only, never against `carry_over_amount` —
+previously calculated against the combined `freshGross + carry_over_amount`,
+silently re-taxing money that was already net when it rolled over from the
+source pot, across every generation of a rollover chain. `gross_amount`'s
+*stored* value is unaffected (still the full combined total) — aligns with
+`Pick5Engine.awardPrize()`'s own established rule (see GE-4.4 above).
 
 **Transactionality correction — 2026-08-06, found during Slice 8 review
 ahead of Slice 9, before any code was written for this slice.** Asked

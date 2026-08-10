@@ -93,7 +93,7 @@ export function usePotsForAdmin() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('pots')
-        .select('id, name, season_id, league_id, pot_members!inner(role)')
+        .select('id, name, game_type, season_id, league_id, entry_fee, pot_members!inner(role)')
         .eq('pot_members.user_id', user.id)
         .eq('pot_members.role', 'admin')
         .order('name')
@@ -175,6 +175,36 @@ export function useMarkPayment() {
     },
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['payment-status', vars.potId, vars.gameweekId] })
+    },
+  })
+}
+
+// Product rule revision, 2026-08-09, corrected 2026-08-10 (docs/decisions.md
+// § Pick 5 jackpot and season rollover, rules 6-7: Payments / Admin payment
+// workflow) — "Record payment received": the organiser enters an amount
+// already received off-platform, and the app allocates it automatically to
+// that many future unpaid Pick 5 gameweeks. dryRun: true (the default)
+// previews the allocation (how many weeks, which ones) without writing
+// anything, so the UI can show "£25 received. This will mark 5 future
+// weeks as paid." before the organiser confirms — same dry-run/confirm
+// shape as useBulkVerifyPayments below. No new payment status query is
+// needed here: the invalidation below refreshes payment-status for
+// whichever gameweek is currently selected, same as useMarkPayment.
+export function useRecordPayment() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ potId, userId, amount, dryRun = true }) => {
+      const { data, error } = await supabase.functions.invoke('admin-actions', {
+        body: { action: 'record_payment', pot_id: potId, user_id: userId, amount, dry_run: dryRun },
+      })
+      if (error) throw await extractFunctionError(error)
+      if (data?.error) throw new Error(data.error)
+      return data
+    },
+    onSuccess: (_data, vars) => {
+      if (!vars.dryRun) {
+        qc.invalidateQueries({ queryKey: ['payment-status', vars.potId] })
+      }
     },
   })
 }

@@ -46,6 +46,7 @@
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
+import { resolveNextSeasonLeague } from '../season-resolution.ts'
 import { LmsFinalPredictionNotImplementedError, LmsPrizePoolExceededError, LmsValidationError } from './errors.ts'
 
 export interface LmsPickInput {
@@ -895,10 +896,13 @@ export class LmsEngine implements GameEngine {
   //   - season_end, season_end_tie_rule = 'final_prediction': not
   //     implemented — throws LmsFinalPredictionNotImplementedError rather
   //     than guessing, per the repo owner's explicit instruction.
-  //   - in_progress: a no-op, silently. Unlike Pick5Engine's version (which
-  //     throws Pick5NoEligibleWinnersError when winners.length === 0
-  //     despite settled entries existing — genuinely anomalous there),
-  //     "not concluded yet" is LMS's normal, expected, most common state:
+  //   - in_progress: a no-op, silently — the same philosophy Pick5Engine's
+  //     own awardPrize() now also uses for its own zero-winners case
+  //     (2026-08-09 product rule revision: exactly 5/5 required to win,
+  //     so most weeks have no winner and the jackpot simply carries
+  //     forward — see docs/decisions.md § Pick 5 jackpot and season
+  //     rollover). "Not concluded yet" is LMS's normal, expected, most
+  //     common state:
   //     awardPrize() is called from settle() every gameweek (see below),
   //     so most calls correctly finding nothing to do yet must be silent,
   //     not an error.
@@ -995,9 +999,25 @@ export class LmsEngine implements GameEngine {
       throw new Error(`Failed to count paid entries: ${nonVoidError.message}`)
     }
 
-    const grossAmount = roundToCents(potConfig.entry_fee * (nonVoidEntries?.length ?? 0) + potConfig.carry_over_amount)
-    const adminFeeAmount = calculateLmsFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, grossAmount)
-    const charityFeeAmount = calculateLmsFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, grossAmount)
+    // Corrections pass, 2026-08-10 (docs/decisions.md § Pick 5 jackpot and
+    // season rollover — carry-over fee alignment): fees are now computed
+    // against this competition's own FRESH entry-fee gross only, never
+    // against carry_over_amount — aligning with Pick5Engine.awardPrize()'s
+    // established rule. Previously, fees here were computed against
+    // freshGross + carry_over_amount combined, re-taxing money that was
+    // already net when it rolled over from the source pot. On review, the
+    // "one-time terminal event" justification for that didn't actually
+    // hold: a rollover chain more than one wipeout deep would re-tax the
+    // same original money at every generation, the same compounding
+    // problem Pick 5's own weekly carry deliberately avoids — there was no
+    // genuine reason for the two engines to diverge, so this aligns them.
+    // gross_amount's STORED value is unaffected (still the full combined
+    // total, freshGross + carry_over_amount) — only what the fee
+    // percentage/fixed amount is calculated against changes.
+    const freshGross = roundToCents(potConfig.entry_fee * (nonVoidEntries?.length ?? 0))
+    const grossAmount = roundToCents(freshGross + potConfig.carry_over_amount)
+    const adminFeeAmount = calculateLmsFeeAmount(potConfig.admin_fee_type, potConfig.admin_fee_amount, potConfig.admin_fee_percentage, freshGross)
+    const charityFeeAmount = calculateLmsFeeAmount(potConfig.charity_fee_type, potConfig.charity_fee_amount, potConfig.charity_fee_percentage, freshGross)
     const netAmount = roundToCents(grossAmount - adminFeeAmount - charityFeeAmount)
 
     if (netAmount < 0) {
@@ -1125,16 +1145,35 @@ export class LmsEngine implements GameEngine {
   // cross-table transaction, so if the pot_members insert fails after the
   // pots insert succeeds, the just-created pot is deleted rather than left
   // as an orphaned rollover pot with no organiser member.
+  //
+  // Bug found and fixed, corrections pass 2026-08-10 (docs/decisions.md §
+  // Pick 5 jackpot and season rollover): this method previously copied
+  // `season_id`/`league_id` UNCHANGED from the source pot — despite
+  // business-rules.md describing LMS rollover as crossing into a following
+  // season, it never actually did. Now resolves the next season's matching
+  // league via the same `resolveNextSeasonLeague()` helper Pick 5 uses
+  // (`../season-resolution.ts` — no mode-specific variation exists in
+  // "find next season's matching league," so this is shared, not
+  // duplicated, per the explicit "extract shared logic where practical"
+  // instruction). `end_gameweek_id` is deliberately set to null, not
+  // carried over from the source pot: unlike Pick 5 (whose rollover pot
+  // always spans its whole season, so "final gameweek" is unambiguous —
+  // see `Pick5Engine.createPick5RolloverPot()`), LMS's end_gameweek_id is
+  // an arbitrary organiser-chosen cutoff *within* a season, not necessarily
+  // that season's actual final gameweek. Carrying the OLD season's
+  // gameweek id forward into the NEW season's pot would silently reference
+  // the wrong season's fixture calendar; there's no principled way to
+  // auto-resolve "the equivalent cutoff" without inventing a same-number
+  // mapping nobody asked for. The organiser sets it during this draft
+  // pot's own pre-launch review, same as `start_gameweek_id` already was.
   private async createRolloverPot(
     ctx: GameEngineContext,
     sourcePotId: string,
     sourcePot: {
       name: string
       created_by: string
-      season_id: number
       league_id: number
       entry_fee: number
-      end_gameweek_id: number | null
       wipeout_resolution: 'split_prize' | 'roll_prize'
       season_end_tie_rule: 'split_prize' | 'final_prediction'
       admin_fee_type: 'none' | 'fixed' | 'percentage'
@@ -1160,6 +1199,14 @@ export class LmsEngine implements GameEngine {
       return // a prior, since-failed awardPrize() attempt already created this — do not create a second one
     }
 
+    const nextLeague = await resolveNextSeasonLeague(ctx, sourcePot.league_id)
+    if (!nextLeague) {
+      throw new Error(
+        `Cannot create an LMS rollover pot for ${sourcePotId}: no next-season league found yet for league ${sourcePot.league_id}. ` +
+          `Retry once next season's league data has been synced.`
+      )
+    }
+
     // Strips any existing "(Rollover #N)" suffix before appending the new
     // one, so a rollover-of-a-rollover gets "Base Name (Rollover #3)", not
     // "Base Name (Rollover #2) (Rollover #3)".
@@ -1171,13 +1218,13 @@ export class LmsEngine implements GameEngine {
       .from('pots')
       .insert({
         name: newName,
-        season_id: sourcePot.season_id,
-        league_id: sourcePot.league_id,
+        season_id: nextLeague.season_id,
+        league_id: nextLeague.id,
         created_by: sourcePot.created_by,
         game_type: 'last_man_standing',
         status: 'draft',
         entry_fee: sourcePot.entry_fee,
-        end_gameweek_id: sourcePot.end_gameweek_id,
+        end_gameweek_id: null,
         wipeout_resolution: sourcePot.wipeout_resolution,
         season_end_tie_rule: sourcePot.season_end_tie_rule,
         admin_fee_type: sourcePot.admin_fee_type,
@@ -1191,7 +1238,7 @@ export class LmsEngine implements GameEngine {
         rollover_generation: newGeneration,
         // start_gameweek_id deliberately left null — the organiser chooses
         // it during this draft pot's own pre-launch workflow (GE-5.2), not
-        // at automatic-creation time.
+        // at automatic-creation time. end_gameweek_id above, same reasoning.
       })
       .select('id')
       .single()

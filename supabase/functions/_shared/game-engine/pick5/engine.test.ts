@@ -13,8 +13,8 @@
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/assert/mod.ts'
 import type { GameEngineContext } from '../contracts.ts'
 import type { GameEntry } from '../types.ts'
-import { Pick5Engine } from './engine.ts'
-import { Pick5NoEligibleWinnersError, Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
+import { Pick5Engine, PICK5_PICK_COUNT } from './engine.ts'
+import { Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
 
 interface FakeEligiblePlayer {
   player_id: number
@@ -572,6 +572,39 @@ interface FakePotFeeConfig {
   charity_fee_type?: string
   charity_fee_amount?: number | null
   charity_fee_percentage?: number | null
+  // Product rule revision, 2026-08-09 (jackpot/rollover) — optional so
+  // every pre-existing test that only cares about fee math keeps working
+  // with sensible defaults (below).
+  league_id?: number
+  season_id?: number
+  name?: string
+  created_by?: string
+  carry_over_amount?: number
+  rollover_generation?: number
+}
+
+interface FakePotRow {
+  id: string
+  game_type: string
+  status: string
+  league_id: number
+  season_id: number
+  name: string
+  created_by: string
+  entry_fee: number
+  admin_fee_type: string
+  admin_fee_amount: number | null
+  admin_fee_percentage: number | null
+  charity_fee_type: string
+  charity_fee_amount: number | null
+  charity_fee_percentage: number | null
+  carry_over_amount: number
+  rollover_generation: number
+  rollover_source_pot_id: string | null
+  // Corrections pass, 2026-08-10 — createPick5RolloverPot() now resolves
+  // and sets both, never leaves them null.
+  start_gameweek_id?: number | null
+  end_gameweek_id?: number | null
 }
 
 interface FakeDb {
@@ -579,8 +612,18 @@ interface FakeDb {
   // Optional per-pot overrides for awardPrize()'s pots.select(...) lookup —
   // any pick5PotIds entry not listed here gets entry_fee: 0, every fee
   // type: 'none' (matches this table's real column defaults), so every
-  // existing test written before Slice 8 keeps working unchanged.
+  // existing test written before Slice 8 keeps working unchanged. Used to
+  // auto-derive `pots` (below) at construction time — see emptyFakeDb().
   potFeeConfig: Record<string, FakePotFeeConfig>
+  // Product rule revision, 2026-08-09 — a real, mutable pots table (unlike
+  // pick5PotIds/potFeeConfig, which are read-only view sugar this method
+  // still supports for backward compatibility). Needed because
+  // createPick5RolloverPot() both inserts a new row here and queries by
+  // rollover_source_pot_id, neither of which a computed-per-query view can
+  // support. Auto-populated from pick5PotIds/potFeeConfig unless a test
+  // supplies `pots` directly (for full control over league_id/season_id/
+  // an existing rollover link, etc.).
+  pots: FakePotRow[]
   gameEntries: { id: string; pot_id: string; user_id: string; gameweek_id: number; status: string; settled_at: string | null; payout_amount?: number }[]
   entryPayments: { pot_id: string; user_id: string; gameweek_id: number; scope: string; is_paid: boolean }[]
   pick5Picks: { id: number; game_entry_id: string; result: string }[]
@@ -596,7 +639,19 @@ interface FakeDb {
     charity_fee_amount: number
     is_settled: boolean
     settled_at: string | null
+    // Product rule revision, 2026-08-09 — optional so every pre-existing
+    // row literal (implicitly "not a rollover") keeps working unchanged;
+    // undefined is falsy, identical to explicit false for every read this
+    // engine does against it.
+    rollover?: boolean
   }[]
+  // Product rule revision, 2026-08-09 — needed for
+  // isFinalGameweekOfSeason() (a pot's own league/season's real final
+  // gameweek) and resolveNextSeasonLeague()'s "which season comes next"
+  // resolution.
+  gameweeks: { id: number; league_id: number; season_id: number; number: number }[]
+  leagues: { id: number; name: string; country: string; season_id: number }[]
+  seasons: { id: number; year_start: number }[]
   notifications: { id: number; user_id: string; pot_id: string | null; type: string; payload: Record<string, unknown> | null }[]
   // Slice 9: lets a test simulate the notifications insert failing, to prove
   // awardPrize() isolates that failure from the money it already wrote —
@@ -614,15 +669,49 @@ interface FakeDb {
 }
 
 function emptyFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
+  const pick5PotIds = overrides.pick5PotIds ?? []
+  const potFeeConfig = overrides.potFeeConfig ?? {}
+
+  // Auto-derive `pots` from the existing pick5PotIds/potFeeConfig sugar
+  // unless a test supplies `pots` explicitly — every test written before
+  // this revision only ever set the former, and gets identical defaults
+  // to what the old computed-view fake used to synthesize.
+  const derivedPots: FakePotRow[] = pick5PotIds.map((id) => {
+    const cfg = potFeeConfig[id] ?? {}
+    return {
+      id,
+      game_type: 'pick5',
+      status: 'active',
+      league_id: cfg.league_id ?? 1,
+      season_id: cfg.season_id ?? 1,
+      name: cfg.name ?? `Test Pot ${id}`,
+      created_by: cfg.created_by ?? 'organiser-1',
+      entry_fee: cfg.entry_fee ?? 0,
+      admin_fee_type: cfg.admin_fee_type ?? 'none',
+      admin_fee_amount: cfg.admin_fee_amount ?? null,
+      admin_fee_percentage: cfg.admin_fee_percentage ?? null,
+      charity_fee_type: cfg.charity_fee_type ?? 'none',
+      charity_fee_amount: cfg.charity_fee_amount ?? null,
+      charity_fee_percentage: cfg.charity_fee_percentage ?? null,
+      carry_over_amount: cfg.carry_over_amount ?? 0,
+      rollover_generation: cfg.rollover_generation ?? 0,
+      rollover_source_pot_id: null,
+    }
+  })
+
   return {
-    pick5PotIds: [],
-    potFeeConfig: {},
+    pick5PotIds,
+    potFeeConfig,
+    pots: overrides.pots ?? derivedPots,
     gameEntries: [],
     entryPayments: [],
     pick5Picks: [],
     gameEntryPick5: [],
     potStandingsSnapshots: [],
     potPrizes: [],
+    gameweeks: [],
+    leagues: [],
+    seasons: [],
     notifications: [],
     notificationsShouldFail: false,
     entriesVoidShouldFail: false,
@@ -790,20 +879,14 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
     from(table: string) {
       switch (table) {
         case 'pots':
-          return queryBuilder(() =>
-            db.pick5PotIds.map((id) => ({
-              id,
-              game_type: 'pick5',
-              entry_fee: 0,
-              admin_fee_type: 'none',
-              admin_fee_amount: null,
-              admin_fee_percentage: null,
-              charity_fee_type: 'none',
-              charity_fee_amount: null,
-              charity_fee_percentage: null,
-              ...db.potFeeConfig[id],
-            }))
-          )
+          // Product rule revision, 2026-08-09: a real, mutable table (see
+          // FakeDb.pots's own comment) — supports getPick5PotIds()'s
+          // game_type filter and the fee-config lookup exactly as the old
+          // computed view did, plus createPick5RolloverPot()'s insert and
+          // its rollover_source_pot_id idempotency lookup, which a
+          // per-query-computed view could never support (an insert into a
+          // fresh array every call is thrown away immediately).
+          return queryBuilder(() => db.pots)
         case 'game_entries':
           return queryBuilder(() => db.gameEntries, db, undefined, (patch) => db.entriesVoidShouldFail === true && patch.status === 'void')
         case 'entry_payments':
@@ -821,6 +904,12 @@ function fakeDbContext(db: FakeDb, now: () => Date = () => new Date('2026-08-05T
             () => db.potPrizesWriteShouldFail === true,
             () => db.potPrizesWriteShouldFail === true
           )
+        case 'gameweeks':
+          return queryBuilder(() => db.gameweeks)
+        case 'leagues':
+          return queryBuilder(() => db.leagues)
+        case 'seasons':
+          return queryBuilder(() => db.seasons)
         case 'notifications':
           return queryBuilder(() => db.notifications, undefined, () => db.notificationsShouldFail)
         default:
@@ -1207,11 +1296,18 @@ Deno.test('generateStandings returns an empty array and writes nothing when the 
 
 // --- determineWinner() -----------------------------------------------------
 
-Deno.test('determineWinner returns the single rank-1 user of the most recent gameweek', async () => {
+// Product rule revision, 2026-08-09 (docs/decisions.md § Pick 5 jackpot
+// and season rollover): a winner is now whoever scored EXACTLY
+// PICK5_PICK_COUNT (5/5), not merely rank 1 — every test below reflects
+// that. The rank-1-with-a-tie-break mechanics (ISSUE-17) are unchanged
+// and still exercised (rankWithTies() itself isn't touched by this
+// revision), just no longer conflated with "winning."
+
+Deno.test('determineWinner returns the user who scored exactly 5/5, not merely the best score of the week', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
     ],
   })
@@ -1222,13 +1318,28 @@ Deno.test('determineWinner returns the single rank-1 user of the most recent gam
   assertEquals(winners, ['user-a'])
 })
 
-Deno.test('determineWinner returns every tied rank-1 user, not just one (ISSUE-17\'s shared-rank rule)', async () => {
+Deno.test('determineWinner returns an empty array when the week\'s best score is rank 1 but not 5/5 — nobody wins a merely-good week', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 3, score: 1 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 4 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 3 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  const winners = await engine.determineWinner(ctx, 'pot-1')
+
+  assertEquals(winners, [])
+})
+
+Deno.test('determineWinner returns every simultaneous 5/5 achiever, not just one', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 3, score: 3 },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1239,14 +1350,14 @@ Deno.test('determineWinner returns every tied rank-1 user, not just one (ISSUE-1
   assertEquals(winners.length, 2)
 })
 
-Deno.test('determineWinner uses only the most recent gameweek, not every gameweek\'s rank-1', async () => {
+Deno.test('determineWinner uses only the most recent gameweek, not every gameweek\'s 5/5s', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     potStandingsSnapshots: [
       // An earlier gameweek's winner must not leak into this gameweek's result.
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-old-winner', rank: 1, score: 5 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-old-winner', rank: 1, score: PICK5_PICK_COUNT },
       { pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-old-winner', rank: 2, score: 1 },
-      { pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-new-winner', rank: 1, score: 4 },
+      { pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-new-winner', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1260,10 +1371,10 @@ Deno.test('determineWinner ignores the overall (gameweek_id: null) row when find
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
       // The overall row has the same rank/score shape but gameweek_id: null —
       // must never be mistaken for "the latest gameweek."
-      { pot_id: 'pot-1', gameweek_id: null, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: null, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1277,8 +1388,8 @@ Deno.test('determineWinner scopes strictly to the given pot', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
-      { pot_id: 'pot-2', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 9 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-2', gameweek_id: 4, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1300,7 +1411,7 @@ Deno.test('determineWinner returns an empty array when the pot has no standings 
 
 // --- awardPrize() -----------------------------------------------------
 
-Deno.test('awardPrize computes gross = entry_fee x settled count and awards the sole winner the full net', async () => {
+Deno.test('awardPrize computes gross = entry_fee x settled count and awards the sole 5/5 winner the full net', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
@@ -1310,7 +1421,7 @@ Deno.test('awardPrize computes gross = entry_fee x settled count and awards the 
       { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
     ],
   })
@@ -1319,10 +1430,11 @@ Deno.test('awardPrize computes gross = entry_fee x settled count and awards the 
   await engine.awardPrize(ctx, 'pot-1')
 
   assertEquals(db.potPrizes.length, 1)
-  assertEquals(db.potPrizes[0].gross_amount, 20) // 10 x 2 settled entries
+  assertEquals(db.potPrizes[0].gross_amount, 20) // 10 x 2 settled entries, no carry-in
   assertEquals(db.potPrizes[0].admin_fee_amount, 0)
   assertEquals(db.potPrizes[0].charity_fee_amount, 0)
   assertEquals(db.potPrizes[0].is_settled, true)
+  assertEquals(db.potPrizes[0].rollover, false, 'a real winner resets the jackpot, not a rollover')
   assertEquals(db.gameEntries.find((e) => e.user_id === 'user-a')?.payout_amount, 20)
   assertEquals(db.gameEntries.find((e) => e.user_id === 'user-b')?.payout_amount, undefined, 'only the winner gets a payout')
 })
@@ -1333,7 +1445,7 @@ Deno.test('awardPrize applies a fixed admin fee correctly', async () => {
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 5 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   const ctx = fakeDbContext(db)
 
@@ -1354,7 +1466,7 @@ Deno.test('awardPrize applies a percentage charity fee correctly', async () => {
       { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 1 },
     ],
   })
@@ -1387,7 +1499,7 @@ Deno.test('awardPrize applies both admin fee (fixed) and charity fee (percentage
       { id: 'entry-d', pot_id: 'pot-1', user_id: 'user-d', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 2, score: 2 },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 3, score: 1 },
       { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-d', rank: 3, score: 1 },
@@ -1404,7 +1516,7 @@ Deno.test('awardPrize applies both admin fee (fixed) and charity fee (percentage
   assertEquals(db.gameEntries.find((e) => e.user_id === 'user-a')?.payout_amount, 70)
 })
 
-Deno.test('awardPrize splits an evenly-dividing net pool equally across multiple tied winners', async () => {
+Deno.test('awardPrize splits an evenly-dividing net pool equally across multiple simultaneous 5/5 winners', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
@@ -1415,9 +1527,9 @@ Deno.test('awardPrize splits an evenly-dividing net pool equally across multiple
       { id: 'entry-c', pot_id: 'pot-1', user_id: 'user-c', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1442,9 +1554,9 @@ Deno.test('awardPrize floors an unevenly-dividing net split (the actual remainde
       { id: 'entry-c', pot_id: 'pot-1', user_id: 'user-c', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-c', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1457,22 +1569,30 @@ Deno.test('awardPrize floors an unevenly-dividing net split (the actual remainde
   assertEquals(payouts, [9.66, 9.66, 9.66], 'floor(29/3) = 9.66 each; the leftover 0.02 is paid to no one')
 })
 
-Deno.test('awardPrize throws Pick5NoEligibleWinnersError and writes nothing when there are zero winners', async () => {
+// Product rule revision, 2026-08-09 (docs/decisions.md § Pick 5 jackpot
+// and season rollover) — replaces the old "throws Pick5NoEligibleWinnersError"
+// test: zero winners is now the normal case, not an error.
+Deno.test('awardPrize does not throw, pays nobody, and marks the week rollover=true when nobody hits 5/5', async () => {
   const engine = new Pick5Engine()
-  // Standings exist (so a gameweek is found) but nobody is rank 1 — should be
-  // structurally impossible via generateStandings(), but awardPrize() must
-  // still fail loudly rather than silently skip if it ever happens.
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 2, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    // No gameweeks row for this pot's league/season — isFinalGameweekOfSeason()
+    // correctly finds no match (id !== undefined) and returns false, so this
+    // stays a mid-season carry, not a season-end rollover-pot trigger.
   })
   const ctx = fakeDbContext(db)
 
-  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'), Pick5NoEligibleWinnersError)
-  assertEquals(db.potPrizes.length, 0)
-  assertEquals(db.gameEntries[0].payout_amount, undefined)
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1)
+  assertEquals(db.potPrizes[0].gross_amount, 10, 'this week\'s own fresh gross, no carry-in yet')
+  assertEquals(db.potPrizes[0].is_settled, true)
+  assertEquals(db.potPrizes[0].rollover, true)
+  assertEquals(db.gameEntries[0].payout_amount, undefined, 'nobody hit 5/5, nobody is paid')
+  assertEquals(db.pots.filter((p) => p.rollover_source_pot_id === 'pot-1').length, 0, 'not the season\'s final gameweek — no rollover pot created')
 })
 
 Deno.test('awardPrize throws Pick5PrizePoolExceededError and writes nothing when fees exceed the gross pool', async () => {
@@ -1484,7 +1604,7 @@ Deno.test('awardPrize throws Pick5PrizePoolExceededError and writes nothing when
       'pot-1': { entry_fee: 10, admin_fee_type: 'fixed', admin_fee_amount: 8, charity_fee_type: 'fixed', charity_fee_amount: 5 },
     },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   const ctx = fakeDbContext(db)
 
@@ -1493,19 +1613,20 @@ Deno.test('awardPrize throws Pick5PrizePoolExceededError and writes nothing when
   assertEquals(db.gameEntries[0].payout_amount, undefined)
 })
 
-Deno.test('awardPrize is idempotent — a second call against an already-settled prize is a safe no-op', async () => {
+Deno.test('awardPrize is idempotent — a second call against an already-settled prize is a safe no-op (winner case)', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   const ctx = fakeDbContext(db)
 
   await engine.awardPrize(ctx, 'pot-1')
   assertEquals(db.potPrizes.length, 1)
   const firstPrizeId = db.potPrizes[0].id
+  assertEquals(db.gameEntries[0].payout_amount, 10)
 
   // Mutate the underlying entries as if something changed — a real re-run
   // must NOT recompute or overwrite an already-settled prize.
@@ -1515,6 +1636,297 @@ Deno.test('awardPrize is idempotent — a second call against an already-settled
   assertEquals(db.potPrizes.length, 1, 'must not create a second pot_prizes row')
   assertEquals(db.potPrizes[0].id, firstPrizeId)
   assertEquals(db.gameEntries[0].payout_amount, undefined, 'a no-op does not re-write the payout either')
+})
+
+Deno.test('awardPrize is idempotent — a second call against an already-settled no-winner (rollover) week is also a safe no-op', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 2 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.potPrizes.length, 1)
+  const firstPrizeId = db.potPrizes[0].id
+  const firstGross = db.potPrizes[0].gross_amount
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes.length, 1, 'must not create a second pot_prizes row')
+  assertEquals(db.potPrizes[0].id, firstPrizeId)
+  assertEquals(db.potPrizes[0].gross_amount, firstGross, 'must not recompute/re-carry on a repeat call')
+})
+
+// --- Jackpot accumulation (Design A, 2026-08-09) --------------------------
+// docs/decisions.md § Pick 5 jackpot and season rollover: an unclaimed
+// week's net prize carries into the next gameweek's pool, on top of that
+// gameweek's own fresh entry fees, repeating until someone hits 5/5.
+
+Deno.test('awardPrize carries an unclaimed week\'s net prize into the next gameweek as carryIn, added on top of that week\'s own fresh gross', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [
+      { id: 'entry-gw4', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-gw5', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 5, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }, // no 5/5 in GW4
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  // GW4 settles first: nobody hit 5/5, gross=10 (1 entry x 10), net=10 carries.
+  await engine.awardPrize(ctx, 'pot-1')
+  assertEquals(db.potPrizes[0].gross_amount, 10)
+  assertEquals(db.potPrizes[0].rollover, true)
+
+  // GW5: another no-winner week. Its own fresh gross is 10 (1 entry), plus
+  // the GW4 carry-in of 10 -> gross_amount should be 20, still unclaimed.
+  db.potStandingsSnapshots.push({ pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-a', rank: 1, score: 2 })
+  await engine.awardPrize(ctx, 'pot-1')
+
+  const gw5Prize = db.potPrizes.find((p) => p.gameweek_id === 5)
+  assertEquals(gw5Prize?.gross_amount, 20, 'GW4\'s unclaimed net (10) + GW5\'s own fresh gross (10)')
+  assertEquals(gw5Prize?.rollover, true)
+})
+
+Deno.test('awardPrize accumulates across THREE consecutive no-winner weeks before a winner claims the full jackpot', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [
+      { id: 'entry-gw4', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-gw5', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 5, status: 'settled', settled_at: 'x' },
+      { id: 'entry-gw6', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 6, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 1 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1') // GW4: no winner, gross=net=10 carries
+
+  db.potStandingsSnapshots.push({ pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-a', rank: 1, score: 4 })
+  await engine.awardPrize(ctx, 'pot-1') // GW5: no winner, gross = 10(carry) + 10(fresh) = 20 carries
+
+  // GW6: user-b hits 5/5 — should win the FULL accumulated jackpot (30),
+  // not just GW6's own 10.
+  db.potStandingsSnapshots.push({ pot_id: 'pot-1', gameweek_id: 6, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT })
+  await engine.awardPrize(ctx, 'pot-1')
+
+  const gw6Prize = db.potPrizes.find((p) => p.gameweek_id === 6)
+  assertEquals(gw6Prize?.gross_amount, 30, '10 (GW4) + 10 (GW5) + 10 (GW6) — all three weeks\' entry fees, nobody claimed until now')
+  assertEquals(gw6Prize?.rollover, false)
+  assertEquals(db.gameEntries.find((e) => e.id === 'entry-gw6')?.payout_amount, 30, 'the winner gets the ENTIRE accumulated jackpot, not just this week\'s own gross')
+})
+
+Deno.test('awardPrize resets the jackpot after a winner — the following gameweek starts fresh with only its own entry fees', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10 } },
+    gameEntries: [
+      { id: 'entry-gw4', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-gw5', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 5, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1') // GW4: user-a wins 10, jackpot resets
+
+  db.potStandingsSnapshots.push({ pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-b', rank: 1, score: 3 })
+  await engine.awardPrize(ctx, 'pot-1') // GW5: nobody wins — should carry only ITS OWN gross, not GW4's already-claimed money
+
+  const gw5Prize = db.potPrizes.find((p) => p.gameweek_id === 5)
+  assertEquals(gw5Prize?.gross_amount, 10, 'GW4 was claimed (rollover=false) — GW5 starts fresh with only its own entry fees')
+})
+
+Deno.test('awardPrize applies fees only to this week\'s fresh gross, never re-taxing an already-net carried-forward balance', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    // 10% admin fee — if it were (wrongly) re-applied to the carried balance
+    // too, GW5's fee would be 10% of 20 (2), not 10% of GW5's own fresh
+    // gross alone (1).
+    potFeeConfig: { 'pot-1': { entry_fee: 10, admin_fee_type: 'percentage', admin_fee_percentage: 10 } },
+    gameEntries: [
+      { id: 'entry-gw4', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' },
+      { id: 'entry-gw5', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 5, status: 'settled', settled_at: 'x' },
+    ],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 1 }],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1') // GW4: gross=10, admin fee=1 (10% of 10), net=9 carries
+  assertEquals(db.potPrizes[0].admin_fee_amount, 1)
+  assertEquals(db.potPrizes[0].gross_amount - db.potPrizes[0].admin_fee_amount, 9)
+
+  db.potStandingsSnapshots.push({ pot_id: 'pot-1', gameweek_id: 5, user_id: 'user-a', rank: 1, score: 2 })
+  await engine.awardPrize(ctx, 'pot-1') // GW5: fresh gross=10, carry-in=9 (already net) -> gross_amount stored = 19
+
+  const gw5Prize = db.potPrizes.find((p) => p.gameweek_id === 5)
+  assertEquals(gw5Prize?.gross_amount, 19, 'carry-in (9, already net) + GW5\'s own fresh gross (10)')
+  assertEquals(gw5Prize?.admin_fee_amount, 1, 'fee is 10% of GW5\'s OWN fresh gross (10) only, not 10% of the combined 19')
+})
+
+// --- Season-end rollover (rule 2, 2026-08-09) ------------------------------
+
+Deno.test('awardPrize automatically creates a draft rollover pot in next season\'s league when the season\'s final gameweek has no winner', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: {
+      'pot-1': { entry_fee: 10, league_id: 1, season_id: 1, name: 'Office Pool', created_by: 'organiser-1' },
+    },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 38, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 38, user_id: 'user-a', rank: 1, score: 4 }], // no 5/5
+    gameweeks: [
+      { id: 4, league_id: 1, season_id: 1, number: 1 },
+      { id: 38, league_id: 1, season_id: 1, number: 38 }, // the season's real final gameweek
+      // Next season's own calendar — resolveSeasonGameweekBounds() reads
+      // these to populate the rollover pot's start/end gameweek.
+      { id: 101, league_id: 2, season_id: 2, number: 1 },
+      { id: 102, league_id: 2, season_id: 2, number: 2 },
+      { id: 138, league_id: 2, season_id: 2, number: 38 },
+    ],
+    leagues: [
+      { id: 1, name: 'Premier League', country: 'England', season_id: 1 },
+      { id: 2, name: 'Premier League', country: 'England', season_id: 2 }, // next season, same league
+    ],
+    seasons: [
+      { id: 1, year_start: 2025 },
+      { id: 2, year_start: 2026 },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes[0].rollover, true)
+  const rolloverPot = db.pots.find((p) => p.rollover_source_pot_id === 'pot-1')
+  assertEquals(rolloverPot?.game_type, 'pick5')
+  assertEquals(rolloverPot?.status, 'draft', 'created but never auto-activated — the organiser reviews and activates it later')
+  assertEquals(rolloverPot?.league_id, 2, 'targets next season\'s matching league, not the same one')
+  assertEquals(rolloverPot?.season_id, 2)
+  assertEquals(rolloverPot?.carry_over_amount, 10, 'the entire unclaimed jackpot carries to the new pot')
+  assertEquals(rolloverPot?.name, 'Office Pool (Rollover #1)')
+  assertEquals(rolloverPot?.rollover_generation, 1)
+  assertEquals(rolloverPot?.entry_fee, 10, 'fee configuration is copied from the source pot')
+  assertEquals(rolloverPot?.start_gameweek_id, 101, 'resolved to next season\'s first gameweek, never left null')
+  assertEquals(rolloverPot?.end_gameweek_id, 138, 'resolved to next season\'s final gameweek, never left null')
+})
+
+Deno.test('awardPrize does not create a rollover pot mid-season, even with no winner, if the gameweek is not the season\'s final one', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10, league_id: 1, season_id: 1 } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 4 }],
+    gameweeks: [
+      { id: 4, league_id: 1, season_id: 1, number: 4 },
+      { id: 38, league_id: 1, season_id: 1, number: 38 }, // a later gameweek exists — GW4 is not the final one
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.potPrizes[0].rollover, true, 'still carries forward like any other no-winner week')
+  assertEquals(db.pots.filter((p) => p.rollover_source_pot_id === 'pot-1').length, 0, 'no rollover pot — this was not the season\'s final gameweek')
+})
+
+Deno.test('awardPrize\'s rollover-pot creation is idempotent — a retry after a partial failure does not create a duplicate', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 10, league_id: 1, season_id: 1, name: 'Office Pool' } },
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 38, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 38, user_id: 'user-a', rank: 1, score: 4 }],
+    gameweeks: [{ id: 38, league_id: 1, season_id: 1, number: 38 }],
+    leagues: [
+      { id: 1, name: 'Premier League', country: 'England', season_id: 1 },
+      { id: 2, name: 'Premier League', country: 'England', season_id: 2 },
+    ],
+    seasons: [
+      { id: 1, year_start: 2025 },
+      { id: 2, year_start: 2026 },
+    ],
+    // Simulates a prior attempt that created the rollover pot but failed
+    // before reaching the trailing pot_prizes write (the exact partial-
+    // failure window the hardening-sprint write-ordering discipline
+    // protects) — this gameweek's own pot_prizes row does not exist yet.
+    pots: [
+      {
+        id: 'pot-1',
+        game_type: 'pick5',
+        status: 'active',
+        league_id: 1,
+        season_id: 1,
+        name: 'Office Pool',
+        created_by: 'organiser-1',
+        entry_fee: 10,
+        admin_fee_type: 'none',
+        admin_fee_amount: null,
+        admin_fee_percentage: null,
+        charity_fee_type: 'none',
+        charity_fee_amount: null,
+        charity_fee_percentage: null,
+        carry_over_amount: 0,
+        rollover_generation: 0,
+        rollover_source_pot_id: null,
+      },
+      {
+        id: 'pot-1-rollover',
+        game_type: 'pick5',
+        status: 'draft',
+        league_id: 2,
+        season_id: 2,
+        name: 'Office Pool (Rollover #1)',
+        created_by: 'organiser-1',
+        entry_fee: 10,
+        admin_fee_type: 'none',
+        admin_fee_amount: null,
+        admin_fee_percentage: null,
+        charity_fee_type: 'none',
+        charity_fee_amount: null,
+        charity_fee_percentage: null,
+        carry_over_amount: 10,
+        rollover_generation: 1,
+        rollover_source_pot_id: 'pot-1',
+      },
+    ],
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.pots.filter((p) => p.rollover_source_pot_id === 'pot-1').length, 1, 'the retry must not create a second rollover pot')
+  assertEquals(db.potPrizes.length, 1, 'the retry still finishes the interrupted work — the trailing pot_prizes write')
+  assertEquals(db.potPrizes[0].is_settled, true)
+})
+
+Deno.test('a freshly-created rollover pot\'s own first gameweek picks up pots.carry_over_amount as its carryIn', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-2'],
+    potFeeConfig: { 'pot-2': { entry_fee: 10, carry_over_amount: 50 } }, // e.g. rolled over from last season
+    gameEntries: [{ id: 'entry-a', pot_id: 'pot-2', user_id: 'user-a', gameweek_id: 1, status: 'settled', settled_at: 'x' }],
+    potStandingsSnapshots: [{ pot_id: 'pot-2', gameweek_id: 1, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
+    // No pot_prizes rows exist yet for pot-2 — this really is its first gameweek.
+  })
+  const ctx = fakeDbContext(db)
+
+  await engine.awardPrize(ctx, 'pot-2')
+
+  assertEquals(db.potPrizes[0].gross_amount, 60, 'carry_over_amount (50) + this gameweek\'s own fresh gross (10)')
+  assertEquals(db.gameEntries[0].payout_amount, 60, 'the winner gets the carried-over amount plus this gameweek\'s own prize')
 })
 
 // --- awardPrize() partial-write retry-safety (hardening sprint, 2026-08-06) ---
@@ -1531,7 +1943,7 @@ Deno.test('awardPrize: if the trailing pot_prizes write fails, the payout alread
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   db.potPrizesWriteShouldFail = true
   const ctx = fakeDbContext(db)
@@ -1565,7 +1977,7 @@ Deno.test('awardPrize: a pot_prizes write failure throws a generic Error, not Pi
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   db.potPrizesWriteShouldFail = true
   const ctx = fakeDbContext(db)
@@ -1627,7 +2039,7 @@ Deno.test('awardPrize writes a pick5.prize_awarded notification for the sole win
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   const ctx = fakeDbContext(db)
 
@@ -1650,8 +2062,8 @@ Deno.test('awardPrize writes one notification per winner when there are multiple
       { id: 'entry-b', pot_id: 'pot-1', user_id: 'user-b', gameweek_id: 4, status: 'settled', settled_at: 'x' },
     ],
     potStandingsSnapshots: [
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 },
-      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: 3 },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT },
+      { pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-b', rank: 1, score: PICK5_PICK_COUNT },
     ],
   })
   const ctx = fakeDbContext(db)
@@ -1669,7 +2081,7 @@ Deno.test('awardPrize does not write a duplicate notification on an idempotent s
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
   })
   const ctx = fakeDbContext(db)
 
@@ -1685,7 +2097,7 @@ Deno.test('awardPrize still awards the prize and payout when the notification wr
     pick5PotIds: ['pot-1'],
     potFeeConfig: { 'pot-1': { entry_fee: 10 } },
     gameEntries: [{ id: 'entry-a', pot_id: 'pot-1', user_id: 'user-a', gameweek_id: 4, status: 'settled', settled_at: 'x' }],
-    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: 3 }],
+    potStandingsSnapshots: [{ pot_id: 'pot-1', gameweek_id: 4, user_id: 'user-a', rank: 1, score: PICK5_PICK_COUNT }],
     notificationsShouldFail: true,
   })
   const ctx = fakeDbContext(db)

@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts'
 import { classifyBulkPaymentRows, type BulkPaymentRow } from './bulkPayments.ts'
 import { handleReinstateEntry } from './reinstate.ts'
+import { handleRecordPayment } from './recordPayment.ts'
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -99,6 +100,13 @@ Deno.serve(async (req) => {
 
       case 'reinstate_entry': {
         const result = await handleReinstateEntry(adminClient, userData.user.id, pot_id, body)
+        return new Response(JSON.stringify(result), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        })
+      }
+
+      case 'record_payment': {
+        const result = await handleRecordPayment(adminClient, userData.user.id, pot_id, body)
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         })

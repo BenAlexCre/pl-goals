@@ -1152,6 +1152,13 @@ interface FakeAwardDb {
   members: FakeAwardMember[]
   notifications: FakeAwardNotification[]
   gameweeks: { id: number; deadline_utc: string }[]
+  // Corrections pass, 2026-08-10 — createRolloverPot() now calls the
+  // shared resolveNextSeasonLeague() helper (../season-resolution.ts),
+  // which reads these two tables. Empty by default (every pre-existing
+  // test that never rolls over never touches them); rollover tests supply
+  // a source league/season plus a matching next-season league/season.
+  leagues: { id: number; name: string; country: string; season_id: number }[]
+  seasons: { id: number; year_start: number }[]
   nextPotId: number
   failPotMembersInsert?: boolean
   failPotPrizesWrite?: boolean
@@ -1227,6 +1234,41 @@ function fakeAwardPrizeContext(db: FakeAwardDb, now: Date = new Date('2026-06-01
                 maybeSingle: () => Promise.resolve({ data: db.gameweeks.find((g) => g.id === id) ?? null, error: null }),
               }),
             }
+          },
+        }
+      }
+      if (table === 'leagues') {
+        return {
+          select(_cols: string) {
+            let filtered = db.leagues.slice()
+            const builder = {
+              eq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] === val)
+                return builder
+              },
+              maybeSingle: () => Promise.resolve({ data: filtered[0] ?? null, error: null }),
+            }
+            return builder
+          },
+        }
+      }
+      if (table === 'seasons') {
+        return {
+          select(_cols: string) {
+            let filtered = db.seasons.slice()
+            const builder = {
+              eq(col: string, val: unknown) {
+                filtered = filtered.filter((r) => (r as unknown as Record<string, unknown>)[col] === val)
+                return builder
+              },
+              order(_col: string, _opts: unknown) {
+                filtered = [...filtered].sort((a, b) => a.year_start - b.year_start)
+                return builder
+              },
+              maybeSingle: () => Promise.resolve({ data: filtered[0] ?? null, error: null }),
+              then: (resolve: (v: { data: unknown; error: null }) => void) => resolve({ data: filtered, error: null }),
+            }
+            return builder
           },
         }
       }
@@ -1328,7 +1370,28 @@ function baseAwardDb(pots: FakeAwardPot[], entries: FakeAwardEntryInput[]): Fake
     members: [],
     notifications: [],
     gameweeks: [],
+    leagues: [],
+    seasons: [],
     nextPotId: 1,
+  }
+}
+
+// Corrections pass, 2026-08-10 — leagues/seasons fixtures matching
+// baseAwardPot()'s own default league_id: 6, season_id: 3, plus a
+// following season (year_start greater) and its matching league, so
+// createRolloverPot()'s resolveNextSeasonLeague() call has a real target
+// to resolve instead of erroring. Any rollover test that doesn't
+// explicitly need a MISSING next season should spread this in.
+function rolloverReadySeasonFixtures(): Pick<FakeAwardDb, 'leagues' | 'seasons'> {
+  return {
+    leagues: [
+      { id: 6, name: 'Premier League', country: 'England', season_id: 3 },
+      { id: 7, name: 'Premier League', country: 'England', season_id: 4 },
+    ],
+    seasons: [
+      { id: 3, year_start: 2025 },
+      { id: 4, year_start: 2026 },
+    ],
   }
 }
 
@@ -1415,6 +1478,7 @@ Deno.test('awardPrize: wipeout + roll_prize pays nobody and creates a draft roll
     { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
     { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
   ])
+  Object.assign(db, rolloverReadySeasonFixtures())
   const ctx = fakeAwardPrizeContext(db)
   const engine = new LmsEngine()
 
@@ -1432,7 +1496,13 @@ Deno.test('awardPrize: wipeout + roll_prize pays nobody and creates a draft roll
   assertEquals((newPot as unknown as { carry_over_amount: number }).carry_over_amount, 20) // the full net prize
   assertEquals(newPot.rollover_generation, 1)
   assertEquals((newPot as unknown as { status: string }).status, 'draft')
-  assertEquals((newPot as unknown as { start_gameweek_id: unknown }).start_gameweek_id, undefined) // never set
+  assertEquals((newPot as unknown as { start_gameweek_id: unknown }).start_gameweek_id, undefined) // organiser sets it later
+  assertEquals((newPot as unknown as { end_gameweek_id: unknown }).end_gameweek_id, null, 'never carried over from the OLD season\'s cutoff — organiser sets it later')
+  assertEquals(
+    (newPot as unknown as { league_id: number }).league_id, 7,
+    'bug fix, 2026-08-10 — targets next season\'s matching league, not the source pot\'s own league'
+  )
+  assertEquals((newPot as unknown as { season_id: number }).season_id, 4)
 
   assertEquals(db.members.length, 1)
   assertEquals(db.members[0].pot_id, newPot.id)
@@ -1440,11 +1510,27 @@ Deno.test('awardPrize: wipeout + roll_prize pays nobody and creates a draft roll
   assertEquals(db.members[0].role, 'admin')
 })
 
+Deno.test('awardPrize: rollover pot creation fails loudly (retry-friendly) when no next-season league exists yet', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', wipeout_resolution: 'roll_prize' })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  // Deliberately no leagues/seasons fixtures — resolveNextSeasonLeague()
+  // must return null, and createRolloverPot() must throw rather than
+  // silently keep the source pot's own season/league (the pre-2026-08-10 bug).
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await assertRejects(() => engine.awardPrize(ctx, 'pot-1'))
+  assertEquals(db.pots.length, 1, 'no rollover pot created against the wrong season')
+})
+
 Deno.test('awardPrize: rollover default naming strips an existing "(Rollover #N)" suffix before appending the new one', async () => {
   const sourcePot = baseAwardPot({ id: 'pot-1', name: 'Premier League LMS (Rollover #1)', wipeout_resolution: 'roll_prize', rollover_generation: 1 })
   const db = baseAwardDb([sourcePot], [
     { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 20 },
   ])
+  Object.assign(db, rolloverReadySeasonFixtures())
   const ctx = fakeAwardPrizeContext(db)
   const engine = new LmsEngine()
 
@@ -1459,6 +1545,7 @@ Deno.test('awardPrize: rollover carry_over_amount includes the source pot\'s own
   const db = baseAwardDb([sourcePot], [
     { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
   ])
+  Object.assign(db, rolloverReadySeasonFixtures())
   const ctx = fakeAwardPrizeContext(db)
   const engine = new LmsEngine()
 
@@ -1468,11 +1555,37 @@ Deno.test('awardPrize: rollover carry_over_amount includes the source pot\'s own
   assertEquals((db.pots[1] as unknown as { carry_over_amount: number }).carry_over_amount, 60)
 })
 
+Deno.test('awardPrize: carry_over_amount fees are never re-applied — a percentage fee taxes only the fresh entry-fee gross', async () => {
+  // Corrections pass, 2026-08-10: aligns LMS with Pick5Engine.awardPrize()'s
+  // established rule. Without the fix, a 10% admin fee here would be
+  // computed against 60 (10 fresh + 50 carry) = 6; with the fix, it's
+  // computed against 10 (fresh only) = 1 — the carried 50 passes through
+  // untaxed, exactly as it was when it left the source pot already net.
+  const sourcePot = baseAwardPot({
+    id: 'pot-1', entry_fee: 10, carry_over_amount: 50,
+    admin_fee_type: 'percentage', admin_fee_percentage: 10,
+    wipeout_resolution: 'roll_prize',
+  })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  Object.assign(db, rolloverReadySeasonFixtures())
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].gross_amount, 60, 'stored gross is still the full combined total')
+  assertEquals(db.prizes[0].admin_fee_amount, 1, '10% of the fresh gross (10) only, never the carried 50')
+  assertEquals((db.pots[1] as unknown as { carry_over_amount: number }).carry_over_amount, 59, '60 - 1 fee, the correctly-taxed-once net')
+})
+
 Deno.test('awardPrize: rollover pot creation rolls back if adding the organiser as a member fails', async () => {
   const sourcePot = baseAwardPot({ wipeout_resolution: 'roll_prize' })
   const db = baseAwardDb([sourcePot], [
     { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
   ])
+  Object.assign(db, rolloverReadySeasonFixtures())
   db.failPotMembersInsert = true
   const ctx = fakeAwardPrizeContext(db)
   const engine = new LmsEngine()
@@ -1671,6 +1784,7 @@ Deno.test('awardPrize writes no notification for a roll_prize wipeout — nobody
     { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
     { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
   ])
+  Object.assign(db, rolloverReadySeasonFixtures())
   const ctx = fakeAwardPrizeContext(db)
   const engine = new LmsEngine()
 
