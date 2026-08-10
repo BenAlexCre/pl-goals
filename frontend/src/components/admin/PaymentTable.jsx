@@ -5,7 +5,7 @@ import Badge from '../ui/Badge'
 import Button from '../ui/Button'
 import Modal from '../ui/Modal'
 
-export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onReinstate, loadingUserId = null, reinstatingUserId = null }) {
+export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onReinstate, loadingUserId = null, reinstatingUserId = null, weekly = true }) {
   const [pendingReinstate, setPendingReinstate] = useState(null)
 
   function confirmReinstate() {
@@ -59,7 +59,7 @@ export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onRe
                   loading={loadingUserId === row.user_id}
                   onClick={() => onMarkPaid(row)}
                 >
-                  Mark paid for this week
+                  {weekly ? 'Mark paid for this week' : 'Mark paid'}
                 </Button>
               )}
             </div>

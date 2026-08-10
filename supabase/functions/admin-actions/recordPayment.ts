@@ -4,43 +4,32 @@
 // never pays through the application and never marks themselves paid. The
 // organiser collects money off-platform (cash, bank transfer, Revolut,
 // PayPal, etc.) and this action only RECORDS a payment that has already
-// been received: they enter the player and the amount received, and the
-// application allocates it automatically to that many future gameweeks —
-// the organiser never calculates or ticks individual weeks.
+// been received.
 //
-// Corrections pass, 2026-08-10: the first implementation of this action
-// (then named `prepay_weeks`) always targeted "the next N upcoming
-// gameweeks," regardless of whether some of them were already paid (e.g.
-// via a prior individual "mark paid for this week" action, or an earlier
-// payment record). That under-covers the amount actually received — if
-// week 3 was already paid and a new payment is meant to cover 4 MORE
-// weeks, the player should end up with 4 additional weeks of paid cover,
-// not 3 new + 1 wasted re-confirming a week that was already paid. Fixed:
-// the target set now explicitly skips any gameweek already marked paid for
-// this user (see paymentAllocation.ts's own comment for the pure decision
-// logic, extracted and unit-tested the same way bulkPayments.ts's
-// classifyBulkPaymentRows() already is).
+// Launch Readiness Sprint 1B (2026-08-10, resolves ISSUE-35): extended
+// beyond Pick 5. This action previously threw outright for any non-Pick-5
+// pot ("Recording a payment this way is only available for Pick 5 pots").
+// LMS/Score Predictor are season-scoped (GE-4.5 — one flat entry fee for
+// the whole competition, one entry_payments row per member, scope='season',
+// gameweek_id null) — there is no "how many weeks does this amount cover"
+// question for them, only "does it match the one-time season fee." The two
+// scopes are different enough (weekly allocation with skip-already-paid
+// logic vs. a single exact-match payment) that they're handled by two
+// separate small functions below, dispatched on `pots.game_type`, rather
+// than forcing one into the other's shape.
 //
-// dry_run (default true) computes and returns the target week count/ids
-// without writing anything — the confirmation step ("£25 received. This
-// will mark 5 future Pick 5 weeks as paid.") the admin UI shows before
-// committing, same convention bulk_verify_payments already established.
-// The write itself is one multi-row upsert (entry_payments' own natural
-// key, pot_id/user_id/gameweek_id, is a full 3-column unique constraint —
-// Pick 5 is always scope='gameweek', so this never needs
-// upsertEntryPayment()'s partial-index workaround), not a loop of
-// individual get-or-create-by-id calls — a single INSERT ... ON CONFLICT
-// statement is atomic, so a write failure can never leave some of the N
-// weeks recorded and others not.
-//
-// Phase 7 Stage 2 Slice 4: the response now includes each allocated (and
-// each skipped-already-paid) gameweek's number/name, not just its id — "the
-// organiser should always understand exactly what is about to happen"
-// means naming GW6/GW7/..., not just a count. gameweeks was already being
-// fetched for allocation purposes; this only widens the select().
+// dry_run (default true) computes and returns the result of either path
+// without writing anything — the confirmation step the admin UI shows
+// before committing, same convention bulk_verify_payments already
+// established. Both paths reuse the shared `upsertEntryPayment()`
+// get-or-create-by-id helper for their actual writes (also used by
+// mark_paid/mark_unpaid) rather than re-deriving that logic — "do not
+// duplicate backend logic."
 
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { computePaymentAllocation } from './paymentAllocation.ts'
+import { validateSeasonPayment } from './seasonPaymentValidation.ts'
+import { upsertEntryPayment } from './upsertEntryPayment.ts'
 
 export interface RecordPaymentGameweek {
   id: number
@@ -48,8 +37,10 @@ export interface RecordPaymentGameweek {
   name: string
 }
 
-export interface RecordPaymentResult {
+// Pick 5 — many weekly entry_payments rows, allocated automatically.
+export interface RecordPaymentWeeklyResult {
   success: true
+  scope: 'gameweek'
   dry_run: boolean
   weeks_requested: number
   weeks_materialized: number
@@ -57,6 +48,18 @@ export interface RecordPaymentResult {
   gameweeks: RecordPaymentGameweek[]
   already_paid_gameweeks: RecordPaymentGameweek[]
 }
+
+// LMS / Score Predictor — a single one-time season payment. The preview
+// shape the product brief asked for directly: status before, status after.
+export interface RecordPaymentSeasonResult {
+  success: true
+  scope: 'season'
+  dry_run: boolean
+  status_before: 'paid' | 'unpaid'
+  status_after: 'paid' | 'unpaid'
+}
+
+export type RecordPaymentResult = RecordPaymentWeeklyResult | RecordPaymentSeasonResult
 
 export async function handleRecordPayment(
   adminClient: SupabaseClient,
@@ -82,9 +85,6 @@ export async function handleRecordPayment(
     throw new Error(`Pot not found: ${potError?.message ?? potId}`)
   }
   const potRow = pot as { id: string; game_type: string; league_id: number; season_id: number; entry_fee: number }
-  if (potRow.game_type !== 'pick5') {
-    throw new Error('Recording a payment this way is only available for Pick 5 pots')
-  }
 
   const { data: member } = await adminClient
     .from('pot_members')
@@ -96,6 +96,23 @@ export async function handleRecordPayment(
     throw new Error('User is not a member of this pot')
   }
 
+  if (potRow.game_type === 'pick5') {
+    return handleWeeklyRecordPayment(adminClient, callerId, potId, targetUserId, amount, dryRun, potRow)
+  }
+  return handleSeasonRecordPayment(adminClient, callerId, potId, targetUserId, amount, dryRun, potRow.entry_fee)
+}
+
+// Pick 5's original implementation, unchanged in behavior — just renamed
+// and split out of the dispatcher above.
+async function handleWeeklyRecordPayment(
+  adminClient: SupabaseClient,
+  callerId: string,
+  potId: string,
+  targetUserId: string,
+  amount: number,
+  dryRun: boolean,
+  potRow: { league_id: number; season_id: number; entry_fee: number }
+): Promise<RecordPaymentWeeklyResult> {
   // Every gameweek not yet locked/started, in this pot's own league/season
   // (rule 3: Pick 5 always spans the whole season, no organiser cutoff).
   const { data: gameweeks, error: gwError } = await adminClient
@@ -148,6 +165,7 @@ export async function handleRecordPayment(
   if (dryRun) {
     return {
       success: true,
+      scope: 'gameweek',
       dry_run: true,
       weeks_requested: weeksRequested,
       weeks_materialized: targetGameweekIds.length,
@@ -157,6 +175,11 @@ export async function handleRecordPayment(
     }
   }
 
+  // Single multi-row upsert (entry_payments' pot_id/user_id/gameweek_id is
+  // a full 3-column unique constraint here — Pick 5 is always
+  // scope='gameweek', so this never needs upsertEntryPayment()'s partial-
+  // index workaround) — atomic, so a write failure can never leave some of
+  // the N weeks recorded and others not.
   if (targetGameweekIds.length > 0) {
     const now = new Date().toISOString()
     const { error: writeError } = await adminClient.from('entry_payments').upsert(
@@ -178,6 +201,7 @@ export async function handleRecordPayment(
 
   return {
     success: true,
+    scope: 'gameweek',
     dry_run: false,
     weeks_requested: weeksRequested,
     weeks_materialized: targetGameweekIds.length,
@@ -185,4 +209,48 @@ export async function handleRecordPayment(
     gameweeks: targetGameweeks,
     already_paid_gameweeks: alreadyPaidGameweeks,
   }
+}
+
+// LMS / Score Predictor — one entry_payments row, one exact-match payment.
+async function handleSeasonRecordPayment(
+  adminClient: SupabaseClient,
+  callerId: string,
+  potId: string,
+  targetUserId: string,
+  amount: number,
+  dryRun: boolean,
+  entryFee: number
+): Promise<RecordPaymentSeasonResult> {
+  const validation = validateSeasonPayment(amount, entryFee)
+  if (validation.outcome === 'invalid_amount') {
+    throw new Error(validation.reason)
+  }
+
+  const { data: existing, error: lookupError } = await adminClient
+    .from('entry_payments')
+    .select('is_paid')
+    .eq('pot_id', potId)
+    .eq('user_id', targetUserId)
+    .is('gameweek_id', null)
+    .maybeSingle()
+
+  if (lookupError) {
+    throw new Error(`Failed to look up existing payment: ${lookupError.message}`)
+  }
+
+  const statusBefore: 'paid' | 'unpaid' = (existing as { is_paid: boolean } | null)?.is_paid ? 'paid' : 'unpaid'
+
+  if (dryRun) {
+    return { success: true, scope: 'season', dry_run: true, status_before: statusBefore, status_after: 'paid' }
+  }
+
+  await upsertEntryPayment(adminClient, {
+    pot_id: potId,
+    user_id: targetUserId,
+    gameweek_id: null,
+    is_paid: true,
+    marked_by: callerId,
+  })
+
+  return { success: true, scope: 'season', dry_run: false, status_before: statusBefore, status_after: 'paid' }
 }

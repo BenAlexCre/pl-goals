@@ -258,21 +258,42 @@ and later needs correcting). A player's own view is read-only: paid/unpaid statu
 only — a player can never mark themselves paid, edit payment status, or enter a
 payment amount anywhere in the app.
 
-**Implemented, 2026-08-05**: a pot admin (or app admin) can now actually verify
-payments, both ways, through `/admin/payments` — `pages/AdminPayments.jsx`. Single
-entry: a table of every pot member's payment status for the selected pot+gameweek,
-with Mark paid/Mark unpaid buttons, calling `admin-actions`' existing `mark_paid`/
-`mark_unpaid` actions. Bulk CSV: upload a file in the exact format above, click
-"Validate & preview" (calls the new `bulk_verify_payments` action with `dry_run:
-true` — resolves every identifier/pot, validates every row, writes nothing, shows
-the full outcome table), review it, then "Confirm import" (the same call with
-`dry_run: false`) to apply. Every row in one import applies to a single gameweek,
-selected in the UI before uploading — the fixed CSV format has no gameweek column.
-Verified live, end-to-end, through the real application: manual paid/unpaid,
-CSV import (including duplicate identifiers, unknown users, unknown pots, an
-invalid status value, and rows already in their target state), and settlement
-correctly respecting a payment verified via CSV (an entry that would otherwise
-void settled and won its pot once its CSV row was applied).
+**Record payment received (Last Man Standing / Score Predictor), decided and
+implemented 2026-08-10, Launch Readiness Sprint 1B.** LMS and Score Predictor
+are season-scoped, GE-4.5 — one flat entry fee for the whole competition, not
+a weekly one — so "Record payment received" asks a simpler question than
+Pick 5's: does the amount received exactly match the pot's one-time entry
+fee? There is no week count to compute and no partial-coverage case. An
+amount that doesn't match exactly is rejected with a clear error naming both
+the amount entered and the pot's actual entry fee. The preview shows the
+member's payment status before and after ("Unpaid → Paid"), not a list of
+gameweeks — there's only ever one payment to make. Mark paid/Mark unpaid and
+Late Payment Override reinstatement work identically to Pick 5, since both
+already operated on the same underlying `entry_payments` row shape regardless
+of scope. Bulk CSV import remains Pick 5-only — a CSV keyed to "one
+gameweek" has no natural season-scoped equivalent, and it wasn't part of
+this sprint's scope for either mode.
+
+**Implemented, 2026-08-05 (Pick 5), extended 2026-08-10 to LMS/Score
+Predictor**: a pot admin (or app admin) can now actually verify payments,
+both ways, through `/admin/payments` — `pages/AdminPayments.jsx`, which
+branches on the pot's game mode. Single entry: a table of every pot member's
+payment status for the selected pot (plus gameweek, for Pick 5), with Mark
+paid/Mark unpaid buttons, calling `admin-actions`' existing `mark_paid`/
+`mark_unpaid` actions. Bulk CSV (Pick 5 only): upload a file in the exact
+format above, click "Validate & preview" (calls the new `bulk_verify_payments`
+action with `dry_run: true` — resolves every identifier/pot, validates every
+row, writes nothing, shows the full outcome table), review it, then "Confirm
+import" (the same call with `dry_run: false`) to apply. Every row in one
+import applies to a single gameweek, selected in the UI before uploading —
+the fixed CSV format has no gameweek column. Verified live, end-to-end,
+through the real application: manual paid/unpaid, CSV import (including
+duplicate identifiers, unknown users, unknown pots, an invalid status value,
+and rows already in their target state), and settlement correctly respecting
+a payment verified via CSV (an entry that would otherwise void settled and
+won its pot once its CSV row was applied); LMS's and Score Predictor's
+season-scoped record-payment/mark-paid/mark-unpaid/reinstate flows verified
+live the same way, 2026-08-10.
 
 **Two rules from the spec above with a real, disclosed limitation, not silently
 assumed satisfied:**

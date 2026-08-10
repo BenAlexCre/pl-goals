@@ -145,11 +145,10 @@ export function usePotMembers(potId) {
   })
 }
 
-// Every pot member's payment status for one pot+gameweek — the "entries
-// awaiting verification" view. Based on pot_members, not game_entries: an
-// admin can verify payment before a member has even submitted picks
-// (matches mark_paid's existing behavior, which has never required an
-// entry to exist first).
+// Every pot member's payment status — the "entries awaiting verification"
+// view. Based on pot_members, not game_entries: an admin can verify
+// payment before a member has even submitted picks (matches mark_paid's
+// existing behavior, which has never required an entry to exist first).
 //
 // gameType, added Phase 7 Stage 2 Slice 4: also resolves each member's
 // game_entries.status/reinstated_at, so the table can offer "Reinstate
@@ -158,10 +157,16 @@ export function usePotMembers(potId) {
 // payment is now marked paid. Pick 5's entry is gameweek-scoped; LMS's/
 // Predictor's is season-scoped (gameweek_id null) — same GE-4.5 split
 // reinstate.ts's own lookup already makes.
+//
+// Launch Readiness Sprint 1B (resolves ISSUE-35): gameweekId is now only
+// required for Pick 5 — LMS/Score Predictor have exactly one payment for
+// the whole season (scope='season', gameweek_id null), so there's no
+// per-gameweek table to select first for them at all.
 export function usePaymentStatus(potId, gameweekId, gameType) {
+  const isPick5 = gameType === 'pick5'
   return useQuery({
-    queryKey: ['payment-status', potId, gameweekId],
-    enabled: !!potId && !!gameweekId,
+    queryKey: ['payment-status', potId, gameweekId, gameType],
+    enabled: !!potId && !!gameType && (!isPick5 || !!gameweekId),
     queryFn: async () => {
       const { data: members, error: membersError } = await supabase
         .from('pot_members')
@@ -169,16 +174,17 @@ export function usePaymentStatus(potId, gameweekId, gameType) {
         .eq('pot_id', potId)
       if (membersError) throw membersError
 
-      const { data: payments, error: paymentsError } = await supabase
+      let paymentsQuery = supabase
         .from('entry_payments')
         .select('user_id, is_paid, marked_at, notes')
         .eq('pot_id', potId)
-        .eq('gameweek_id', gameweekId)
-        .eq('scope', 'gameweek')
+        .eq('scope', isPick5 ? 'gameweek' : 'season')
+      paymentsQuery = isPick5 ? paymentsQuery.eq('gameweek_id', gameweekId) : paymentsQuery.is('gameweek_id', null)
+      const { data: payments, error: paymentsError } = await paymentsQuery
       if (paymentsError) throw paymentsError
 
       let entriesQuery = supabase.from('game_entries').select('user_id, status, reinstated_at').eq('pot_id', potId)
-      entriesQuery = gameType === 'pick5' ? entriesQuery.eq('gameweek_id', gameweekId) : entriesQuery.is('gameweek_id', null)
+      entriesQuery = isPick5 ? entriesQuery.eq('gameweek_id', gameweekId) : entriesQuery.is('gameweek_id', null)
       const { data: entries, error: entriesError } = await entriesQuery
       if (entriesError) throw entriesError
 

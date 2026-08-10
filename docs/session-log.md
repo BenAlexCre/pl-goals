@@ -13,6 +13,81 @@ from here.
 
 ---
 
+## 2026-08-10 (60) — Launch Readiness Sprint 1B: Season Payment Management
+
+**Goal:** complete organiser payment management for LMS and Score Predictor
+using the existing Payment Verification backend, reusing Pick 5's own admin
+UX where it applies. Explicit boundary: no Game Engine redesign, no payment/
+rollover redesign, no business-rule changes, no wallets/balances/credits/
+gateways/checkout — backend changes limited to genuine integration bugs.
+
+**Architecture review** (`ISSUE-35`, `AdminPayments.jsx`, `PaymentTable.jsx`,
+`useAdmin.js`, `recordPayment.ts`, `paymentAllocation.ts`, `mark_paid`/
+`mark_unpaid`/`reinstate_entry`, `get-or-create-lms-entry`/
+`-predictor-entry`, `entry_payments`, `game_entries`) found the gap was
+narrower than `ISSUE-35`'s original discovery implied: `mark_paid`/
+`mark_unpaid` already correctly handled season-scoped rows
+(`upsertEntryPayment()`'s get-or-create-by-id pattern), and `reinstate_entry`
+was already fully mode-generic from `ISSUE-36`'s own fix. The one genuine
+backend gap was `record_payment`, which threw outright for any
+`game_type !== 'pick5'`.
+
+**Backend**: `record_payment` now dispatches on `pots.game_type` —
+`handleWeeklyRecordPayment()` (Pick 5's original logic, extracted unchanged)
+vs. the new `handleSeasonRecordPayment()`, which validates the amount
+exactly matches the pot's one-time entry fee via a new pure
+`validateSeasonPayment()` (`seasonPaymentValidation.ts`, unit-tested
+standalone) and reuses `upsertEntryPayment()` for its write. The response is
+a discriminated union on `scope` (`'gameweek'` vs `'season'`) so the
+frontend preview can show the right shape for each. `upsertEntryPayment()`
+was extracted to its own file so both `index.ts` and `recordPayment.ts`
+could import it without a circular dependency. **Bug found while reviewing
+`mark_unpaid` per the brief's own review list**: a dead write to the
+retired `user_entries` prototype table — confirmed, not assumed, that it
+was already a guaranteed no-op for every mode (`.eq('gameweek_id', null)`
+can never match any row in SQL) and that settlement never depended on it
+(`Pick5Engine.settle()` reads `entry_payments.is_paid` directly) — removed,
+documented in place.
+
+**Frontend**: `AdminPayments.jsx`/`PaymentTable.jsx` now branch on
+`selectedPot.game_type`. The gameweek selector and the entire Bulk CSV
+import section only render for Pick 5 (deliberately out of scope for LMS/
+Predictor per the brief's own "Required functionality" checklists). Record
+payment/mark paid/mark unpaid/reinstate/view status now render for every
+mode; the payment preview branches on the response's `scope` field
+(existing weekly-allocation chips vs. a new simple paid-status-before/after
+view). `usePaymentStatus()` no longer hard-requires a `gameweekId`.
+`PaymentTable.jsx`'s mark-paid button label is now mode-aware.
+
+**Verification**: `deno check` clean; full suite 341/341 (5 new tests for
+`validateSeasonPayment`); `npm run build` clean. **Live-verified** against
+the real local database and UI: created a fresh LMS pot and a fresh Score
+Predictor pot (entry fees 25/10, against the Premier League league/season
+with future-dated gameweeks — `ISSUE-39`'s already-documented "Current"
+league having zero gameweeks caused an expected `403` on the first LMS
+attempt against past-dated World Cup fixtures, a test-setup correction, not
+a bug). Both new pots: payment preview showed the correct status-before/
+after and pre-filled entry fee; confirming showed "marked paid for the
+season"; mark paid/unpaid both worked with the mode-aware label; a
+manually-voided entry correctly showed "Reinstate entry" and reinstated
+with zero console errors; an invalid amount was correctly rejected. Pick 5
+regression confirmed unchanged (gameweek selector, weekly wording, "Mark
+paid for this week" label, mark paid/unpaid). All three test pots and their
+dependent rows (including one `pot_prizes` row and one notification
+produced by the reinstate-triggered settle) removed by exact ID in a single
+transaction, independently re-verified as zero residue — `pots` back to the
+exact pre-session baseline of 2 rows.
+
+**Result:** `ISSUE-35` resolved. LMS and Score Predictor organisers can now
+record, mark, and reinstate payments through the same UI Pick 5 already
+used. No Game Engine, rollover, or settlement logic touched; no wallet/
+balance/credit/gateway concept introduced. Not committed, per explicit
+instruction. See [project-board.md § Done](./project-board.md#done),
+[current-state.md § Resolved issues](./current-state.md#resolved-issues),
+and [decisions.md § Season Payment Management (ISSUE-35)](./decisions.md#season-payment-management-issue-35).
+
+---
+
 ## 2026-08-10 (59) — Launch Readiness Sprint 1A: Security & Authorisation
 
 **Goal:** close the two remaining launch-blocking security gaps — `ISSUE-9`

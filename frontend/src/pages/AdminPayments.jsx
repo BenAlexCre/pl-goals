@@ -24,6 +24,12 @@ ben@example.com,Premier League Pool,Paid,Revolut
 adam@example.com,Premier League Pool,Paid,Cash
 0871234567,Premier League Pool,Unpaid,Chargeback`
 
+const GAME_TYPE_LABEL = {
+  pick5: 'Pick 5',
+  last_man_standing: 'Last Man Standing',
+  score_predictor: 'Score Predictor',
+}
+
 function outcomeBadgeStatus(outcome) {
   if (outcome === 'updated') return 'won'
   if (outcome === 'skipped') return 'pending'
@@ -59,18 +65,30 @@ function GameweekChip({ gw, tone = 'allocate' }) {
   )
 }
 
+function StatusBadge({ status }) {
+  return <Badge status={status === 'paid' ? 'paid' : 'unpaid'}>{status === 'paid' ? 'Paid' : 'Unpaid'}</Badge>
+}
+
 export default function AdminPayments() {
   const addToast = useUiStore((s) => s.addToast)
 
   const { data: pots = [], isLoading: potsLoading } = usePotsForAdmin()
   const [selectedPotId, setSelectedPotId] = useState('')
   const selectedPot = useMemo(() => pots.find((p) => p.id === selectedPotId) ?? null, [pots, selectedPotId])
+  // Launch Readiness Sprint 1B (resolves ISSUE-35) — the per-gameweek table
+  // and per-gameweek Bulk CSV import only ever applied to Pick 5 (GE-4.5:
+  // its entry is gameweek-scoped; LMS's/Score Predictor's is season-scoped
+  // — one payment for the whole competition, not one per gameweek).
+  // Recording a payment, marking paid/unpaid, viewing status, and
+  // reinstating an entry all now work for every mode — see usePaymentStatus/
+  // useRecordPayment for the season-scoped branch.
+  const isPick5 = selectedPot?.game_type === 'pick5'
 
   useEffect(() => {
     if (!selectedPotId && pots.length > 0) setSelectedPotId(pots[0].id)
   }, [pots, selectedPotId])
 
-  const { data: gameweeks = [] } = useGameweeksForPot(selectedPot?.season_id, selectedPot?.league_id)
+  const { data: gameweeks = [] } = useGameweeksForPot(isPick5 ? selectedPot?.season_id : null, isPick5 ? selectedPot?.league_id : null)
   const [selectedGameweekId, setSelectedGameweekId] = useState('')
 
   useEffect(() => {
@@ -83,14 +101,14 @@ export default function AdminPayments() {
     if (current) setSelectedGameweekId(String(current.id))
   }, [gameweeks, selectedGameweekId])
 
-  const gameweekIdNum = selectedGameweekId ? Number(selectedGameweekId) : null
+  const gameweekIdNum = isPick5 && selectedGameweekId ? Number(selectedGameweekId) : null
   const { data: statusRows = [], isLoading: statusLoading } = usePaymentStatus(selectedPotId, gameweekIdNum, selectedPot?.game_type)
 
   const markPayment = useMarkPayment()
   const [loadingUserId, setLoadingUserId] = useState(null)
 
   async function handleMark(row, isPaid) {
-    if (!selectedGameweekId) return
+    if (isPick5 && !selectedGameweekId) return
     setLoadingUserId(row.user_id)
     try {
       await markPayment.mutateAsync({
@@ -99,7 +117,10 @@ export default function AdminPayments() {
         userId: row.user_id,
         gameweekId: gameweekIdNum,
       })
-      addToast({ type: 'success', message: `${row.display_name || row.username} marked ${isPaid ? 'paid' : 'unpaid'} for this week` })
+      addToast({
+        type: 'success',
+        message: `${row.display_name || row.username} marked ${isPaid ? 'paid' : 'unpaid'}${isPick5 ? ' for this week' : ''}`,
+      })
     } catch (err) {
       addToast({ type: 'error', message: err.message || 'Failed to update payment status' })
     } finally {
@@ -110,18 +131,19 @@ export default function AdminPayments() {
   // ISSUE-36 — Late Payment Override has always had a working backend
   // action, reinstate_entry, with no UI trigger anywhere. Offered only
   // where it's actually decidable: an entry voided for non-payment whose
-  // payment is now marked paid.
+  // payment is now marked paid. Already mode-generic on the backend
+  // (GE-4.5) — gameweekId is only meaningful for Pick 5.
   const reinstateEntry = useReinstateEntry()
   const [reinstatingUserId, setReinstatingUserId] = useState(null)
 
   async function handleReinstate(row) {
-    if (!selectedGameweekId) return
+    if (isPick5 && !selectedGameweekId) return
     setReinstatingUserId(row.user_id)
     try {
       const result = await reinstateEntry.mutateAsync({
         potId: selectedPotId,
         userId: row.user_id,
-        gameweekId: selectedPot?.game_type === 'pick5' ? gameweekIdNum : undefined,
+        gameweekId: gameweekIdNum,
       })
       addToast({
         type: result.reinstated ? 'success' : 'error',
@@ -136,13 +158,13 @@ export default function AdminPayments() {
     }
   }
 
-  // --- Record payment received (Pick 5 only) ---
-  // Deliberately independent of the gameweek selector above: a recorded
-  // payment allocates across whichever future gameweeks are unpaid, not
-  // the one gameweek happening to be selected for the per-week table below
-  // — forcing the organiser to pick one first would be an unnecessary
-  // click with no bearing on this action.
-  const { data: potMembers = [], isLoading: membersLoading } = usePotMembers(selectedPot?.game_type === 'pick5' ? selectedPotId : null)
+  // --- Record payment received (every mode) ---
+  // Deliberately independent of the gameweek selector above (which no
+  // longer even renders for LMS/Score Predictor): a recorded payment
+  // either allocates across whichever future gameweeks are unpaid (Pick 5)
+  // or settles the one season payment (LMS/Predictor) — neither depends on
+  // a particular gameweek being selected first.
+  const { data: potMembers = [], isLoading: membersLoading } = usePotMembers(selectedPotId)
   const recordPayment = useRecordPayment()
   const [paymentUserId, setPaymentUserId] = useState('')
   const [paymentAmount, setPaymentAmount] = useState('')
@@ -161,6 +183,17 @@ export default function AdminPayments() {
     setPaymentPreview(null)
     setPaymentApplied(null)
   }, [selectedPotId])
+
+  // For a season-scoped pot there is only ever one valid amount (the
+  // one-time entry fee) — pre-filling it is a small convenience, not a
+  // new capability: the organiser can still change it, and an amount that
+  // doesn't match is still rejected with a clear error either way.
+  useEffect(() => {
+    if (selectedPot && !isPick5 && paymentAmount === '') {
+      setPaymentAmount(String(selectedPot.entry_fee))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPot, isPick5])
 
   const paymentAmountNumber = Number(paymentAmount)
   const paymentAmountValid = paymentAmount !== '' && Number.isFinite(paymentAmountNumber) && paymentAmountNumber > 0
@@ -187,13 +220,17 @@ export default function AdminPayments() {
       const result = await recordPayment.mutateAsync({ potId: selectedPotId, userId: paymentUserId, amount: paymentAmountNumber, dryRun: false })
       setPaymentApplied(result)
       setPaymentPreview(null)
-      setPaymentAmount('') // ready for a genuinely new payment; selected member is kept
       addToast({
         type: 'success',
-        message: result.weeks_materialized > 0
-          ? `Payment recorded — ${result.weeks_materialized} week${result.weeks_materialized === 1 ? '' : 's'} marked paid`
-          : 'Payment recorded — no eligible unpaid weeks remained to allocate',
+        message: result.scope === 'season'
+          ? 'Payment recorded — marked paid for the season'
+          : result.weeks_materialized > 0
+            ? `Payment recorded — ${result.weeks_materialized} week${result.weeks_materialized === 1 ? '' : 's'} marked paid`
+            : 'Payment recorded — no eligible unpaid weeks remained to allocate',
       })
+      // Ready for a genuinely new payment; a season-scoped pot only ever
+      // has one valid amount, so re-seed it rather than leaving it blank.
+      setPaymentAmount(!isPick5 && selectedPot ? String(selectedPot.entry_fee) : '')
     } catch (err) {
       addToast({ type: 'error', message: err.message || 'Failed to record this payment' })
     } finally {
@@ -203,7 +240,9 @@ export default function AdminPayments() {
 
   const selectedMemberName = potMembers.find((m) => m.user_id === paymentUserId)?.display_name
 
-  // --- CSV bulk import ---
+  // --- CSV bulk import (Pick 5 only — ISSUE-35's own scope never asked for
+  // a season-scoped bulk import, and a CSV keyed to "one gameweek" has no
+  // natural equivalent for a one-time season payment) ---
   const [csvText, setCsvText] = useState('')
   const [csvFileName, setCsvFileName] = useState('')
   const [preview, setPreview] = useState(null) // { rows, results, summary }
@@ -297,7 +336,7 @@ export default function AdminPayments() {
       </Card>
 
       <Card className="p-5">
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className={`grid gap-3 ${isPick5 ? 'md:grid-cols-2' : 'md:grid-cols-1'}`}>
           <div>
             <label htmlFor="admin-payments-pot" className="mb-2 block text-sm text-white/70">Pot</label>
             {potsLoading ? (
@@ -314,31 +353,33 @@ export default function AdminPayments() {
                 className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
               >
                 {pots.map((pot) => (
-                  <option key={pot.id} value={pot.id}>{pot.name}</option>
+                  <option key={pot.id} value={pot.id}>{pot.name} — {GAME_TYPE_LABEL[pot.game_type] ?? pot.game_type}</option>
                 ))}
               </select>
             )}
           </div>
 
-          <div>
-            <label htmlFor="admin-payments-gameweek" className="mb-2 block text-sm text-white/70">
-              Gameweek <span className="text-white/30">(for per-week actions below)</span>
-            </label>
-            <select
-              id="admin-payments-gameweek"
-              value={selectedGameweekId}
-              onChange={(e) => { setSelectedGameweekId(e.target.value); setPreview(null); setApplyResult(null) }}
-              disabled={!selectedPotId || gameweeks.length === 0}
-              className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50 disabled:opacity-50"
-            >
-              <option value="">Select a gameweek</option>
-              {gameweeks.map((gw) => (
-                <option key={gw.id} value={gw.id}>
-                  GW{gw.number} — {gw.name}{gw.is_current ? ' — Current' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
+          {isPick5 && (
+            <div>
+              <label htmlFor="admin-payments-gameweek" className="mb-2 block text-sm text-white/70">
+                Gameweek <span className="text-white/30">(for per-week actions below)</span>
+              </label>
+              <select
+                id="admin-payments-gameweek"
+                value={selectedGameweekId}
+                onChange={(e) => { setSelectedGameweekId(e.target.value); setPreview(null); setApplyResult(null) }}
+                disabled={!selectedPotId || gameweeks.length === 0}
+                className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50 disabled:opacity-50"
+              >
+                <option value="">Select a gameweek</option>
+                {gameweeks.map((gw) => (
+                  <option key={gw.id} value={gw.id}>
+                    GW{gw.number} — {gw.name}{gw.is_current ? ' — Current' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </Card>
 
@@ -346,120 +387,150 @@ export default function AdminPayments() {
         <EmptyState icon={CreditCard} title="Select a pot" description="Choose a pot above to manage its payments." />
       ) : (
         <>
-          {selectedPot?.game_type === 'pick5' && (
-            <section>
-              <h2 className="mb-3 text-lg font-semibold text-white">Record payment received</h2>
-              <Card className="p-5 space-y-4">
-                <p className="text-sm text-white/45">
-                  The organiser collects payment off-platform (cash, bank transfer, Revolut, PayPal, etc.) — this
-                  only records that it was received. Enter who paid and how much; the amount must be an exact
-                  multiple of the weekly entry fee ({selectedPot?.entry_fee ?? '—'}), and the app allocates it
-                  automatically to that member's next unpaid eligible Pick 5 gameweeks. No individual week-ticking
-                  required.
-                </p>
-
-                {membersLoading ? (
-                  <div className="flex items-center gap-2 text-sm text-white/40"><Spinner size="sm" /> Loading members...</div>
-                ) : potMembers.length === 0 ? (
-                  <EmptyState icon={Wallet} title="No members yet" description="Invite players to this pot before recording a payment." />
+          <section>
+            <h2 className="mb-3 text-lg font-semibold text-white">Record payment received</h2>
+            <Card className="p-5 space-y-4">
+              <p className="text-sm text-white/45">
+                The organiser collects payment off-platform (cash, bank transfer, Revolut, PayPal, etc.) — this
+                only records that it was received.{' '}
+                {isPick5 ? (
+                  <>Enter who paid and how much; the amount must be an exact multiple of the weekly entry fee
+                    ({selectedPot?.entry_fee ?? '—'}), and the app allocates it automatically to that member's next
+                    unpaid eligible Pick 5 gameweeks. No individual week-ticking required.</>
                 ) : (
-                  <>
-                    <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto]">
-                      <select
-                        aria-label="Member who paid"
-                        value={paymentUserId}
-                        onChange={(e) => { setPaymentUserId(e.target.value); setPaymentPreview(null); setPaymentApplied(null) }}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
-                      >
-                        <option value="">Select a member</option>
-                        {potMembers.map((m) => (
-                          <option key={m.user_id} value={m.user_id}>{m.display_name}</option>
-                        ))}
-                      </select>
-                      <input
-                        aria-label="Amount received"
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={paymentAmount}
-                        onChange={(e) => { setPaymentAmount(e.target.value); setPaymentPreview(null); setPaymentApplied(null) }}
-                        placeholder="Amount received"
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
-                      />
-                      <Button
-                        variant="secondary"
-                        onClick={handlePreviewPayment}
-                        loading={recordPayment.isPending && !paymentApplied}
-                        disabled={!paymentUserId || !paymentAmountValid}
-                      >
-                        Preview
-                      </Button>
-                    </div>
-
-                    {paymentPreview && (
-                      <div className="rounded-xl border border-white/8 bg-black/10 p-4 space-y-3" role="status">
-                        <p className="text-sm text-white">
-                          <span className="font-medium">{paymentAmount} received</span> from {selectedMemberName}. This will mark
-                          {' '}{paymentPreview.weeks_materialized === 0 ? 'no' : paymentPreview.weeks_materialized} future Pick 5 week
-                          {paymentPreview.weeks_materialized === 1 ? '' : 's'} as paid:
-                        </p>
-
-                        {paymentPreview.already_paid_gameweeks.length > 0 && (
-                          <div>
-                            <div className="mb-1.5 text-xs uppercase tracking-wide text-white/35">Already paid (skipped)</div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {paymentPreview.already_paid_gameweeks.map((gw) => (
-                                <GameweekChip key={gw.id} gw={gw} tone="skip" />
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {paymentPreview.gameweeks.length > 0 && (
-                          <div>
-                            <div className="mb-1.5 text-xs uppercase tracking-wide text-white/35">Will allocate to</div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {paymentPreview.gameweeks.map((gw) => (
-                                <GameweekChip key={gw.id} gw={gw} tone="allocate" />
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {paymentPreview.weeks_materialized < paymentPreview.weeks_requested && (
-                          <p className="flex items-center gap-2 text-xs text-amber">
-                            <AlertTriangle size={14} />
-                            Only {paymentPreview.weeks_materialized} of {paymentPreview.weeks_requested} requested weeks
-                            are available — fewer eligible gameweeks remain this season. Nothing is refunded or carried
-                            over automatically.
-                          </p>
-                        )}
-
-                        <div className="flex justify-end">
-                          <Button onClick={handleConfirmPayment} loading={recordPayment.isPending}>
-                            <CheckCircle2 size={16} />
-                            Confirm &amp; record payment
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-
-                    {paymentApplied && (
-                      <div className="flex items-center gap-2 rounded-xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent" role="status">
-                        <CheckCircle2 size={16} />
-                        Payment verified — {paymentApplied.weeks_materialized} week{paymentApplied.weeks_materialized === 1 ? '' : 's'} marked paid
-                        {paymentApplied.gameweeks.length > 0 && (
-                          <span className="text-accent/70">({paymentApplied.gameweeks.map((gw) => `GW${gw.number}`).join(', ')})</span>
-                        )}
-                      </div>
-                    )}
-                  </>
+                  <>Enter who paid — the amount must exactly match this pot's one-time entry fee
+                    ({selectedPot?.entry_fee ?? '—'}), covering the whole {GAME_TYPE_LABEL[selectedPot?.game_type]} season.</>
                 )}
-              </Card>
-            </section>
-          )}
+              </p>
 
-          {!selectedGameweekId ? (
+              {membersLoading ? (
+                <div className="flex items-center gap-2 text-sm text-white/40"><Spinner size="sm" /> Loading members...</div>
+              ) : potMembers.length === 0 ? (
+                <EmptyState icon={Wallet} title="No members yet" description="Invite players to this pot before recording a payment." />
+              ) : (
+                <>
+                  <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto]">
+                    <select
+                      aria-label="Member who paid"
+                      value={paymentUserId}
+                      onChange={(e) => { setPaymentUserId(e.target.value); setPaymentPreview(null); setPaymentApplied(null) }}
+                      className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
+                    >
+                      <option value="">Select a member</option>
+                      {potMembers.map((m) => (
+                        <option key={m.user_id} value={m.user_id}>{m.display_name}</option>
+                      ))}
+                    </select>
+                    <input
+                      aria-label="Amount received"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={paymentAmount}
+                      onChange={(e) => { setPaymentAmount(e.target.value); setPaymentPreview(null); setPaymentApplied(null) }}
+                      placeholder="Amount received"
+                      className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={handlePreviewPayment}
+                      loading={recordPayment.isPending && !paymentApplied}
+                      disabled={!paymentUserId || !paymentAmountValid}
+                    >
+                      Preview
+                    </Button>
+                  </div>
+
+                  {paymentPreview && paymentPreview.scope === 'gameweek' && (
+                    <div className="rounded-xl border border-white/8 bg-black/10 p-4 space-y-3" role="status">
+                      <p className="text-sm text-white">
+                        <span className="font-medium">{paymentAmount} received</span> from {selectedMemberName}. This will mark
+                        {' '}{paymentPreview.weeks_materialized === 0 ? 'no' : paymentPreview.weeks_materialized} future Pick 5 week
+                        {paymentPreview.weeks_materialized === 1 ? '' : 's'} as paid:
+                      </p>
+
+                      {paymentPreview.already_paid_gameweeks.length > 0 && (
+                        <div>
+                          <div className="mb-1.5 text-xs uppercase tracking-wide text-white/35">Already paid (skipped)</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {paymentPreview.already_paid_gameweeks.map((gw) => (
+                              <GameweekChip key={gw.id} gw={gw} tone="skip" />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {paymentPreview.gameweeks.length > 0 && (
+                        <div>
+                          <div className="mb-1.5 text-xs uppercase tracking-wide text-white/35">Will allocate to</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {paymentPreview.gameweeks.map((gw) => (
+                              <GameweekChip key={gw.id} gw={gw} tone="allocate" />
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {paymentPreview.weeks_materialized < paymentPreview.weeks_requested && (
+                        <p className="flex items-center gap-2 text-xs text-amber">
+                          <AlertTriangle size={14} />
+                          Only {paymentPreview.weeks_materialized} of {paymentPreview.weeks_requested} requested weeks
+                          are available — fewer eligible gameweeks remain this season. Nothing is refunded or carried
+                          over automatically.
+                        </p>
+                      )}
+
+                      <div className="flex justify-end">
+                        <Button onClick={handleConfirmPayment} loading={recordPayment.isPending}>
+                          <CheckCircle2 size={16} />
+                          Confirm &amp; record payment
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {paymentPreview && paymentPreview.scope === 'season' && (
+                    <div className="rounded-xl border border-white/8 bg-black/10 p-4 space-y-3" role="status">
+                      <p className="text-sm text-white">
+                        <span className="font-medium">{paymentAmount} received</span> from {selectedMemberName} — the
+                        whole-season entry fee.
+                      </p>
+                      <div className="flex items-center gap-3 text-sm">
+                        <span className="text-white/50">Payment status:</span>
+                        <StatusBadge status={paymentPreview.status_before} />
+                        <span className="text-white/30">→</span>
+                        <StatusBadge status={paymentPreview.status_after} />
+                      </div>
+                      <div className="flex justify-end">
+                        <Button onClick={handleConfirmPayment} loading={recordPayment.isPending}>
+                          <CheckCircle2 size={16} />
+                          Confirm &amp; record payment
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {paymentApplied && (
+                    <div className="flex items-center gap-2 rounded-xl border border-accent/25 bg-accent/10 px-4 py-3 text-sm text-accent" role="status">
+                      <CheckCircle2 size={16} />
+                      {paymentApplied.scope === 'season' ? (
+                        <>Payment verified — marked paid for the season</>
+                      ) : (
+                        <>
+                          Payment verified — {paymentApplied.weeks_materialized} week{paymentApplied.weeks_materialized === 1 ? '' : 's'} marked paid
+                          {paymentApplied.gameweeks.length > 0 && (
+                            <span className="text-accent/70">({paymentApplied.gameweeks.map((gw) => `GW${gw.number}`).join(', ')})</span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </Card>
+          </section>
+
+          {isPick5 && !selectedGameweekId ? (
             <EmptyState
               icon={CreditCard}
               title="Select a gameweek"
@@ -478,6 +549,7 @@ export default function AdminPayments() {
                     rows={paymentTableRows}
                     loadingUserId={loadingUserId}
                     reinstatingUserId={reinstatingUserId}
+                    weekly={isPick5}
                     onMarkPaid={(row) => handleMark(row, true)}
                     onMarkUnpaid={(row) => handleMark(row, false)}
                     onReinstate={handleReinstate}
@@ -485,102 +557,104 @@ export default function AdminPayments() {
                 )}
               </section>
 
-              <section className="space-y-4">
-                <h2 className="text-lg font-semibold text-white">Bulk CSV import</h2>
-                <Card className="p-5 space-y-4">
-                  <p className="text-sm text-white/45">
-                    Format: <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Identifier,Pot,Status,Notes</code> — Identifier
-                    is an email or phone number, Status is exactly <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Paid</code> or{' '}
-                    <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Unpaid</code>, Notes is optional. Every row in this
-                    import applies to the gameweek selected above.
-                  </p>
-
-                  <details className="rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/40">
-                    <summary className="cursor-pointer select-none text-white/60">Example CSV</summary>
-                    <pre className="mt-2 overflow-x-auto whitespace-pre">{CSV_EXAMPLE}</pre>
-                  </details>
-
-                  <div className="flex flex-wrap items-center gap-3">
-                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 bg-surface-2 px-4 py-2.5 text-sm text-white transition hover:border-accent/40">
-                      <Upload size={16} />
-                      Choose CSV file
-                      <input type="file" accept=".csv,text/csv" onChange={handleFileChange} className="hidden" aria-label="Choose CSV file" />
-                    </label>
-                    {csvFileName && (
-                      <span className="inline-flex items-center gap-1.5 text-sm text-white/60">
-                        <FileText size={14} /> {csvFileName}
-                      </span>
-                    )}
-                    <Button
-                      variant="secondary"
-                      disabled={!csvText}
-                      loading={bulkVerify.isPending && !applyResult}
-                      onClick={handlePreview}
-                    >
-                      Validate &amp; preview
-                    </Button>
-                  </div>
-                </Card>
-
-                {activeSummary && (
+              {isPick5 && (
+                <section className="space-y-4">
+                  <h2 className="text-lg font-semibold text-white">Bulk CSV import</h2>
                   <Card className="p-5 space-y-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <h3 className="font-semibold text-white">
-                        {applyResult ? 'Import summary' : 'Preview — nothing has been written yet'}
-                      </h3>
-                      {!applyResult && (
-                        <Button onClick={handleConfirmImport} loading={bulkVerify.isPending}>
-                          <CheckCircle2 size={16} />
-                          Confirm import
-                        </Button>
+                    <p className="text-sm text-white/45">
+                      Format: <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Identifier,Pot,Status,Notes</code> — Identifier
+                      is an email or phone number, Status is exactly <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Paid</code> or{' '}
+                      <code className="rounded bg-white/8 px-1.5 py-0.5 text-xs">Unpaid</code>, Notes is optional. Every row in this
+                      import applies to the gameweek selected above.
+                    </p>
+
+                    <details className="rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/40">
+                      <summary className="cursor-pointer select-none text-white/60">Example CSV</summary>
+                      <pre className="mt-2 overflow-x-auto whitespace-pre">{CSV_EXAMPLE}</pre>
+                    </details>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 bg-surface-2 px-4 py-2.5 text-sm text-white transition hover:border-accent/40">
+                        <Upload size={16} />
+                        Choose CSV file
+                        <input type="file" accept=".csv,text/csv" onChange={handleFileChange} className="hidden" aria-label="Choose CSV file" />
+                      </label>
+                      {csvFileName && (
+                        <span className="inline-flex items-center gap-1.5 text-sm text-white/60">
+                          <FileText size={14} /> {csvFileName}
+                        </span>
                       )}
+                      <Button
+                        variant="secondary"
+                        disabled={!csvText}
+                        loading={bulkVerify.isPending && !applyResult}
+                        onClick={handlePreview}
+                      >
+                        Validate &amp; preview
+                      </Button>
                     </div>
-
-                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                      <SummaryStat label="Processed" value={activeSummary.processed} />
-                      <SummaryStat label="Updated" value={activeSummary.updated} tone="good" />
-                      <SummaryStat label="Skipped" value={activeSummary.skipped} tone="warn" />
-                      <SummaryStat label="Failed" value={activeSummary.failed} tone="bad" />
-                    </div>
-
-                    <div className="overflow-x-auto rounded-xl border border-white/8">
-                      <table className="w-full text-left text-sm">
-                        <thead>
-                          <tr className="border-b border-white/8 text-xs uppercase tracking-wide text-white/35">
-                            <th className="px-3 py-2">Row</th>
-                            <th className="px-3 py-2">Identifier</th>
-                            <th className="px-3 py-2">Pot</th>
-                            <th className="px-3 py-2">Status</th>
-                            <th className="px-3 py-2">Outcome</th>
-                            <th className="px-3 py-2">Reason</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/6">
-                          {activeResults.map((r) => (
-                            <tr key={r.row}>
-                              <td className="px-3 py-2 text-white/50 tabular">{r.row}</td>
-                              <td className="px-3 py-2 text-white">{r.identifier}</td>
-                              <td className="px-3 py-2 text-white/70">{r.pot}</td>
-                              <td className="px-3 py-2 text-white/70">{r.status}</td>
-                              <td className="px-3 py-2">
-                                <Badge status={outcomeBadgeStatus(r.outcome)}>{r.outcome}</Badge>
-                              </td>
-                              <td className="px-3 py-2 text-white/45">{r.reason ?? '—'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {!applyResult && activeSummary.failed > 0 && (
-                      <p className="flex items-center gap-2 text-xs text-amber">
-                        <AlertTriangle size={14} />
-                        {activeSummary.failed} row(s) will be skipped on import — fix and re-upload if they should be included.
-                      </p>
-                    )}
                   </Card>
-                )}
-              </section>
+
+                  {activeSummary && (
+                    <Card className="p-5 space-y-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="font-semibold text-white">
+                          {applyResult ? 'Import summary' : 'Preview — nothing has been written yet'}
+                        </h3>
+                        {!applyResult && (
+                          <Button onClick={handleConfirmImport} loading={bulkVerify.isPending}>
+                            <CheckCircle2 size={16} />
+                            Confirm import
+                          </Button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                        <SummaryStat label="Processed" value={activeSummary.processed} />
+                        <SummaryStat label="Updated" value={activeSummary.updated} tone="good" />
+                        <SummaryStat label="Skipped" value={activeSummary.skipped} tone="warn" />
+                        <SummaryStat label="Failed" value={activeSummary.failed} tone="bad" />
+                      </div>
+
+                      <div className="overflow-x-auto rounded-xl border border-white/8">
+                        <table className="w-full text-left text-sm">
+                          <thead>
+                            <tr className="border-b border-white/8 text-xs uppercase tracking-wide text-white/35">
+                              <th className="px-3 py-2">Row</th>
+                              <th className="px-3 py-2">Identifier</th>
+                              <th className="px-3 py-2">Pot</th>
+                              <th className="px-3 py-2">Status</th>
+                              <th className="px-3 py-2">Outcome</th>
+                              <th className="px-3 py-2">Reason</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/6">
+                            {activeResults.map((r) => (
+                              <tr key={r.row}>
+                                <td className="px-3 py-2 text-white/50 tabular">{r.row}</td>
+                                <td className="px-3 py-2 text-white">{r.identifier}</td>
+                                <td className="px-3 py-2 text-white/70">{r.pot}</td>
+                                <td className="px-3 py-2 text-white/70">{r.status}</td>
+                                <td className="px-3 py-2">
+                                  <Badge status={outcomeBadgeStatus(r.outcome)}>{r.outcome}</Badge>
+                                </td>
+                                <td className="px-3 py-2 text-white/45">{r.reason ?? '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {!applyResult && activeSummary.failed > 0 && (
+                        <p className="flex items-center gap-2 text-xs text-amber">
+                          <AlertTriangle size={14} />
+                          {activeSummary.failed} row(s) will be skipped on import — fix and re-upload if they should be included.
+                        </p>
+                      )}
+                    </Card>
+                  )}
+                </section>
+              )}
             </>
           )}
         </>

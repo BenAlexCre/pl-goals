@@ -499,20 +499,6 @@ Standings section). Not moved to Resolved issues, since the legacy code itself
 hasn't been removed — only superseded.
 Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
-#### ISSUE-35 — Season-scoped (LMS/Predictor) payments have no admin UI path
-**Discovered 2026-08-09**, during the Phase 7 Stage 1 audit. `pages/AdminPayments.jsx`
-is hard-scoped to gameweek-scoped payments throughout: `usePaymentStatus`
-explicitly filters `.eq('scope', 'gameweek')`, and `handleMark`/the bulk-CSV
-flow always pass a `gameweekId`. `admin-actions`' `mark_paid`/`mark_unpaid`
-already support season-scoped rows (`gameweek_id: null`, per their documented
-body shape) — the backend capability exists — but nothing in the admin UI can
-ever produce that call, and `bulk_verify_payments` is hard-required to take a
-`gameweek_id` too (its own body shape has no season-scoped mode at all,
-confirmed by reading `bulkPayments.ts`). Once `ISSUE-33`/`ISSUE-34` are
-addressed and a real LMS/Predictor pot with a one-time season entry fee
-exists, an admin will have no way to verify that payment, individually or in
-bulk, through the UI. **Status: confirmed, not fixed.**
-
 #### ISSUE-39 — No gameweek anywhere in the seed data has `is_current = true`; the "current" season's Premier League has zero gameweeks
 **Discovered 2026-08-09**, while live-verifying `ISSUE-34`'s pot-creation form
 fix through the real browser UI. `select count(*) from gameweeks where
@@ -1156,6 +1142,36 @@ modal. Zero backend changes. Live-verified: a void-but-now-paid Pick 5
 entry was reinstated through the real UI and confirmed re-settled correctly
 in the database via the existing `calculateScore()`/`settle()` recompute
 pipeline.
+
+#### ISSUE-35 — Season-scoped (LMS/Predictor) payments have no admin UI path
+**Discovered 2026-08-09**, during the Phase 7 Stage 1 audit. **Resolved
+2026-08-10**, Launch Readiness Sprint 1B. `pages/AdminPayments.jsx` was hard-
+scoped to gameweek-scoped payments throughout: `usePaymentStatus` explicitly
+filtered `.eq('scope', 'gameweek')`, and `handleMark`/the bulk-CSV flow always
+passed a `gameweekId`. `admin-actions`' `mark_paid`/`mark_unpaid` already
+supported season-scoped rows (`gameweek_id: null`) — only the frontend had no
+path to call them without a gameweek. `record_payment` was the one genuine
+backend gap: it threw outright for any non-Pick-5 pot. Fixed by dispatching
+on `pots.game_type` (`handleWeeklyRecordPayment` — Pick 5's original logic,
+unchanged in behavior — vs. the new `handleSeasonRecordPayment`, which
+validates the amount matches the one-time entry fee exactly via the new pure
+`validateSeasonPayment()` and reuses the existing `upsertEntryPayment()`
+get-or-create-by-id write). `AdminPayments.jsx` now branches on
+`selectedPot.game_type`: the gameweek selector and Bulk CSV import section
+(deliberately left Pick 5-only — not requested for LMS/Predictor) only render
+for Pick 5; "Record payment received" and "Entries awaiting verification"
+render for every mode, with the payment preview branching on the response's
+`scope` (`'gameweek'` — the existing per-week allocation chips — vs.
+`'season'` — a simple paid-status-before/after view).
+`PaymentTable.jsx`'s mark-paid button label is now mode-aware ("Mark paid"
+vs. "Mark paid for this week"). Also found and removed while reviewing
+`mark_unpaid`: a dead write to the retired `user_entries` prototype table
+that could never match any row (see
+[decisions.md § Season Payment Management (ISSUE-35)](./decisions.md#season-payment-management-issue-35)
+for the full bug writeup). Live-verified end to end: LMS and Score Predictor
+payment preview/confirm, mark paid/unpaid, reinstate, and a Pick 5 regression
+pass, all through the real UI against a local database with zero residue
+after cleanup.
 
 #### ISSUE-9 — `/admin` has no UI-level role gate
 **Discovered** at initial documentation; **re-verified, not assumed, 2026-08-10**
