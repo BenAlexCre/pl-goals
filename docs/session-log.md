@@ -13,6 +13,79 @@ from here.
 
 ---
 
+## 2026-08-10 (62) — Production Readiness Sprint: Staging & Deployment Audit
+
+**Goal:** confirm this project can be deployed to a fresh Supabase project
+and operated without developer intervention — every migration, extension,
+secret, cron dependency, and manual provisioning step verified against
+actual source, not assumed from `DEPLOYMENT.md`'s own prior text. Explicit
+boundary: no new features, no redesign of any kind, fix only genuine
+deployment/operational bugs, keep changes small.
+
+**Method:** re-derived every claim from source rather than trusting
+documentation — grepped every `Deno.env.get`/`import.meta.env.VITE_*` call,
+queried `supabase_migrations.schema_migrations`/`pg_extension`/`pg_class`/
+`pg_policy` directly, traced `app_admin` provisioning through
+`is_app_admin()`'s actual definition, read `config.toml`'s auth section
+directly.
+
+**One genuine deployment bug found and fixed, `ISSUE-45`**: `.env.example`
+documented `FOOTBALL_DATA_KEY`/`FOOTBALL_COMPETITION_CODE`/`FOOTBALL_SEASON`
+— no code reads any of these — and omitted `SUPABASE_ANON_KEY`, required by
+seven Edge Functions. Confirmed live: this project's own `sync-fixtures` has
+never had a working API key locally as a direct result. Fixed by correcting
+the documented variable names to what the code actually reads.
+
+**Two gaps found, documented rather than silently worked around** (correct
+fix depends on information only available at real deployment time):
+`pg_net`/`pgcrypto` required but never explicitly created by any
+migration (relies on the Supabase platform's own defaults — flagged as a
+verification step for non-standard targets); `config.toml`'s `site_url`
+still the CLI scaffold default, not matching this project's own real dev
+port, flagged as a required pre-production step.
+
+**`app_admin` provisioning traced to its actual mechanism**: confirmed via
+grep — no bootstrap logic anywhere sets `app_metadata.role = 'app_admin'`
+for any user; every grant on this project has been a manual Admin API/
+Dashboard action. Now documented explicitly as a required post-provision
+step, including the GoTrue `app_metadata` merge-not-replace gotcha Launch
+Readiness Sprint 2 already found the hard way.
+
+**Migration replay verified directly**: all 23 migrations confirmed
+applied, in order, zero gaps, via `supabase_migrations.schema_migrations` —
+direct evidence, not an inference. A full from-scratch throwaway-database
+replay was considered and deliberately not attempted (would require
+rebuilding a large slice of the Supabase platform's own baseline schemas,
+disproportionate to this sprint's "keep changes small" boundary given the
+direct evidence already in hand).
+
+**Documentation produced**: `DEPLOYMENT.md` rewritten in full (the prior
+2026-08-06 version predated Milestone 6 and every Launch Readiness sprint —
+wrong migration count, missing function, claimed Score Predictor
+unimplemented, no mention of `ISSUE-26`/`ISSUE-40`/`app_admin`
+provisioning). New `SMOKE-TESTS.md`, built from steps already proven live
+during Launch Readiness Sprint 2. `deployment-checklist.md` left unmodified
+— it's an explicit point-in-time historical record, not a living document.
+`api.md`'s missing Score Predictor endpoints found, flagged in
+`project-board.md`'s Backlog, not expanded into (out of proportion for this
+sprint).
+
+**Verification:** full suite 341/341 unchanged; `deno check`/`npm run
+build` both clean (no code touched — documentation and one config template
+only). No live database mutations beyond read-only verification queries; no
+test data created, nothing to clean up.
+
+**Result:** `ISSUE-45` resolved. A fresh deployer now has a complete,
+source-verified checklist in one place, including the two most
+consequential failure modes this project has actually hit (`ISSUE-40`'s GUC
+mismatch, `ISSUE-45`'s `.env.example` drift) called out explicitly. Not
+committed, per explicit instruction. See
+[project-board.md § Done](./project-board.md#done),
+[current-state.md § Resolved issues](./current-state.md#resolved-issues),
+and [decisions.md § Production Readiness Sprint](./decisions.md#production-readiness-sprint--staging--deployment-audit).
+
+---
+
 ## 2026-08-10 (61) — Launch Readiness Sprint 2: End-to-End Workflow Audit
 
 **Goal:** verify the entire application — organiser, player, and

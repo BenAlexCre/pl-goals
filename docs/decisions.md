@@ -4357,3 +4357,123 @@ the real UI and real Edge Functions today, not just unit-tested in
 isolation — including a critical, previously-invisible finding
 (`ISSUE-40`) that the automated pipeline itself had been silently
 non-functional since the very security fix meant to protect it.
+
+---
+
+## Production Readiness Sprint — Staging & Deployment Audit
+
+**Decision, 2026-08-10**: audit whether this project can actually be
+deployed to a fresh Supabase project and operated without developer
+intervention — every migration, extension, secret, cron dependency, and
+manual provisioning step, verified against the actual code rather than
+assumed from `DEPLOYMENT.md`'s own prior text. Explicit boundary: no new
+product features, no Game Engine/payment/rollover/frontend redesign, fix
+only genuine deployment/operational bugs found, keep changes small.
+
+**Method — verify, don't carry forward.** Every claim in the prior
+`DEPLOYMENT.md` (dated 2026-08-06, predating Milestone 6 and every Launch
+Readiness sprint) was re-checked against current source rather than
+trusted: `Deno.env.get(...)` grepped across every Edge Function,
+`import.meta.env.VITE_*` grepped across the frontend, migration count and
+apply history queried directly from `supabase_migrations.schema_migrations`,
+extension presence queried directly from `pg_extension`, RLS/policy shape
+queried directly from `pg_class`/`pg_policy`, `app_admin` provisioning
+mechanism traced through `is_app_admin()`'s actual SQL definition, and
+`config.toml`'s auth section read directly rather than assumed to already
+reflect this project's own real dev setup.
+
+**One genuine, confirmed deployment bug found and fixed**: `.env.example`
+(the primary template for anyone standing up this project) documented
+`FOOTBALL_DATA_KEY`/`FOOTBALL_COMPETITION_CODE`/`FOOTBALL_SEASON` — no code
+anywhere reads any of these three names — and never listed
+`SUPABASE_ANON_KEY` at all, despite seven Edge Functions requiring it.
+Confirmed, not theoretical: this project's own local environment has never
+had a working `sync-fixtures` API key as a direct result, visible in its own
+`sync_runs` history. Fixed by correcting the variable names to what the code
+actually reads (`VITE_FOOTBALL_DATA_KEY`, `COMPETITION_ID`), with a comment
+explaining the `VITE_` naming holdover so it doesn't get "corrected" back to
+something wrong by a future reader who doesn't check the source first. Full
+detail: [current-state.md § ISSUE-45](./current-state.md#issue-45--envexample-documented-the-wrong-variable-names-for-the-football-api-integration-and-omitted-supabase_anon_key).
+
+**Two genuine gaps found, documented rather than silently worked around,
+since the correct fix depends on information this session doesn't have**:
+
+1. **`pg_net`/`pgcrypto` are required by this project's own migrations and
+   cron jobs but never explicitly created by any migration** — confirmed
+   present in the local database despite this, because the Supabase
+   platform (both the CLI's local Postgres image and hosted projects)
+   pre-provisions them. Flagged in `DEPLOYMENT.md` § 2 as a verification
+   step for any non-standard Postgres target, not silently assumed present
+   everywhere.
+2. **`config.toml`'s `[auth]` `site_url`/`additional_redirect_urls` are
+   still the CLI's untouched scaffold default** (`http://127.0.0.1:3000`) —
+   not even matching this project's own actual local dev port (`5173`,
+   confirmed throughout every live-testing session this repository has had).
+   Gone unnoticed because `enable_confirmations = false` locally means no
+   email-redirect flow is ever actually exercised in dev. Will matter
+   immediately in production for password reset/email confirmation links.
+   Not silently corrected here — the *correct* value is the real deployed
+   domain, which this document cannot know in advance — flagged as a
+   required pre-production step in `DEPLOYMENT.md` § 8 instead.
+
+**`app_admin` provisioning traced to its actual mechanism, not assumed**:
+confirmed via grep that no migration, script, or bootstrap logic anywhere
+ever sets `app_metadata.role = 'app_admin'` for any user — every admin grant
+on this project's own environment (including every one this session and
+Launch Readiness Sprint 2 performed for testing) has been a manual Admin
+API/Dashboard action. This is now documented as an explicit, required
+post-provision step (`DEPLOYMENT.md` § 8) rather than left for a future
+deployer to discover the hard way, along with the GoTrue `app_metadata`
+merge-not-replace behavior Launch Readiness Sprint 2 already found the hard
+way (an empty-object revert silently leaves a previous grant in place; only
+an explicit `{"role": null}` clears it).
+
+**Migration replay verified directly, not assumed**: queried
+`supabase_migrations.schema_migrations` directly — all 23 migrations
+(`001` through `023`) recorded applied, in order, with zero gaps. This
+project's own local database's entire schema history came from exactly this
+sequential apply process (`supabase start`'s fresh-provision-and-migrate
+flow), which is itself direct evidence the sequence replays cleanly, not an
+inference from documentation. A full from-scratch replay against a
+throwaway database was considered and deliberately not attempted — faithfully
+reproducing Supabase's own platform-provided baseline (the `auth`/`storage`/
+`realtime`/`vault` schemas, roles, and extensions every migration assumes
+already exist) inside a bare `CREATE DATABASE` would require rebuilding a
+large slice of the Supabase platform itself, disproportionate to this
+sprint's own "keep changes small" boundary given the direct evidence already
+in hand.
+
+**Documentation produced**: `DEPLOYMENT.md` rewritten in full (the prior
+version's Edge Function inventory was missing `submit-predictor-picks`,
+claimed "16 migrations" against an actual 23, claimed Score Predictor was
+"not yet implemented beyond entry creation" despite Milestone 6 having
+shipped it completely, and didn't mention `ISSUE-26`'s auth requirement,
+`ISSUE-40`'s GUC-mismatch failure mode, or `app_admin` provisioning at all).
+New `SMOKE-TESTS.md` — a step-by-step, mode-aware checklist covering every
+item this sprint's own brief listed, written from steps already proven live
+during Launch Readiness Sprint 2 rather than invented fresh.
+`deployment-checklist.md` (the ISSUE-19/20/21 historical execution log) left
+unmodified — it's explicitly a point-in-time record, not a living document.
+
+**Not fixed, flagged instead**: `api.md` does not mention Score Predictor's
+endpoints at all (`get-or-create-predictor-entry`, `submit-predictor-picks`)
+— confirmed via grep, a real staleness gap, but a full `api.md` rewrite is a
+larger scope than this sprint's own "keep changes small" boundary given
+`DEPLOYMENT.md § 4`'s own function inventory already covers the same ground
+for deployment purposes; left as a Backlog item rather than expanded into
+here.
+
+**Verification performed**: `deno check` clean across every touched/existing
+function (none touched this sprint — no code changes, only documentation and
+one config template). Full suite 341/341 unchanged. `npm run build` clean.
+No live database mutations required for this sprint's own findings beyond
+read-only verification queries (extension list, migration history, RLS/
+policy shape, `app_admin` mechanism) — nothing to clean up, no test data
+created.
+
+**What this rules out**: a fresh deployer following `DEPLOYMENT.md` now has
+a complete, source-verified checklist — every required extension, secret,
+migration, cron dependency, and manual provisioning step documented in one
+place, including the two most consequential failure modes this project has
+actually hit (the `ISSUE-40` GUC mismatch and the `ISSUE-45` `.env.example`
+drift) called out explicitly rather than left to be rediscovered.

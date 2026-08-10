@@ -755,6 +755,37 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-45 — `.env.example` documented the wrong variable names for the football API integration and omitted `SUPABASE_ANON_KEY`
+**Discovered and resolved 2026-08-10, Production Readiness Sprint (Staging &
+Deployment Audit).** Verified, not assumed: grepped every `Deno.env.get(...)`
+call across `supabase/functions/` and every `import.meta.env.VITE_*` call
+across `frontend/src/`, then diffed the result against `.env.example`.
+`.env.example` (and this project's own `.env`/`frontend/.env.local`, which
+mirror it) documented `FOOTBALL_DATA_KEY`, `FOOTBALL_COMPETITION_CODE`, and
+`FOOTBALL_SEASON` — **no code anywhere reads any of these three names.**
+`sync-fixtures/index.ts` actually reads `VITE_FOOTBALL_DATA_KEY` (confirmed
+line 28 — the `VITE_` prefix is a naming holdover from an earlier design,
+not a typo to silently "correct," since renaming it would be a code change
+out of this sprint's scope) and `COMPETITION_ID` (a numeric api-football
+league ID, falling back to the request body's `competitionId`, then to the
+literal default `'WC'`). Separately, `.env.example` never listed
+`SUPABASE_ANON_KEY` at all, despite seven Edge Functions requiring it
+(`admin-actions`, all three `get-or-create-*-entry` functions, all three
+`submit-*-pick*` functions, and — via `_shared/adminOrCronAuth.ts` — the
+four `ISSUE-26`-gated functions' own human-app-admin auth path). **Impact,
+confirmed live**: this project's own local environment has never had a
+working `sync-fixtures` API key as a result — `sync_runs` shows repeated
+`failed`, `0 processed` entries for this job, matching exactly what a
+missing/misnamed key would produce. **Fixed** by correcting `.env.example`
+to the verified-correct variable names, with an inline comment explaining
+the `VITE_` naming holdover so a future reader doesn't "fix" it into
+something the code no longer reads. **Not fixed**: this project's own local
+`sync-fixtures` still has no real API key configured — that requires a real,
+paid third-party credential outside this session's reach; flagged clearly in
+[DEPLOYMENT.md § 5](./DEPLOYMENT.md#5-secrets-and-environment-variables) as
+a required step for any real deployment rather than silently left
+undiscoverable.
+
 #### ISSUE-40 — Every cron-triggered call to `compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures` silently failed with 401
 **Discovered and resolved 2026-08-10, Launch Readiness Sprint 2 (End-to-End
 Workflow Audit).** The local database's `app.settings.service_role_key` GUC
