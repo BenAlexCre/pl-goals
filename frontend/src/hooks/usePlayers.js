@@ -20,7 +20,16 @@ export function useAvailablePlayers(gameweekId, search = '') {
 
       const { data, error } = await q
       if (error) throw error
-      return data ?? []
+      // Sprint 2 audit: available_players_by_gameweek can return more than
+      // one row per player_id (player_team_history has no "one active team
+      // per player" constraint) — dedupe so the same player never appears
+      // twice in the picker. See PotDetail.jsx's own dedupeByPlayerId.
+      const seen = new Set()
+      return (data ?? []).filter((row) => {
+        if (seen.has(row.player_id)) return false
+        seen.add(row.player_id)
+        return true
+      })
     },
   })
 }

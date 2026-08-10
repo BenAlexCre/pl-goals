@@ -4190,3 +4190,170 @@ pre-session baseline of 2 rows.
 mark, and reinstate payments through the same UI Pick 5 already used, with
 no wallet/balance/credit/gateway concept introduced anywhere, and no Game
 Engine, rollover, or settlement logic touched.
+
+---
+
+## Launch Readiness Sprint 2 — End-to-End Workflow Audit
+
+**Decision, 2026-08-10**: verify that the entire application — every
+organiser, player, and operational workflow, across all three game modes —
+can actually be operated start to finish using only functionality that
+already exists, live, through the real UI and real Edge Functions, not
+assumed from prior sessions' own verification. Explicit boundary: no new
+features, no Game Engine/payment/rollover/frontend redesign, fix only
+genuine bugs found during the audit, keep fixes as small as possible.
+
+**Method.** Created one real pot per mode (Pick 5, LMS, Score Predictor)
+against the Premier League league/season with genuinely future fixture
+data — the previously-used FIFA World Cup league's fixtures are now all in
+the past relative to today, correctly triggering `get-or-create-lms-entry`'s
+entry-window `403` on the first attempt, a test-setup correction, not a
+bug. A second real player (`bentest3@gmail.com`, an existing but previously
+unused seed account, given a temporary known password via the Admin API)
+joined every pot through the real UI (`add_member`) and the real invite-
+code flow (a third account, `bentest4@gmail.com`, redeemed a generated
+invite code as a genuinely new, signed-out visitor — confirming the
+redirect-preserving sign-in flow still works). Locking, scoring, and
+settlement were driven by temporarily moving real fixtures' `kickoff_utc`
+into the past and seeding real `fixture_events` goal rows (the same
+technique every prior session's own live verification already used),
+calling the real `compute-deadlines`/`compute-scores`/`settle-gameweek`
+Edge Functions directly — not simulated, not mocked.
+
+**Four genuine bugs found and fixed, all confirmed by live reproduction
+before any fix was written:**
+
+1. **`ISSUE-40` (critical) — every real cron tick to `compute-deadlines`/
+   `compute-scores`/`settle-gameweek`/`sync-fixtures` was silently getting
+   `401`'d**, invisible to `cron.job_run_details` (which only reflects the
+   SQL enqueue succeeding, not the downstream HTTP response — confirmed by
+   checking `net._http_response` directly, per `/health`'s own guidance).
+   Root cause: the local database's `app.settings.service_role_key` GUC
+   held a new-format `sb_secret_...` key while the Edge Runtime's actual
+   `SUPABASE_SERVICE_ROLE_KEY` env var — what `_shared/adminOrCronAuth.ts`
+   (`ISSUE-26`'s own fix, Launch Readiness Sprint 1A) compares against —
+   held the legacy `eyJhbGc...` JWT key. This has been breaking the entire
+   automated pipeline since Sprint 1A shipped, not something this session
+   introduced. Fixed by correcting the live GUC to match (`ALTER DATABASE
+   ... SET`, run as `supabase_admin` — same ownership split `ISSUE-21`
+   already documents); confirmed via a real, unmodified cron tick returning
+   `200` afterward. Full detail: [current-state.md § ISSUE-40](./current-state.md#issue-40--every-cron-triggered-call-to-compute-deadlinescompute-scoressettle-gameweeksync-fixtures-silently-failed-with-401).
+   **This is a local-environment configuration fix only** — any deployed
+   Supabase project needs the identical check against its own GUC.
+
+2. **`ISSUE-3` (confirmed, previously only "unverified") —
+   `player_fixture_goals` was never refreshed**, so `compute-scores` always
+   read zero goals for every player, silently. Fixed with one `sb.rpc(
+   'refresh_player_fixture_goals')` call at the top of `compute-scores/
+   index.ts`, before either the retired-prototype scoring loop or any
+   `GameEngine.calculateScore()` reads the view. Full detail:
+   [current-state.md § ISSUE-3](./current-state.md#resolved-issues).
+
+3. **`ISSUE-43` — `potManager.jsx`'s "Your pots" list duplicated every pot
+   with 2+ members**, once per fellow member, because `loadPots()` queried
+   `pot_members` with no `user_id` filter and relied solely on RLS (whose
+   own `is_pot_member(pot_id)` SELECT policy is intentionally broader than
+   "own rows only," correct for the Members list elsewhere). Fixed with one
+   `.eq('user_id', user.id)`. Never caught before because every prior
+   session's own live verification happened to use single-member or
+   same-viewer-only test pots. Full detail:
+   [current-state.md § ISSUE-43](./current-state.md#resolved-issues).
+
+4. **Duplicate player entries in the Pick 5 picker** — `PotDetail.jsx`'s
+   player picker showed the same real player twice, under two different
+   club badges, for any player with more than one `player_team_history`
+   row marked `is_active = true` (confirmed: 158 players currently have
+   this, some on two different Premier League clubs at once, genuinely bad
+   reference data — see `ISSUE-42`). Mitigated at the query-consumption
+   level (`dedupeByPlayerId()` in `PotDetail.jsx`, the same fix applied to
+   `usePlayers.js`'s hook) rather than guessing which club is actually
+   correct for each affected player and silently rewriting historical data
+   — that's a data-ownership question for whoever owns the sync process,
+   not something to fix blind. Full detail:
+   [current-state.md § ISSUE-42](./current-state.md#issue-42--player_team_history-has-players-active-on-two-clubs-at-once-corrupting-the-pick-picker).
+
+**One genuine gap found and deliberately left unfixed, per this sprint's
+own "do not add new features" boundary**: no player-facing payment status
+is shown anywhere in the frontend (`ISSUE-44`) — confirmed by grep, not a
+missing case in an otherwise-working display. Building that display is new
+UI surface, not a bug fix; flagged for a future slice instead of built here.
+
+**A test-data-integrity incident, self-inflicted and disclosed, not hidden.**
+Locking/scoring 30 real Premier League fixtures (3 gameweeks × 10 fixtures)
+required moving their `kickoff_utc` into the past; the exact original
+per-fixture kickoff times were not captured before this bulk update (unlike
+every prior session's own live verification, which flipped one fixture at a
+time and could remember its single original value). Restoring the real
+per-fixture schedule exactly would require calling `sync-fixtures` against
+the live api-football service with the correct Premier League
+`competitionId` — not attempted, since guessing at an unverified parameter
+against a real, rate-limited, potentially-billed external API risked
+compounding the problem rather than fixing it. Instead: `status` and
+`home_goals`/`away_goals` were restored to their objectively correct values
+(`scheduled`, `0`/`0` — these fixtures are genuinely in the future relative
+to today), `kickoff_utc` was reset to each gameweek's own
+`earliest_kickoff_utc` value (captured before any change was made, so this
+part is exact), applied uniformly to every fixture in that gameweek rather
+than fabricated per-fixture precision that can't be verified, and the
+fabricated `fixture_events` rows used to seed test goals were deleted
+outright. **Net effect**: gameweek-level timing (what actually drives
+deadline computation, entry windows, and "current gameweek" display) is
+exactly restored; which specific match kicks off at which specific hour
+within a gameweek's weekend is an approximation, not a restoration.
+Recommend running a real `sync-fixtures` call with the correct
+`competitionId` when convenient to restore full precision — a decision
+left to the repository owner, given the real external API cost/rate-limit
+tradeoff involved.
+
+**Verification performed**: `deno check` clean on both touched backend
+files. Full suite 341/341 unchanged (no test file needed changes — the
+bugs found were either live-integration-only, like the cron key mismatch,
+or in already-untested frontend query code). `npm run build` clean.
+**Live-verified, real UI + real Edge Functions, no mocks**: full Pick 5
+lifecycle (create → invite (both `add_member` and invite-code) → join →
+record payment → submit picks → lock → score → settle → standings →
+winner → prize → notification), full LMS lifecycle including a genuine
+unpaid-entry void and a correctly-*refused* reinstatement (the pot had
+already concluded — single-survivor — and paid out, so the "already
+concluded" guard fired exactly as designed, confirmed via the real
+`reinstate_entry` response, not assumed), full Score Predictor lifecycle
+through per-gameweek scoring and standings (full-season conclusion not
+forced — final gameweek was intentionally left in the future, matching
+real product behavior, and winner/prize/notification for this mode were
+not re-derived from scratch given the existing dedicated Milestone 6
+sessions' own extensive live verification of exactly that path). Player
+journey: registration/sign-in, both join paths, edit-before-deadline
+(confirmed via a real resubmission updating the same row), locked-after-
+deadline (a resubmission attempt against a settled entry was correctly
+rejected), standings, notifications reachable, historical gameweek pages
+loading with zero errors, and `/admin/payments` correctly returning "Not
+authorised" for a plain member on both desktop and mobile viewports.
+Operational journey: real (not manually-triggered) cron ticks confirmed
+succeeding post-fix via `net._http_response`, Manual Jobs dashboard
+reachable and functional for a temporary `app_admin` grant (reverted and
+independently re-verified via `raw_app_meta_data`, including catching that
+GoTrue's admin API merges `app_metadata` rather than replacing it — an
+empty-object revert silently left the previous grant in place, only an
+explicit `{"role": null}` actually cleared it), `sync_runs` logging
+confirmed complete and accurate. Cross-browser: mobile (390×844) and
+tablet (768×1024) viewports checked on key pages, zero console errors,
+authorization boundaries confirmed identical to desktop (an initial mobile-
+viewport scare — `bentest3` appearing to retain the Admin nav link after
+its `app_admin` grant was reverted — was traced to the browser still
+holding a pre-revocation JWT, not a real authorization bug; a fresh sign-in
+correctly dropped the link on both viewports). All four temporary test
+accounts (`pay-admin-*`/`pay-ben-*`/`pay-adam-*` — pre-existing orphaned
+residue from an earlier, incompletely-cleaned session, found and removed
+this session, unrelated to this sprint's own test data) and all pot-related
+rows created this sprint were removed by exact ID, independently
+re-verified as zero residue — `pots`/`auth.users` back to the exact
+pre-session baseline (2 pots, 4 `bentest*` accounts). `bentest3`/`bentest4`
+now carry a known password (`Sprint2Audit!2026`) for future sessions'
+convenience, the same established pattern `bentest2`/"Ben2" already has.
+
+**What this rules out**: the complete organiser, player, and operational
+lifecycle for all three game modes is confirmed genuinely operable through
+the real UI and real Edge Functions today, not just unit-tested in
+isolation — including a critical, previously-invisible finding
+(`ISSUE-40`) that the automated pipeline itself had been silently
+non-functional since the very security fix meant to protect it.

@@ -92,6 +92,23 @@ export default function PotDetailPage() {
     return allRows
   }
 
+  // Sprint 2 audit: available_players_by_gameweek can legitimately return more
+  // than one row per player_id (player_team_history has no "one active team
+  // per player" constraint — confirmed live, several players carry stale
+  // is_active=true rows on a prior club after a transfer, ISSUE-40). Left as
+  // a data question for the repo owner rather than guessed at, but the picker
+  // itself must never render two entries with the same key regardless — React
+  // already warns on the duplicate key, and a player could otherwise appear
+  // pickable twice under two different team badges.
+  function dedupeByPlayerId(rows) {
+    const seen = new Set()
+    return rows.filter((row) => {
+      if (seen.has(row.player_id)) return false
+      seen.add(row.player_id)
+      return true
+    })
+  }
+
   async function loadPot() {
     const { data, error } = await supabase
       .from('pots')
@@ -196,7 +213,7 @@ export default function PotDetailPage() {
         .order('display_name', { ascending: true })
     )
 
-    setAllFilterRows(rows)
+    setAllFilterRows(dedupeByPlayerId(rows))
   }
 
   async function loadPlayers() {
@@ -245,7 +262,7 @@ export default function PotDetailPage() {
         return query
       })
 
-      setPlayers(rows)
+      setPlayers(dedupeByPlayerId(rows))
     } finally {
       setPlayersLoading(false)
     }

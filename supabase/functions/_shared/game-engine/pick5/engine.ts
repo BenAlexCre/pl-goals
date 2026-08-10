@@ -215,9 +215,11 @@ export class Pick5Engine implements GameEngine {
   // would make this method do two unrelated things. See session-log.md for
   // this call.
   //
-  // Reads public.player_fixture_goals, same as the retired prototype did —
-  // inherits ISSUE-3 (the view is never automatically refreshed) unchanged;
-  // fixing that is out of scope for this slice.
+  // Reads public.player_fixture_goals, same as the retired prototype did.
+  // ISSUE-3 (confirmed live during the Sprint 2 audit — the view was never
+  // automatically refreshed, so this always read zero goals) is fixed at
+  // the call site: compute-scores/index.ts now refreshes the view once per
+  // run, before calling this method for any mode.
   async calculateScore(ctx: GameEngineContext, gameweekId: number): Promise<void> {
     const potIds = await this.getPick5PotIds(ctx)
     if (potIds.length === 0) {

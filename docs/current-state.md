@@ -402,18 +402,6 @@ gameweek page's player-appearance UI (starting/bench/subbed badges) is currently
 broken against a from-migrations-only database. Plan:
 [roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
 
-#### ISSUE-3 — `player_fixture_goals` materialized view is never refreshed
-`compute-scores` (edge function, on a 3-minute cron) reads live goal counts from the
-`player_fixture_goals` materialized view. Nothing in the repository — no edge
-function, no cron job, no script — ever calls
-`select public.refresh_player_fixture_goals()`. Mechanism detail:
-[database.md § player_fixture_goals](./database.md#player_fixture_goals-materialized-view).
-**Status: unverified.** If nothing refreshes this view out-of-band (e.g. a
-dashboard-configured cron job not captured in `supabase/migrations/`), live scoring
-is silently computing results against stale — possibly permanently empty — goal
-counts, with no error raised anywhere. Plan:
-[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
-
 #### ISSUE-4 — `sync-live-events` edge function is referenced but doesn't exist
 `supabase/migrations/003_cron_jobs.sql` schedules a call to
 `/functions/v1/sync-live-events` every 2 minutes, and `AdminDashboard.jsx` has a
@@ -498,6 +486,52 @@ tie-break rule since Milestone 4 Slice 6 (`rankWithTies()`, standard competition
 Standings section). Not moved to Resolved issues, since the legacy code itself
 hasn't been removed — only superseded.
 Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
+
+#### ISSUE-42 — `player_team_history` has players active on two clubs at once, corrupting the pick picker
+**Discovered 2026-08-10**, Launch Readiness Sprint 2 (End-to-End Workflow
+Audit), via a real, reproducible React duplicate-key warning in `PotDetail.
+jsx`'s Pick 5 player picker for a real gameweek. Root-caused, not guessed:
+`available_players_by_gameweek` joins through `player_team_history` filtered
+to `is_active = true`; 158 players currently have **more than one**
+`is_active = true` row, some — confirmed for 3 specific players used in this
+session's live testing — on two different Premier League clubs
+simultaneously (e.g. one player active on both Aston Villa FC and Chelsea
+FC, for the same season, with no `left_at` date on either row marking a real
+transfer boundary). A player physically cannot be contracted to two Premier
+League clubs at once, so this is genuinely bad reference data, not a
+legitimate club-vs-country dual-active case (those exist too — a player can
+correctly be active for both their club and a national team — but this
+finding is specifically same-competition duplicates). **Impact**: the same
+real player appeared twice in the Pick 5 picker, under two different team
+badges — confusing, and a React-unsupported duplicate-key render state.
+**Not fixed at the data level** — correcting 158 players' historical team
+association requires knowing which club is actually correct for each,
+which is a data question for whoever owns the sync process, not something
+to guess and silently overwrite. **Mitigated at the query-consumption
+level** instead (`PotDetail.jsx`'s `dedupeByPlayerId()`, `usePlayers.js`'s
+own inline dedupe): the picker can no longer render the same player twice
+regardless of how many active team-history rows the view serves up, but the
+underlying data is still wrong and will still mis-attribute which club's
+fixture a duplicated player's pick is actually scored against until
+corrected. **Status: confirmed, data issue open, UI symptom mitigated.**
+
+#### ISSUE-44 — No player-facing payment status is shown anywhere in the frontend
+**Discovered 2026-08-10**, Launch Readiness Sprint 2, while auditing the
+player journey's own explicit "payment visibility" checklist item. Checked,
+not assumed: grepped `PotDetail.jsx`, `LmsPotDetail.jsx`,
+`PredictorPotDetail.jsx`, and every other player-facing surface for
+`is_paid`/`Payment`/`Paid`/`Unpaid` — zero matches anywhere outside the
+admin-only `AdminPayments.jsx`/`PaymentTable.jsx`. A player has no way to
+see whether they themselves are marked paid or unpaid for a pot they've
+joined — they'd only discover an unpaid status indirectly, by their entry
+going void at scoring time. `business-rules.md`'s existing "a player's own
+view is read-only: paid/unpaid status only" language describes an intended
+design, not the current implementation — there is no read-only view at
+all, paid or otherwise. **Not fixed this sprint** — building a new "your
+payment status" UI element is net-new frontend surface, explicitly out of
+this audit's "do NOT add new features" boundary; this is a confirmed gap
+for a future slice to design and build, not a bug this audit's own rules
+permit fixing. **Status: confirmed, open.**
 
 #### ISSUE-39 — No gameweek anywhere in the seed data has `is_current = true`; the "current" season's Premier League has zero gameweeks
 **Discovered 2026-08-09**, while live-verifying `ISSUE-34`'s pot-creation form
@@ -720,6 +754,88 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-40 — Every cron-triggered call to `compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures` silently failed with 401
+**Discovered and resolved 2026-08-10, Launch Readiness Sprint 2 (End-to-End
+Workflow Audit).** The local database's `app.settings.service_role_key` GUC
+(read by every HTTP-calling cron job — `003_cron_jobs.sql`/
+`006_fix_cron_job_headers.sql`) held the new-format `sb_secret_...` key,
+while the Edge Runtime container's actual `SUPABASE_SERVICE_ROLE_KEY` env
+var — the value `_shared/adminOrCronAuth.ts` (`ISSUE-26`'s own fix) compares
+against — held the legacy `eyJhbGc...` JWT key. Two different values for
+what both systems assume is the same credential. Every real cron tick's
+`net.http_post()` call reached the function and was rejected with a `401`,
+while `cron.job_run_details` still reported `succeeded` (it only reflects
+whether the SQL statement/async enqueue itself errored, not the downstream
+HTTP response — the exact distinction the `/health` skill's own guidance
+warns about). Confirmed, not assumed: `cron.job_run_details` showed
+`succeeded` throughout, but `net._http_response` for the same window showed
+real `401`s (18 of them) alongside the already-known `404`s from `ISSUE-4`'s
+missing `sync-live-events` function — and a direct call reproducing cron's
+exact request (same URL, same header shape, the literal `sb_secret_...`
+value) returned `401` on demand. This has been silently breaking the entire
+automated pipeline — locking, scoring, settlement, fixture sync — for every
+real scheduled run since `ISSUE-26`'s fix shipped (Launch Readiness Sprint
+1A, 2026-08-10), not just this session's test data. **Fixed** by correcting
+the live GUC (`ALTER DATABASE postgres SET app.settings.service_role_key =
+'<the Edge Runtime's actual key>'`, run as `supabase_admin` — `postgres`
+itself lacks permission to set this custom GUC, the same ownership split
+`ISSUE-21` already documents) to match the Edge Runtime's real credential.
+Not migration-tracked, deliberately — this GUC holds a secret, and the
+existing cron migrations already read it via `current_setting()` rather
+than hard-coding it for exactly that reason; the correct value is
+environment-specific configuration, not something a versioned migration
+should encode. **Live-verified after the fix**: a fresh-session replay of
+the exact cron SQL returned `200`; a real, unmodified `compute-scores-
+every-3-min` tick (observed live, not manually triggered) returned `200`
+with a normal `gameEngineDispatches` count. **This fix applies only to this
+local development database** — any deployed/hosted Supabase project has its
+own separate `app.settings.service_role_key` GUC that must be checked and,
+if it shows the same key-format mismatch, corrected the same way before
+relying on its cron pipeline. No code changed — this was a configuration
+fix, not an application bug.
+
+#### ISSUE-3 — `player_fixture_goals` materialized view is never refreshed
+**Discovered** at initial documentation, status left as "unverified" ever
+since. **Confirmed live and resolved 2026-08-10, Launch Readiness Sprint 2.**
+`compute-scores` reads live goal counts from the `player_fixture_goals`
+materialized view; nothing anywhere in the repository ever called
+`select public.refresh_player_fixture_goals()`. Confirmed, not assumed: the
+view held exactly 0 rows even after real goal events existed in
+`fixture_events` for a finished fixture, and a grep across the entire
+`supabase/` tree found the refresh function defined in
+`001_initial_schema.sql` and never once invoked. Every mode's
+`calculateScore()` (Pick 5 directly, LMS's/Predictor's own goal-dependent
+paths) silently computed against permanently-zero goal counts — a real,
+launch-blocking scoring bug, not a hypothetical one. **Fixed** with the
+smallest possible change: `compute-scores/index.ts` now calls
+`sb.rpc('refresh_player_fixture_goals')` once at the start of every run,
+before either the retired-prototype scoring loop or any `GameEngine.
+calculateScore()` reads the view — no schema change, no new cron job, the
+existing 3-minute cadence is what keeps it fresh. Live-verified: seeded a
+real goal event for a real finished fixture, ran `compute-scores`, confirmed
+`player_fixture_goals` now had rows and the corresponding Pick 5 picks
+correctly resolved to `won`/`goals_scored`. See
+[decisions.md § Launch Readiness Sprint 2](./decisions.md#launch-readiness-sprint-2--end-to-end-workflow-audit).
+
+#### ISSUE-43 — "Your pots" showed every pot with 2+ members once per fellow member
+**Discovered and resolved 2026-08-10, Launch Readiness Sprint 2.**
+`potManager.jsx`'s `loadPots()` queried `pot_members` with no `user_id`
+filter, relying solely on RLS to scope the results. `pot_members`'s own
+SELECT policy is `is_pot_member(pot_id)` — correct for the Members list
+elsewhere (any member can see every row for a shared pot) — so for any pot
+with two or more members, this query returned one row per member, each
+carrying the same joined `pots(...)` object. React's own duplicate-key
+warning surfaced it directly (`Encountered two children with the same key`)
+the first time this session tested a genuinely 2-member pot — every pot
+with more than one member was silently affected before this fix, not just
+the one that surfaced it; single-member pots never triggered it, which is
+likely why it went unnoticed through every prior session's own live
+verification (each of which used single-member or same-viewer-only test
+pots). **Fixed** by adding `.eq('user_id', user.id)` to the query
+(`useAuthStore()`, already the established pattern elsewhere in this
+codebase). Live-verified: a real 2-member pot's card appeared exactly once
+in "Your pots" after the fix, zero console errors, pot count correct.
 
 #### ISSUE-8 — No self-serve pot-join flow
 **Discovered** (join-flow half) at initial documentation; **extended

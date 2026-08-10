@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Users, PlusCircle, ChevronDown } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useCreatePot } from '../../hooks/usePots'
+import { useAuthStore } from '../../store/authStore'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -122,6 +123,7 @@ function GameweekSelect({ id, label, value, onChange, gameweeks, loading, placeh
 }
 
 export default function PotManager() {
+  const { user } = useAuthStore()
   const [pots, setPots] = useState([])
   const [leagues, setLeagues] = useState([])
   const [gameweeksForLeague, setGameweeksForLeague] = useState([])
@@ -164,6 +166,15 @@ export default function PotManager() {
   const createPot = useCreatePot()
 
   async function loadPots() {
+    // Sprint 2 audit: pot_members' own SELECT RLS policy is
+    // is_pot_member(pot_id) — correct for the Members list elsewhere (any
+    // member can see every row for a shared pot), but this query wants only
+    // the caller's own membership rows. Without an explicit user_id filter,
+    // a pot with 2+ members returned one row per member here, each carrying
+    // the same joined pots(...) object — confirmed live via a real duplicate
+    // React key warning on "Your pots" for a genuinely 2-member pot (every
+    // pot with more than one member was silently affected, not just this
+    // one; single-member pots never surfaced it).
     const { data, error } = await supabase
       .from('pot_members')
       .select(`
@@ -190,6 +201,7 @@ export default function PotManager() {
           )
         )
       `)
+      .eq('user_id', user.id)
       .order('joined_at', { ascending: false })
 
     if (error) throw error

@@ -59,6 +59,21 @@ Deno.serve(async (req) => {
   let gameEngineDispatches = 0
 
   try {
+    // Sprint 2 audit (resolves ISSUE-3, confirmed live, not just
+    // "unverified" as previously documented): player_fixture_goals is a
+    // materialized view — nothing anywhere in the repo ever called
+    // public.refresh_player_fixture_goals() before this fix, so it stayed
+    // permanently empty (confirmed: 0 rows, even after real goal events
+    // existed in fixture_events) and every read below silently saw zero
+    // goals for every player, every gameweek. Both the retired prototype's
+    // scoring loop and every GameEngine's own calculateScore() (pick5/lms/
+    // predictor, all three inherit the same read) depend on this view being
+    // current — refreshing it once per run, right before anything reads it,
+    // is the smallest fix that doesn't touch the view's own definition, the
+    // scoring logic, or add a new cron job.
+    const { error: refreshError } = await sb.rpc('refresh_player_fixture_goals')
+    if (refreshError) throw new Error(`Failed to refresh player_fixture_goals: ${refreshError.message}`)
+
     const { data: gameweeks } = await sb
       .from('gameweeks')
       .select('id')
