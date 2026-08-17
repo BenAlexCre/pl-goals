@@ -13,18 +13,28 @@ import { PredictorPrizePoolExceededError, PredictorValidationError } from './err
 interface FakeState {
   gameweekExists?: boolean // defaults to true
   deadlineUtc: string | null // null = deadline not computed yet (never blocks)
+  gameweekNumber?: number // defaults to 10 — the requested pick's gameweek number
   fixtureExists?: boolean // defaults to true
   fixtureGameweekId?: number // defaults to matching the requested gameweek
   homeTeamId?: number
   awayTeamId?: number
   playerOnTeam?: boolean // whether player_team_history has a matching active row
   now?: Date
+  // Phase 7 — Competition Configuration UX Polish. A "Custom competition"
+  // pot's bounds — undefined/null means unbounded, matching every pot
+  // created before this change and every non-Custom pot after it.
+  potStartGameweekId?: number | null
+  potEndGameweekId?: number | null
+  startGameweekNumber?: number
+  endGameweekNumber?: number
 }
 
 const REQUESTED_GAMEWEEK_ID = 10
 const REQUESTED_FIXTURE_ID = 500
 const HOME_TEAM_ID = 100
 const AWAY_TEAM_ID = 200
+const START_GAMEWEEK_ID = 8
+const END_GAMEWEEK_ID = 20
 
 function fakeContext(state: FakeState): GameEngineContext {
   const fakeSupabase = {
@@ -33,11 +43,44 @@ function fakeContext(state: FakeState): GameEngineContext {
         return {
           select() {
             return {
+              eq(_column: string, id: number) {
+                return {
+                  maybeSingle: () => {
+                    if (id === REQUESTED_GAMEWEEK_ID) {
+                      return Promise.resolve({
+                        data:
+                          state.gameweekExists === false
+                            ? null
+                            : { number: state.gameweekNumber ?? 10, deadline_utc: state.deadlineUtc },
+                        error: null,
+                      })
+                    }
+                    if (id === state.potStartGameweekId) {
+                      return Promise.resolve({ data: { number: state.startGameweekNumber ?? 5 }, error: null })
+                    }
+                    if (id === state.potEndGameweekId) {
+                      return Promise.resolve({ data: { number: state.endGameweekNumber ?? 30 }, error: null })
+                    }
+                    return Promise.resolve({ data: null, error: null })
+                  },
+                }
+              },
+            }
+          },
+        }
+      }
+      if (table === 'pots') {
+        return {
+          select() {
+            return {
               eq() {
                 return {
                   maybeSingle: () =>
                     Promise.resolve({
-                      data: state.gameweekExists === false ? null : { deadline_utc: state.deadlineUtc },
+                      data: {
+                        start_gameweek_id: state.potStartGameweekId ?? null,
+                        end_gameweek_id: state.potEndGameweekId ?? null,
+                      },
                       error: null,
                     }),
                 }
@@ -129,6 +172,75 @@ function validPick(overrides: Record<string, unknown> = {}) {
 Deno.test('accepts a valid pick with no goalscorer', async () => {
   const engine = new PredictorEngine()
   const ctx = fakeContext({ deadlineUtc: '2026-06-01T00:00:00Z' })
+
+  await engine.validateEntry(ctx, pendingEntry(), validPick())
+})
+
+// Phase 7 — Competition Configuration UX Polish. A "Custom competition"
+// pot's start_gameweek_id/end_gameweek_id now genuinely bound which
+// gameweeks can be predicted for, mirroring LMS's own entry-window
+// enforcement pattern. The default "Two half-season" pot never sets
+// start_gameweek_id, so it's unaffected by the start-bound tests below.
+
+Deno.test('rejects a pick for a gameweek before the pot\'s custom start gameweek', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeContext({
+    deadlineUtc: '2026-06-01T00:00:00Z',
+    gameweekNumber: 4,
+    potStartGameweekId: START_GAMEWEEK_ID,
+    startGameweekNumber: 8,
+  })
+
+  await assertRejects(
+    () => engine.validateEntry(ctx, pendingEntry(), validPick()),
+    PredictorValidationError,
+    "before this competition's start gameweek"
+  )
+})
+
+Deno.test('accepts a pick exactly at the pot\'s custom start gameweek', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeContext({
+    deadlineUtc: '2026-06-01T00:00:00Z',
+    gameweekNumber: 8,
+    potStartGameweekId: START_GAMEWEEK_ID,
+    startGameweekNumber: 8,
+  })
+
+  await engine.validateEntry(ctx, pendingEntry(), validPick())
+})
+
+Deno.test('rejects a pick for a gameweek after the pot\'s final gameweek', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeContext({
+    deadlineUtc: '2026-06-01T00:00:00Z',
+    gameweekNumber: 25,
+    potEndGameweekId: END_GAMEWEEK_ID,
+    endGameweekNumber: 20,
+  })
+
+  await assertRejects(
+    () => engine.validateEntry(ctx, pendingEntry(), validPick()),
+    PredictorValidationError,
+    "after this competition's final gameweek"
+  )
+})
+
+Deno.test('accepts a pick exactly at the pot\'s final gameweek', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeContext({
+    deadlineUtc: '2026-06-01T00:00:00Z',
+    gameweekNumber: 20,
+    potEndGameweekId: END_GAMEWEEK_ID,
+    endGameweekNumber: 20,
+  })
+
+  await engine.validateEntry(ctx, pendingEntry(), validPick())
+})
+
+Deno.test('a pot with no custom bounds accepts any gameweek whose deadline has not passed', async () => {
+  const engine = new PredictorEngine()
+  const ctx = fakeContext({ deadlineUtc: '2026-06-01T00:00:00Z', gameweekNumber: 37 })
 
   await engine.validateEntry(ctx, pendingEntry(), validPick())
 })

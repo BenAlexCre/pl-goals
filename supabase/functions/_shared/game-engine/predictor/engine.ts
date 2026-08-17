@@ -156,7 +156,7 @@ export class PredictorEngine implements GameEngine {
     // whole competition.
     const { data: gameweek, error: gameweekError } = await ctx.supabase
       .from('gameweeks')
-      .select('deadline_utc')
+      .select('number, deadline_utc')
       .eq('id', gameweekId)
       .maybeSingle()
 
@@ -168,6 +168,60 @@ export class PredictorEngine implements GameEngine {
     }
     if (gameweek.deadline_utc && ctx.now() >= new Date(gameweek.deadline_utc)) {
       throw new PredictorValidationError(`Gameweek ${gameweekId}'s deadline has passed — this pick can no longer be made or changed`)
+    }
+
+    // Phase 7 — Competition Configuration UX Polish. A "Custom competition"
+    // pot may set both pots.start_gameweek_id and pots.end_gameweek_id to
+    // bound which gameweeks are actually part of it; the default "Two
+    // half-season competitions" pot only ever sets end_gameweek_id (as it
+    // already did before this change) and leaves start_gameweek_id null —
+    // so this is a no-op for every pot created before this change, and for
+    // every non-Custom pot created after it. end_gameweek_id was already
+    // required for every Predictor pot (it's how the competition concludes,
+    // see classifyOutcome() below) but was never actually enforced against
+    // individual picks until now.
+    const { data: pot, error: potBoundsError } = await ctx.supabase
+      .from('pots')
+      .select('start_gameweek_id, end_gameweek_id')
+      .eq('id', entry.potId)
+      .maybeSingle()
+
+    if (potBoundsError) {
+      throw new Error(`Failed to look up pot bounds: ${potBoundsError.message}`)
+    }
+
+    if (pot?.start_gameweek_id) {
+      const { data: startGameweek, error: startGameweekError } = await ctx.supabase
+        .from('gameweeks')
+        .select('number')
+        .eq('id', pot.start_gameweek_id)
+        .maybeSingle()
+
+      if (startGameweekError) {
+        throw new Error(`Failed to look up start gameweek: ${startGameweekError.message}`)
+      }
+      if (startGameweek && gameweek.number < startGameweek.number) {
+        throw new PredictorValidationError(
+          `Gameweek ${gameweek.number} is before this competition's start gameweek (GW${startGameweek.number})`
+        )
+      }
+    }
+
+    if (pot?.end_gameweek_id) {
+      const { data: endGameweek, error: endGameweekError } = await ctx.supabase
+        .from('gameweeks')
+        .select('number')
+        .eq('id', pot.end_gameweek_id)
+        .maybeSingle()
+
+      if (endGameweekError) {
+        throw new Error(`Failed to look up end gameweek: ${endGameweekError.message}`)
+      }
+      if (endGameweek && gameweek.number > endGameweek.number) {
+        throw new PredictorValidationError(
+          `Gameweek ${gameweek.number} is after this competition's final gameweek (GW${endGameweek.number})`
+        )
+      }
     }
 
     // Milestone 6 Slice 3: deliberately does NOT also check

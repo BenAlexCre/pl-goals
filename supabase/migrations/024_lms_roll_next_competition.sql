@@ -1,0 +1,17 @@
+-- Phase 7 — Competition Configuration UX Polish.
+--
+-- Adds a third lms_wipeout_resolution value: 'roll_next_competition'. The
+-- existing 'roll_prize' always waits for the following Premier League
+-- season (resolveNextSeasonLeague()) before creating the rollover pot; this
+-- new value instead rolls into a new pot in the SAME season/league the
+-- source pot was already running in, so an organiser can immediately start
+-- a fresh LMS competition without waiting for next season. Both values
+-- still go through the exact same automatic-creation -> draft ->
+-- organiser-activates workflow (LmsEngine.createRolloverPot()) — only the
+-- target league/season resolution differs. See
+-- docs/decisions.md § LMS: roll into next competition (same-season rollover).
+--
+-- Postgres requires ADD VALUE to run outside the transaction that then uses
+-- the new value in a DML statement — this migration only adds the value and
+-- does nothing else, so it's safe as its own file/transaction.
+alter type public.lms_wipeout_resolution add value 'roll_next_competition';

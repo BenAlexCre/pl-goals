@@ -106,13 +106,16 @@ export function useCreatePot() {
       // wipeout_resolution/season_end_tie_rule are "only meaningful when
       // game_type = last_man_standing" (013_lms_wipeout_and_rollover.sql);
       // predictor_cycle_mode/predictor_scorer_scope/the three scoring point
-      // columns are the Predictor equivalent. start_gameweek_id is LMS-only
-      // (its entry-window cutoff) — Predictor's own entry-window rule is
-      // still genuinely undecided (see project-board.md), so it's never set
-      // here. end_gameweek_id is shared: both engines' determineWinner()
-      // read it as the season-conclusion marker, so it's required by the
-      // caller for both modes, never for Pick 5 (which has no season-end
-      // concept — see decisions.md § Score Predictor architecture review).
+      // columns are the Predictor equivalent. end_gameweek_id is shared:
+      // both engines' determineWinner() read it as the season-conclusion
+      // marker, so it's required by the caller for both modes, never for
+      // Pick 5 (which has no season-end concept — see decisions.md § Score
+      // Predictor architecture review). start_gameweek_id is set for LMS
+      // (its entry-window cutoff) always, and for Score Predictor only when
+      // predictorCycleMode is 'single_cycle' (Phase 7 — Competition
+      // Configuration UX Polish: a "Custom competition" pot's start bound,
+      // enforced by PredictorEngine.validateEntry()) — a "Two half-season"
+      // pot leaves it unset, same as every Predictor pot before this change.
       if (gameType === 'last_man_standing') {
         row.start_gameweek_id = startGameweekId
         row.end_gameweek_id = endGameweekId
@@ -120,6 +123,9 @@ export function useCreatePot() {
         row.season_end_tie_rule = seasonEndTieRule
       } else if (gameType === 'score_predictor') {
         row.end_gameweek_id = endGameweekId
+        if (predictorCycleMode === 'single_cycle') {
+          row.start_gameweek_id = startGameweekId
+        }
         row.predictor_cycle_mode = predictorCycleMode
         row.predictor_scorer_scope = predictorScorerScope
         row.predictor_exact_score_points = predictorExactScorePoints

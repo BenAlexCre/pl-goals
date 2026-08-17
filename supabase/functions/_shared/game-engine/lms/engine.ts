@@ -972,7 +972,7 @@ export class LmsEngine implements GameEngine {
       league_id: number
       entry_fee: number
       end_gameweek_id: number | null
-      wipeout_resolution: 'split_prize' | 'roll_prize'
+      wipeout_resolution: 'split_prize' | 'roll_prize' | 'roll_next_competition'
       season_end_tie_rule: 'split_prize' | 'final_prediction'
       admin_fee_type: 'none' | 'fixed' | 'percentage'
       admin_fee_amount: number | null
@@ -1024,12 +1024,14 @@ export class LmsEngine implements GameEngine {
       throw new LmsPrizePoolExceededError(potId, grossAmount, adminFeeAmount, charityFeeAmount)
     }
 
-    const rollover = outcome.type === 'wipeout' && potConfig.wipeout_resolution === 'roll_prize'
+    const rollover =
+      outcome.type === 'wipeout' &&
+      (potConfig.wipeout_resolution === 'roll_prize' || potConfig.wipeout_resolution === 'roll_next_competition')
     const recipients: string[] =
       outcome.type === 'single_survivor' ? [outcome.winnerId]
       : outcome.type === 'wipeout' && potConfig.wipeout_resolution === 'split_prize' ? outcome.memberIds
       : outcome.type === 'season_end' ? outcome.aliveIds // season_end_tie_rule === 'split_prize', final_prediction already threw above
-      : [] // roll_prize
+      : [] // roll_prize or roll_next_competition — nobody paid directly, the whole net amount carries into the new pot
 
     const { error: settleEntriesError } = await ctx.supabase
       .from('game_entries')
@@ -1172,9 +1174,10 @@ export class LmsEngine implements GameEngine {
     sourcePot: {
       name: string
       created_by: string
+      season_id: number
       league_id: number
       entry_fee: number
-      wipeout_resolution: 'split_prize' | 'roll_prize'
+      wipeout_resolution: 'split_prize' | 'roll_prize' | 'roll_next_competition'
       season_end_tie_rule: 'split_prize' | 'final_prediction'
       admin_fee_type: 'none' | 'fixed' | 'percentage'
       admin_fee_amount: number | null
@@ -1199,8 +1202,20 @@ export class LmsEngine implements GameEngine {
       return // a prior, since-failed awardPrize() attempt already created this — do not create a second one
     }
 
-    const nextLeague = await resolveNextSeasonLeague(ctx, sourcePot.league_id)
-    if (!nextLeague) {
+    // Phase 7 — Competition Configuration UX Polish. 'roll_prize' waits for
+    // the following season (resolveNextSeasonLeague() — matches the source
+    // league by name+country in whatever season comes chronologically
+    // next, and fails if that season isn't synced yet). 'roll_next_competition'
+    // instead stays in the source pot's own current season/league — no
+    // resolution call needed, and it can never fail with "season not synced
+    // yet" the way the next-season path can, since the season is already
+    // known to exist (the source pot is running in it right now).
+    const targetLeague =
+      sourcePot.wipeout_resolution === 'roll_next_competition'
+        ? { id: sourcePot.league_id, season_id: sourcePot.season_id }
+        : await resolveNextSeasonLeague(ctx, sourcePot.league_id)
+
+    if (!targetLeague) {
       throw new Error(
         `Cannot create an LMS rollover pot for ${sourcePotId}: no next-season league found yet for league ${sourcePot.league_id}. ` +
           `Retry once next season's league data has been synced.`
@@ -1218,8 +1233,8 @@ export class LmsEngine implements GameEngine {
       .from('pots')
       .insert({
         name: newName,
-        season_id: nextLeague.season_id,
-        league_id: nextLeague.id,
+        season_id: targetLeague.season_id,
+        league_id: targetLeague.id,
         created_by: sourcePot.created_by,
         game_type: 'last_man_standing',
         status: 'draft',

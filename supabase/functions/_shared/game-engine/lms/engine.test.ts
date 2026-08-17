@@ -1510,6 +1510,45 @@ Deno.test('awardPrize: wipeout + roll_prize pays nobody and creates a draft roll
   assertEquals(db.members[0].role, 'admin')
 })
 
+Deno.test('awardPrize: wipeout + roll_next_competition pays nobody and creates a draft pot in the SAME season/league', async () => {
+  const sourcePot = baseAwardPot({ id: 'pot-1', name: 'Office LMS', entry_fee: 10, wipeout_resolution: 'roll_next_competition', rollover_generation: 0 })
+  const db = baseAwardDb([sourcePot], [
+    { id: 'entry-1', user_id: 'user-a', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+    { id: 'entry-2', user_id: 'user-b', status: 'pending', payout_amount: 0, competitive_status: 'eliminated', eliminated_gameweek_id: 15 },
+  ])
+  // Deliberately no leagues/seasons fixtures at all — unlike roll_prize,
+  // roll_next_competition never calls resolveNextSeasonLeague(), so it
+  // must succeed even when no "next season" has been synced yet.
+  const ctx = fakeAwardPrizeContext(db)
+  const engine = new LmsEngine()
+
+  await engine.awardPrize(ctx, 'pot-1')
+
+  assertEquals(db.prizes[0].rollover, true)
+  assertEquals(db.entries[0].payout_amount, 0)
+  assertEquals(db.entries[1].payout_amount, 0)
+
+  assertEquals(db.pots.length, 2)
+  const newPot = db.pots[1]
+  assertEquals(newPot.name, 'Office LMS (Rollover #1)')
+  assertEquals((newPot as unknown as { rollover_source_pot_id: string }).rollover_source_pot_id, 'pot-1')
+  assertEquals((newPot as unknown as { carry_over_amount: number }).carry_over_amount, 20)
+  assertEquals(newPot.rollover_generation, 1)
+  assertEquals((newPot as unknown as { status: string }).status, 'draft')
+  assertEquals(
+    (newPot as unknown as { league_id: number }).league_id, 6,
+    'roll_next_competition stays in the SOURCE pot\'s own league, unlike roll_prize'
+  )
+  assertEquals(
+    (newPot as unknown as { season_id: number }).season_id, 3,
+    'roll_next_competition stays in the SOURCE pot\'s own season, unlike roll_prize'
+  )
+
+  assertEquals(db.members.length, 1)
+  assertEquals(db.members[0].pot_id, newPot.id)
+  assertEquals(db.members[0].user_id, 'organiser-1')
+})
+
 Deno.test('awardPrize: rollover pot creation fails loudly (retry-friendly) when no next-season league exists yet', async () => {
   const sourcePot = baseAwardPot({ id: 'pot-1', wipeout_resolution: 'roll_prize' })
   const db = baseAwardDb([sourcePot], [

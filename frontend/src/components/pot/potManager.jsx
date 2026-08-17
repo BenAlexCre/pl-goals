@@ -25,18 +25,32 @@ const FEE_TYPES = [
 
 const WIPEOUT_OPTIONS = [
   { value: 'split_prize', label: 'Split the prize evenly' },
-  { value: 'roll_prize', label: 'Roll the entire prize into next season' },
+  { value: 'roll_prize', label: 'Roll the prize into next season' },
+  { value: 'roll_next_competition', label: 'Roll the prize into my next competition' },
 ]
 
-const SEASON_END_TIE_OPTIONS = [
-  { value: 'split_prize', label: 'Split the prize evenly' },
-  { value: 'final_prediction', label: 'Final-prediction tiebreak (not yet supported)', disabled: true },
-]
+// Phase 7 — Competition Configuration UX Polish. The season-end tie rule
+// used to also offer "Final-prediction tiebreak (not yet supported)" here.
+// Removed: the backend detects it and fails loudly rather than guessing
+// (LmsFinalPredictionNotImplementedError), but the resolution mechanism
+// itself (its own pick type, scoring, everything) doesn't exist yet —
+// presenting it as choosable was presenting an option that can't actually
+// be used. season_end_tie_rule can now only ever be 'split_prize' from
+// this form, so there's no options list or selector left to render (see
+// the plain-text note in the JSX below) — re-add both once Final
+// Prediction is genuinely implemented, not before.
 
+// 'two_halves' is the pre-existing DB default and stays the default choice
+// here; 'single_cycle' is relabeled "Custom competition" and gains real
+// Start/End Gameweek selectors (see predictorCycleMode-conditional JSX
+// below) — both values are unchanged, only their labels and what's exposed
+// around them changed.
 const CYCLE_MODE_OPTIONS = [
-  { value: 'two_halves', label: 'Two halves' },
-  { value: 'single_cycle', label: 'Single cycle (whole season)' },
+  { value: 'two_halves', label: 'Two half-season competitions' },
+  { value: 'single_cycle', label: 'Custom competition' },
 ]
+
+const MAX_CUSTOM_PREDICTOR_GAMEWEEKS = 20
 
 const SCORER_SCOPE_OPTIONS = [
   { value: 'fixture_only', label: 'Fixture only' },
@@ -112,7 +126,7 @@ function GameweekSelect({ id, label, value, onChange, gameweeks, loading, placeh
           <option value="">{loading ? 'Loading gameweeks...' : placeholder}</option>
           {gameweeks.map((gw) => (
             <option key={gw.id} value={gw.id}>
-              GW{gw.number} — {gw.name}
+              GW{gw.number}
             </option>
           ))}
         </select>
@@ -297,6 +311,43 @@ export default function PotManager() {
   const showLeagueSelector = leagues.length > 1
   const noActiveLeagues = !loading && leagues.length === 0
 
+  // Phase 7 — LMS Pot Creation UX Polish. "Next available" per the product
+  // definition: the first gameweek (by number) whose entry deadline hasn't
+  // passed yet — not hardcoded GW1, so a pot created mid-season starts
+  // correctly. A null deadline (not yet computed by compute-deadlines) is
+  // treated as not-yet-passed rather than excluded. Returns '' if every
+  // gameweek's deadline has already passed (nothing left to default to).
+  function defaultStartGameweekId(rows) {
+    const now = Date.now()
+    const next = rows.find((gw) => !gw.deadline_utc || new Date(gw.deadline_utc).getTime() > now)
+    return next ? String(next.id) : ''
+  }
+
+  // Final gameweek default: whichever gameweek this league/season actually
+  // returns last (rows are already ordered by number ascending) — never a
+  // hardcoded 38, so a shorter cup competition would default correctly too.
+  function defaultEndGameweekId(rows) {
+    const last = rows[rows.length - 1]
+    return last ? String(last.id) : ''
+  }
+
+  // Predictor "Custom competition" default: MAX_CUSTOM_PREDICTOR_GAMEWEEKS
+  // (20) gameweeks on from the start gameweek, inclusive, capped at the
+  // season's actual last gameweek if fewer than 20 remain. Never a
+  // hardcoded gameweek number — reads directly off whichever gameweeks this
+  // league/season actually returned.
+  function defaultCustomEndGameweekId(rows, startId) {
+    const startGw = rows.find((gw) => String(gw.id) === String(startId))
+    if (!startGw) return defaultEndGameweekId(rows)
+
+    const targetNumber = startGw.number + MAX_CUSTOM_PREDICTOR_GAMEWEEKS - 1
+    const eligible = rows.filter((gw) => gw.number >= startGw.number)
+    const withinCap = eligible.filter((gw) => gw.number <= targetNumber)
+    const chosen = withinCap.length > 0 ? withinCap[withinCap.length - 1] : eligible[eligible.length - 1]
+
+    return chosen ? String(chosen.id) : ''
+  }
+
   useEffect(() => {
     async function init() {
       try {
@@ -314,12 +365,10 @@ export default function PotManager() {
   }, [])
 
   // Gameweeks are only needed for LMS's start/end selectors and Predictor's
-  // end selector — fetched per selected league/season rather than eagerly,
-  // since most pots (Pick 5) never need this list at all.
+  // end (and, for a Custom competition, start) selector — fetched per
+  // selected league/season rather than eagerly, since most pots (Pick 5)
+  // never need this list at all.
   useEffect(() => {
-    setEndGameweekId('')
-    setStartGameweekId('')
-
     if (!selectedLeague) {
       setGameweeksForLeague([])
       return
@@ -332,7 +381,7 @@ export default function PotManager() {
         setGameweeksLoading(true)
         const { data, error } = await supabase
           .from('gameweeks')
-          .select('id, number, name')
+          .select('id, number, name, deadline_utc')
           .eq('league_id', selectedLeague.id)
           .eq('season_id', selectedLeague.season_id)
           .order('number', { ascending: true })
@@ -353,6 +402,32 @@ export default function PotManager() {
     }
   }, [selectedLeague])
 
+  // Start/Final Gameweek defaults recompute whenever the available
+  // gameweeks change (new league/season loaded) or the organiser switches
+  // game mode / Predictor cycle mode — each combination has its own
+  // sensible default, and switching modes is already a natural reset point
+  // for every other mode-specific field on this form. LMS always shows and
+  // uses both; a Predictor "Custom competition" shows and uses both with
+  // its own 20-gameweek default span; a Predictor "Two half-season" pot
+  // (and Pick 5) never shows a selector and just gets end_gameweek_id
+  // resolved automatically behind the scenes.
+  useEffect(() => {
+    if (gameType === 'last_man_standing') {
+      setStartGameweekId(defaultStartGameweekId(gameweeksForLeague))
+      setEndGameweekId(defaultEndGameweekId(gameweeksForLeague))
+    } else if (gameType === 'score_predictor' && predictorCycleMode === 'single_cycle') {
+      const start = defaultStartGameweekId(gameweeksForLeague)
+      setStartGameweekId(start)
+      setEndGameweekId(defaultCustomEndGameweekId(gameweeksForLeague, start))
+    } else if (gameType === 'score_predictor') {
+      setStartGameweekId('')
+      setEndGameweekId(defaultEndGameweekId(gameweeksForLeague))
+    } else {
+      setStartGameweekId('')
+      setEndGameweekId('')
+    }
+  }, [gameweeksForLeague, gameType, predictorCycleMode])
+
   function resetForm() {
     setName('')
     setDescription('')
@@ -366,8 +441,9 @@ export default function PotManager() {
     setCharityFeeType('none')
     setCharityFeeAmount('')
     setCharityFeePercentage('')
-    setStartGameweekId('')
-    setEndGameweekId('')
+    // Start/Final Gameweek reset themselves reactively via the
+    // [gameweeksForLeague, gameType, predictorCycleMode] effect above, once
+    // gameType/predictorCycleMode below take effect.
     setWipeoutResolution('split_prize')
     setSeasonEndTieRule('split_prize')
     setPredictorCycleMode('two_halves')
@@ -408,6 +484,21 @@ export default function PotManager() {
 
     if (gameType === 'score_predictor') {
       if (!endGameweekId) return "Select the season's final gameweek — Score Predictor has no other way to conclude the competition"
+
+      if (predictorCycleMode === 'single_cycle') {
+        if (!startGameweekId) return 'Select the start gameweek for this custom competition'
+
+        const startGw = gameweeksForLeague.find((gw) => String(gw.id) === String(startGameweekId))
+        const endGw = gameweeksForLeague.find((gw) => String(gw.id) === String(endGameweekId))
+
+        if (startGw && endGw) {
+          if (endGw.number < startGw.number) return 'The final gameweek must be on or after the start gameweek'
+          if (endGw.number - startGw.number + 1 > MAX_CUSTOM_PREDICTOR_GAMEWEEKS) {
+            return `A custom competition can span at most ${MAX_CUSTOM_PREDICTOR_GAMEWEEKS} gameweeks`
+          }
+        }
+      }
+
       for (const [label, val] of [
         ['exact score', predictorExactScorePoints],
         ['correct result', predictorCorrectResultPoints],
@@ -686,20 +777,8 @@ export default function PotManager() {
                 </div>
 
                 <div>
-                  <label className={labelClass} htmlFor="pot-season-end-tie">If multiple players are still alive at the final gameweek</label>
-                  <div className="relative">
-                    <select
-                      id="pot-season-end-tie"
-                      value={seasonEndTieRule}
-                      onChange={(e) => setSeasonEndTieRule(e.target.value)}
-                      className={selectClass}
-                    >
-                      {SEASON_END_TIE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value} disabled={opt.disabled}>{opt.label}</option>
-                      ))}
-                    </select>
-                    <ChevronDown size={18} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45" />
-                  </div>
+                  <label className={labelClass}>If multiple players are still alive at the final gameweek</label>
+                  <p className="text-sm text-white/60">The prize is split evenly among everyone still alive.</p>
                 </div>
               </div>
             ) : null}
@@ -708,19 +787,9 @@ export default function PotManager() {
               <div className="space-y-4 rounded-xl border border-white/10 bg-surface-2/50 p-4">
                 <h3 className="text-sm font-semibold text-white">Score Predictor settings</h3>
 
-                <GameweekSelect
-                  id="pot-end-gameweek-predictor"
-                  label="Final gameweek (season conclusion)"
-                  value={endGameweekId}
-                  onChange={setEndGameweekId}
-                  gameweeks={gameweeksForLeague}
-                  loading={gameweeksLoading}
-                  placeholder="Select a gameweek"
-                />
-
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
-                    <label className={labelClass} htmlFor="pot-cycle-mode">Cycle mode</label>
+                    <label className={labelClass} htmlFor="pot-cycle-mode">Competition length</label>
                     <div className="relative">
                       <select
                         id="pot-cycle-mode"
@@ -753,6 +822,36 @@ export default function PotManager() {
                     </div>
                   </div>
                 </div>
+
+                {predictorCycleMode === 'single_cycle' ? (
+                  <div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <GameweekSelect
+                        id="pot-start-gameweek-predictor"
+                        label="Start gameweek"
+                        value={startGameweekId}
+                        onChange={setStartGameweekId}
+                        gameweeks={gameweeksForLeague}
+                        loading={gameweeksLoading}
+                        placeholder="Select a gameweek"
+                      />
+                      <GameweekSelect
+                        id="pot-end-gameweek-predictor"
+                        label="End gameweek"
+                        value={endGameweekId}
+                        onChange={setEndGameweekId}
+                        gameweeks={gameweeksForLeague}
+                        loading={gameweeksLoading}
+                        placeholder="Select a gameweek"
+                      />
+                    </div>
+                    <p className={hintClass}>
+                      A custom competition can span at most {MAX_CUSTOM_PREDICTOR_GAMEWEEKS} gameweeks.
+                    </p>
+                  </div>
+                ) : (
+                  <p className={hintClass}>Runs automatically across the whole season — no gameweeks to choose.</p>
+                )}
 
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div>

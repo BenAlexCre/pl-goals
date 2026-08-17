@@ -4477,3 +4477,117 @@ migration, cron dependency, and manual provisioning step documented in one
 place, including the two most consequential failure modes this project has
 actually hit (the `ISSUE-40` GUC mismatch and the `ISSUE-45` `.env.example`
 drift) called out explicitly rather than left to be rediscovered.
+
+## LMS: roll into next competition (same-season rollover), not just next season
+
+Phase 7 — Competition Configuration UX Polish. `wipeout_resolution` gains a
+third value, `roll_next_competition`, alongside the existing `split_prize`
+and `roll_prize`. Before this, a `Roll Prize` wipeout only ever waited for
+the following season's league to be synced (`resolveNextSeasonLeague()`) —
+there was no way for an organiser to keep a wipeout's prize moving within
+the same season/league they were already running in.
+
+**Context**: reviewed first, per this sprint's own explicit instruction to
+check the backend before adding anything. `createRolloverPot()`
+(`lms/engine.ts`) already does 100% of what a "next competition" rollover
+needs — automatic creation, `draft` status, organiser-only initial
+membership, organiser sets `start_gameweek_id`/`end_gameweek_id` during a
+pre-launch review, explicit activation required. The only thing hardcoded
+was *which* league/season the new pot targets.
+
+**Decision**: `createRolloverPot()` now branches on `wipeout_resolution`
+before resolving a target league: `roll_prize` still calls
+`resolveNextSeasonLeague()` exactly as before (unchanged, still fails loudly
+if next season isn't synced yet — same retry-friendly behavior); the new
+`roll_next_competition` skips that call entirely and targets the SOURCE
+pot's own `league_id`/`season_id` directly. Everything downstream —
+naming, `carry_over_amount`, `rollover_generation`, `draft` status, admin
+membership, `end_gameweek_id` left null for the organiser to set — is
+identical for both paths; only the league/season resolution differs.
+`lms_wipeout_resolution` is a native Postgres enum, so this required
+`alter type ... add value` (migration `024`, its own file/transaction — the
+new value is only ever used from application code afterward, never in the
+same migration that adds it).
+
+**Alternatives considered**: (1) let the organiser pick an *existing* draft
+pot to attach the rollover to, instead of always auto-creating a new one —
+rejected as a genuinely different, larger feature (no such
+pick-an-existing-pot mechanism exists anywhere today, and the original 2026-
+08-05 decision, above, was explicit that rollover pot creation must never be
+organiser-initiated); this stays inside that same automatic-creation
+architecture, just with a different target-season rule. (2) Add a
+per-pot "days to wait before rolling into next season" setting — rejected as
+solving a different problem (timing) than the one actually asked for
+(staying in-season at all).
+
+**Consequences**: an organiser running a short, informal LMS pot (e.g. a
+5-gameweek office competition) can now immediately start a fresh one in the
+same season if it wipes out, without waiting on next season's fixture data.
+`roll_prize` behavior is completely unchanged. Frontend: `WIPEOUT_OPTIONS`
+(`potManager.jsx`) gained a third entry, "Roll the prize into my next
+competition"; no other UI changed. Verified via a new unit test
+(`lms/engine.test.ts`, "wipeout + roll_next_competition... creates a draft
+pot in the SAME season/league") asserting the new pot's `league_id`/
+`season_id` match the source pot's, with deliberately no leagues/seasons
+fixtures supplied — proving it never calls `resolveNextSeasonLeague()` at
+all — plus a live end-to-end pot creation, verified in the database, cleaned
+up by exact ID afterward.
+
+## Score Predictor: Custom competition gains a real, enforced start/end bound
+
+Phase 7 — Competition Configuration UX Polish. `predictor_cycle_mode`
+(`two_halves` / `single_cycle`) was, until this change, a pure no-op —
+confirmed by reading `PredictorEngine` in full before touching anything: no
+code anywhere branched on its value, both settled identically (one
+season-long competition, one prize, decided once at `end_gameweek_id`), and
+Predictor pots had no working "start gameweek" concept at all.
+
+**Context**: the sprint's brief asked for "Two half-season competitions
+(default)" and "Custom competition" (organiser-chosen Start/End Gameweek,
+max 20 gameweeks) as genuinely different options, while explicitly
+forbidding a Game Engine *redesign*. Building real two-competition
+settlement (a `two_halves` pot paying out twice, at midpoint and season end)
+would be exactly that redesign — `docs/decisions.md` § Score Predictor
+architecture review already flags this as a real, unresolved open question,
+not something to guess at here. So `two_halves` keeps its pre-existing,
+already-default behavior (one season-long competition) — only its label
+changed ("Two half-season competitions"). `single_cycle` is relabeled
+"Custom competition" and is where the real change lives.
+
+**Decision**: reused the exact column LMS already has for this
+(`pots.start_gameweek_id` — never restricted to `game_type =
+last_man_standing` at the DB level, confirmed via migration grep) instead of
+adding a new one. `PredictorEngine.validateEntry()` now looks up the pot's
+`start_gameweek_id`/`end_gameweek_id` (when set) and rejects a pick for any
+gameweek outside that range — mirroring LMS's own entry-window enforcement
+pattern, but placed inside the Engine's per-pick validation (not a separate
+Edge-Function-level check the way LMS's one-time join gate is) since Predictor
+bounds apply per-gameweek, not once at entry creation. A "Two half-season"
+pot never sets `start_gameweek_id` and keeps auto-resolving `end_gameweek_id`
+to the season's actual last gameweek exactly as every Predictor pot already
+did before this change — so this is a genuine no-op for every existing pot
+and every non-Custom pot created after it. The frontend enforces the
+20-gameweek cap and defaults Start to the next available gameweek, End to
+Start + 19 gameweeks (or the season's last gameweek if fewer remain).
+
+**Alternatives considered**: (1) leave Start/End display-only, unenforced,
+matching how `predictor_cycle_mode` behaved before this change — rejected
+because it would repeat exactly the "option that can't actually be used"
+problem this same sprint's item 3 was written to eliminate (the removed
+Final-prediction tiebreak). (2) Also enforce the bound at
+`get-or-create-predictor-entry` (entry creation), matching LMS's join-time
+gate — rejected: Predictor's own entry-window rule is still genuinely
+undecided (§ Score Predictor architecture review, open question 5) and
+unrelated to this sprint's scope; the per-pick bound at
+`submit-predictor-picks` is what "custom competition" actually needs (you
+can join anytime, you just can't predict outside the configured range).
+
+**Consequences**: `PredictorEngine.validateEntry()` now issues up to two
+extra lookups (`pots`, then `gameweeks` for whichever of start/end is set) —
+skipped entirely when both are null, i.e. for every pot created before this
+change. Verified with five new unit tests (`predictor/engine.test.ts`):
+rejects before start, accepts at start, rejects after end, accepts at end,
+and an explicit no-bounds-set control case — plus live end-to-end pot
+creation for both cycle modes and a live 400 from the frontend's own
+20-gameweek validation, all verified in the database and cleaned up by exact
+ID afterward.
