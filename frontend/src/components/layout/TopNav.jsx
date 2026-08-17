@@ -34,8 +34,7 @@ export default function TopNav() {
             <Trophy size={18} className="text-white" />
           </div>
           <div>
-            <div className="text-sm font-semibold text-white">Golden-5</div>
-            <div className="text-xs text-white/35">Private goals pots</div>
+            <div className="text-sm font-semibold text-white">PL Predictor</div>
           </div>
         </Link>
 

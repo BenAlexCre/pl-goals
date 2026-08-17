@@ -61,7 +61,7 @@ export default function Dashboard() {
                     <div>
                       <h3 className="text-white font-semibold">{pot.name}</h3>
                       <p className="text-sm text-white/35 mt-1">
-                        {pot.description || 'Private goals pot'}
+                        {pot.description || 'No description yet'}
                       </p>
                     </div>
                     <Badge status={pot.pot_members?.[0]?.role || 'member'}>

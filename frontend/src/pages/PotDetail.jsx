@@ -3,17 +3,14 @@ import { Link, useParams } from 'react-router-dom'
 import {
   Search,
   Users,
-  Shield,
   Target,
   Trophy,
   ChevronRight,
-  Clock3,
-  Flame,
-  ListChecks,
   CheckCircle2,
   Filter,
   Eye,
   EyeOff,
+  Radio,
 } from 'lucide-react'
 import { supabase, extractFunctionError } from '../lib/supabase'
 import Card from '../components/ui/Card'
@@ -25,6 +22,10 @@ import Modal from '../components/ui/Modal'
 import LmsPotDetail from '../components/pot/LmsPotDetail'
 import PredictorPotDetail from '../components/pot/PredictorPotDetail'
 import InviteCard from '../components/pot/InviteCard'
+import JackpotCard from '../components/pot/pick5/JackpotCard'
+import EntryStatusBar from '../components/pot/pick5/EntryStatusBar'
+import PickCard from '../components/pot/pick5/PickCard'
+import MemberCard from '../components/pot/pick5/MemberCard'
 import { useAuthStore } from '../store/authStore'
 import { useRemoveMember } from '../hooks/useMembership'
 
@@ -34,7 +35,17 @@ const MAX_SAME_PLAYER = 5
 
 function formatDeadline(deadline) {
   if (!deadline) return 'No deadline set'
-  return new Date(deadline).toLocaleString()
+  return new Date(deadline).toLocaleString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatCurrency(amount) {
+  return `€${Number(amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 export default function PotDetailPage() {
@@ -53,6 +64,20 @@ export default function PotDetailPage() {
   const [savedEntry, setSavedEntry] = useState(null)
   const [savedPicks, setSavedPicks] = useState([])
   const [memberEntries, setMemberEntries] = useState([])
+
+  // Payment/jackpot state — Pick 5 Dashboard Redesign. Both read data that
+  // already existed and was already readable under this pot's own RLS
+  // (entry_payments_select_member, pot_prizes_select_member) — nothing new
+  // was added on the backend, this page just never surfaced it before
+  // (ISSUE-44).
+  const [payments, setPayments] = useState([])
+  const [paymentsLoading, setPaymentsLoading] = useState(true)
+  const [jackpotHistory, setJackpotHistory] = useState({
+    rolledOverAmount: 0,
+    weeksSinceLastWinner: 0,
+    hasSettledHistory: false,
+  })
+  const [jackpotLoading, setJackpotLoading] = useState(true)
 
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -120,6 +145,7 @@ export default function PotDetailPage() {
         invite_code,
         season_id,
         league_id,
+        entry_fee,
         created_by,
         seasons (
           id,
@@ -184,6 +210,65 @@ export default function PotDetailPage() {
 
     if (currentGameweek) {
       setSelectedGameweekId(String(currentGameweek.id))
+    }
+  }
+
+  // Current jackpot = whatever unclaimed prize rolled forward from the most
+  // recently settled gameweek (pot_prizes.net_amount, only when
+  // rollover = true — both written by Pick5Engine.awardPrize(), never
+  // recomputed here) plus this gameweek's own paid entries. "Weeks since
+  // last winner" is a plain count of consecutive rollover=true rows,
+  // stopping at the first real winner — reading facts the engine already
+  // settled, not re-deriving them.
+  async function loadJackpotHistory() {
+    setJackpotLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('pot_prizes')
+        .select('gameweek_id, net_amount, rollover, gameweeks(number)')
+        .eq('pot_id', potId)
+        .eq('scope', 'gameweek')
+        .eq('is_settled', true)
+
+      if (error) throw error
+
+      const rows = (data || []).slice().sort((a, b) => (b.gameweeks?.number ?? 0) - (a.gameweeks?.number ?? 0))
+      const mostRecent = rows[0] || null
+
+      let streak = 0
+      for (const row of rows) {
+        if (row.rollover) streak += 1
+        else break
+      }
+
+      setJackpotHistory({
+        rolledOverAmount: mostRecent?.rollover ? Number(mostRecent.net_amount) : 0,
+        weeksSinceLastWinner: streak,
+        hasSettledHistory: rows.length > 0,
+      })
+    } finally {
+      setJackpotLoading(false)
+    }
+  }
+
+  async function loadPayments(gameweekId) {
+    if (!gameweekId) {
+      setPayments([])
+      return
+    }
+
+    setPaymentsLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from('entry_payments')
+        .select('user_id, is_paid')
+        .eq('pot_id', potId)
+        .eq('gameweek_id', Number(gameweekId))
+
+      if (error) throw error
+      setPayments(data || [])
+    } finally {
+      setPaymentsLoading(false)
     }
   }
 
@@ -345,7 +430,8 @@ export default function PotDetailPage() {
           teams (
             id,
             name,
-            short_name
+            short_name,
+            crest_url
           )
         `)
         .eq('season_id', pot.season_id)
@@ -360,6 +446,7 @@ export default function PotDetailPage() {
           {
             team_name: row.teams?.name || '',
             team_short_name: row.teams?.short_name || '',
+            crest_url: row.teams?.crest_url || null,
           },
         ])
       )
@@ -374,6 +461,7 @@ export default function PotDetailPage() {
         position: pick.players?.position || 'Player',
         team_name: team?.team_name || '',
         team_short_name: team?.team_short_name || '',
+        crest_url: team?.crest_url || null,
       }
     })
 
@@ -447,7 +535,8 @@ export default function PotDetailPage() {
             teams (
               id,
               name,
-              short_name
+              short_name,
+              crest_url
             )
           `)
           .eq('season_id', pot.season_id)
@@ -462,6 +551,7 @@ export default function PotDetailPage() {
             {
               team_name: row.teams?.name || '',
               team_short_name: row.teams?.short_name || '',
+              crest_url: row.teams?.crest_url || null,
             },
           ])
         )
@@ -481,6 +571,7 @@ export default function PotDetailPage() {
           position: pick.players?.position || 'Player',
           team_name: team?.team_name || '',
           team_short_name: team?.team_short_name || '',
+          crest_url: team?.crest_url || null,
         })
 
         picksByEntryId.set(pick.game_entry_id, current)
@@ -515,6 +606,7 @@ export default function PotDetailPage() {
 
         const potRow = await loadPot()
         await Promise.all([loadMembers(), loadGameweeks(potRow)])
+        await loadJackpotHistory()
       } catch (err) {
         setErrorMessage(err.message || 'Failed to load pot')
       } finally {
@@ -602,6 +694,18 @@ export default function PotDetailPage() {
     }
   }, [pot, members, selectedGameweekId])
 
+  useEffect(() => {
+    async function syncPayments() {
+      try {
+        await loadPayments(selectedGameweekId)
+      } catch (err) {
+        setErrorMessage(err.message || 'Failed to load payment status')
+      }
+    }
+
+    syncPayments()
+  }, [selectedGameweekId])
+
   const selectedGameweek = useMemo(
     () => gameweeks.find((gw) => String(gw.id) === String(selectedGameweekId)) || null,
     [gameweeks, selectedGameweekId]
@@ -615,6 +719,25 @@ export default function PotDetailPage() {
   const isPotAdmin = useMemo(
     () => members.some((m) => m.user_id === user?.id && m.role === 'admin'),
     [members, user]
+  )
+
+  const paidCount = useMemo(() => payments.filter((p) => p.is_paid).length, [payments])
+  const thisWeekContribution = useMemo(
+    () => paidCount * Number(pot?.entry_fee || 0),
+    [paidCount, pot]
+  )
+  const myPayment = useMemo(
+    () => payments.find((p) => p.user_id === user?.id) || null,
+    [payments, user]
+  )
+
+  const memberEntriesWithPayments = useMemo(
+    () =>
+      memberEntries.map((entryRow) => ({
+        ...entryRow,
+        isPaid: payments.find((p) => p.user_id === entryRow.member.user_id)?.is_paid ?? false,
+      })),
+    [memberEntries, payments]
   )
 
   async function handleConfirmRemoveMember() {
@@ -765,165 +888,84 @@ export default function PotDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <section className="overflow-hidden rounded-3xl border border-white/8 bg-gradient-to-br from-surface-1 via-surface-2 to-pitch-900">
-        <div className="grid gap-6 p-6 lg:grid-cols-[1.15fr_0.85fr] lg:p-7">
-          <div>
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-                {pot.leagues?.name || 'Tournament'}
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
-                {pot.seasons?.name || 'Season'}
-              </span>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60 capitalize">
-                {pot.status}
-              </span>
+    <div className="space-y-5">
+      {/* Hero — pot identity, jackpot (the headline number for this mode),
+          and the key at-a-glance facts. "Available outfield players" was
+          dropped entirely (developer-oriented, per the brief); a plain
+          member count and entry fee replace it as facts an organiser or
+          player actually cares about. */}
+      <section className="overflow-hidden rounded-3xl border border-white/8 bg-gradient-to-br from-surface-1 via-surface-2 to-pitch-900 p-4 sm:p-7">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+            {pot.leagues?.name || 'Tournament'}
+          </span>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
+            {pot.seasons?.name || 'Season'}
+          </span>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60 capitalize">
+            {pot.status}
+          </span>
+        </div>
+
+        <h1 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">{pot.name}</h1>
+
+        <div className="mt-5 grid gap-4 sm:mt-6 sm:gap-5 lg:grid-cols-[1.3fr_1fr]">
+          <JackpotCard
+            loading={jackpotLoading || paymentsLoading}
+            rolledOverAmount={jackpotHistory.rolledOverAmount}
+            weeksSinceLastWinner={jackpotHistory.weeksSinceLastWinner}
+            hasSettledHistory={jackpotHistory.hasSettledHistory}
+            thisWeekContribution={thisWeekContribution}
+          />
+
+          <div className="grid grid-cols-2 gap-3 content-start">
+            <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-white/35">Gameweek</div>
+              <div className="font-semibold text-white">
+                {selectedGameweek ? `GW${selectedGameweek.number}` : 'Not set'}
+              </div>
             </div>
 
-            <div className="mb-4 flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-accent/10 text-accent">
-                <Trophy size={22} />
-              </div>
-              <div>
-                <h1 className="text-3xl font-bold tracking-tight text-white">{pot.name}</h1>
-                <p className="mt-1 text-sm text-white/45">
-                  {pot.leagues?.country ? `${pot.leagues.country} · ` : ''}
-                  Private goals pot
-                </p>
-              </div>
+            <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-white/35">Deadline</div>
+              <div className="text-sm font-medium text-white">{formatDeadline(selectedGameweek?.deadline_utc)}</div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Current gameweek</div>
-                <div className="font-medium text-white">
-                  {selectedGameweek ? `GW${selectedGameweek.number} — ${selectedGameweek.name}` : 'Not set'}
-                </div>
-              </div>
+            <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-white/35">Members</div>
+              <div className="font-semibold text-white">{members.length}</div>
+            </div>
 
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Deadline</div>
-                <div className="font-medium text-white">{formatDeadline(selectedGameweek?.deadline_utc)}</div>
-              </div>
-
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Members</div>
-                <div className="font-medium text-white">{members.length}</div>
-              </div>
-
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Available outfield players</div>
-                <div className="font-medium text-white">{playersLoading ? 'Loading…' : players.length}</div>
-              </div>
-
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Your entry status</div>
-                <div className="font-medium text-white">
-                  {selectedPlayers.length === MAX_PICKS ? 'Ready to submit' : 'Incomplete'}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">Picks selected</div>
-                <div className="font-medium text-white">{selectedPlayers.length}/{MAX_PICKS}</div>
-              </div>
+            <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-white/35">Entry fee</div>
+              <div className="font-semibold text-white">{formatCurrency(pot.entry_fee)}</div>
             </div>
           </div>
+        </div>
 
-          <div className="rounded-3xl border border-white/8 bg-black/15 p-5">
-            <div className="mb-4 flex items-start justify-between gap-3">
-              <div>
-                <div className="mb-1 flex items-center gap-2 text-sm font-medium text-white">
-                  <Clock3 size={16} className="text-accent" />
-                  Your entry
-                </div>
-                <p className="text-sm text-white/45">
-                  Build and save your {MAX_PICKS}-player hand for this round.
-                </p>
-              </div>
+        <div className="mt-5 flex flex-col gap-3 border-t border-white/6 pt-4 sm:mt-6 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:pt-5">
+          <EntryStatusBar
+            loading={paymentsLoading}
+            isPaid={myPayment?.is_paid ?? false}
+            hasEntry={!!savedEntry}
+            entryStatus={savedEntry?.status}
+            deadlineUtc={selectedGameweek?.deadline_utc}
+          />
 
-              <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/65">
-                {selectedGameweek ? `GW${selectedGameweek.number}` : 'No GW'}
-              </div>
-            </div>
-
-            {selectedPlayers.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-5">
-                <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/10 text-accent">
-                  <Target size={20} />
-                </div>
-                <h2 className="text-lg font-semibold text-white">No picks made yet</h2>
-                <p className="mt-2 max-w-sm text-sm text-white/45">
-                  Start your entry by choosing exactly {MAX_PICKS} players for the selected gameweek.
-                </p>
-
-                <div className="mt-5 flex flex-wrap gap-3">
-                  <Button type="button" onClick={() => { setActiveTab('entry'); setShowPicker(true) }}>
-                    <Target size={16} />
-                    Start picks
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div>
-                <div className="space-y-3">
-                  {selectedPlayers.map((player, index) => (
-                    <div
-                      key={`${player.player_id}-${index}`}
-                      className="flex items-center justify-between gap-3 rounded-2xl border border-accent/15 bg-accent/[0.06] p-4"
-                    >
-                      <div className="min-w-0">
-                        <div className="mb-1 text-xs uppercase tracking-wide text-white/35">
-                          Pick {index + 1}
-                        </div>
-                        <div className="truncate font-semibold text-white">{player.display_name}</div>
-                        <div className="truncate text-sm text-white/45">
-                          {player.team_name || player.team_short_name || 'Unknown team'} · {player.position || 'Player'}
-                        </div>
-                      </div>
-
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => removePickByIndex(index)}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="mt-5 flex flex-wrap gap-3">
-                  <Button
-                    type="button"
-                    onClick={handleSaveEntry}
-                    disabled={saving || selectedPlayers.length !== MAX_PICKS || !selectedGameweekId}
-                  >
-                    <CheckCircle2 size={16} />
-                    {saving ? 'Saving picks...' : savedEntry ? 'Update picks' : 'Save entry'}
-                  </Button>
-
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => {
-                      setActiveTab('entry')
-                      setShowPicker((current) => !current)
-                    }}
-                  >
-                    <ListChecks size={16} />
-                    {showPicker ? 'Hide picker' : 'Edit picks'}
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
+          {selectedGameweekId && (
+            <Link
+              to={`/pot/${potId}/gameweek/${selectedGameweekId}`}
+              className="group inline-flex items-center justify-center gap-2 rounded-2xl border border-accent/30 bg-accent/10 px-5 py-3 text-sm font-semibold text-accent transition-colors hover:bg-accent/15"
+            >
+              <Radio size={15} className="animate-pulse" />
+              Live scores &amp; standings
+              <ChevronRight size={15} className="transition-transform group-hover:translate-x-0.5" />
+            </Link>
+          )}
         </div>
       </section>
 
-      <section className="space-y-6">
+      <section className="space-y-5">
         <div className="flex flex-wrap gap-3">
           <button
             type="button"
@@ -951,16 +993,6 @@ export default function PotDetailPage() {
           >
             Members
           </button>
-
-          {selectedGameweekId && (
-            <Link
-              to={`/pot/${potId}/gameweek/${selectedGameweekId}`}
-              className="ml-auto inline-flex items-center gap-1.5 rounded-2xl border border-white/10 bg-surface-1 px-4 py-2 text-sm font-medium text-white/65 transition hover:text-white"
-            >
-              Live scores & standings
-              <ChevronRight size={14} />
-            </Link>
-          )}
         </div>
 
         {activeTab === 'entry' ? (
@@ -1111,160 +1143,131 @@ export default function PotDetailPage() {
                 )}
               </Card>
             ) : (
-              <Card className="p-6">
-                <div className="flex items-start gap-4">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 text-accent">
-                    <Flame size={20} />
-                  </div>
+              <Card className="p-5">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-xl font-semibold text-white">Ready for the next round</h2>
-                    <p className="mt-2 max-w-2xl text-sm text-white/45">
-                      Your key round details are now up top. Open the picker when you want to build or update your hand.
+                    <h2 className="text-lg font-semibold text-white">Your picks</h2>
+                    <p className="mt-0.5 text-sm text-white/45">
+                      {selectedGameweek ? `GW${selectedGameweek.number} — ${selectedGameweek.name}` : 'Select a gameweek'}
                     </p>
-                    <div className="mt-5">
+                  </div>
+                  {!deadlineClosed && (
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setShowPicker(true)}>
+                      <Target size={14} />
+                      {selectedPlayers.length > 0 ? 'Edit picks' : 'Open player picker'}
+                    </Button>
+                  )}
+                </div>
+
+                {selectedPlayers.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-6 text-center">
+                    <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/10 text-accent">
+                      <Target size={20} />
+                    </div>
+                    <h3 className="text-base font-semibold text-white">No picks made yet</h3>
+                    <p className="mx-auto mt-1.5 max-w-sm text-sm text-white/45">
+                      Choose exactly {MAX_PICKS} players for this gameweek to enter.
+                    </p>
+                    <div className="mt-4">
                       <Button type="button" onClick={() => setShowPicker(true)}>
                         <Target size={16} />
-                        Open player picker
+                        Start picks
                       </Button>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <>
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      {selectedPlayers.map((player, index) => (
+                        <PickCard
+                          key={`${player.player_id}-${index}`}
+                          pickNumber={index + 1}
+                          displayName={player.display_name}
+                          teamName={player.team_name || player.team_short_name}
+                          crestUrl={player.crest_url}
+                          position={player.position}
+                          onRemove={showPicker || deadlineClosed ? undefined : () => removePickByIndex(index)}
+                        />
+                      ))}
+                    </div>
+
+                    <div className="mt-5 flex flex-wrap gap-3">
+                      <Button
+                        type="button"
+                        onClick={handleSaveEntry}
+                        disabled={saving || selectedPlayers.length !== MAX_PICKS || !selectedGameweekId || deadlineClosed}
+                      >
+                        <CheckCircle2 size={16} />
+                        {saving ? 'Saving picks...' : savedEntry ? 'Update picks' : 'Save entry'}
+                      </Button>
+                    </div>
+                  </>
+                )}
               </Card>
             )}
           </>
         ) : (
-          <div className="space-y-6">
-          {isPotAdmin ? (
-            <InviteCard
-              potId={potId}
-              inviteCode={pot.invite_code}
-              existingMemberIds={new Set(members.map((m) => m.user_id))}
-              onChange={async () => {
-                await loadPot()
-                await loadMembers()
-              }}
-            />
-          ) : null}
-
-          <Card className="p-5">
-            <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-              <div>
-                <h2 className="text-xl font-semibold text-white">Members</h2>
-                <p className="mt-1 text-sm text-white/45">
-                  See who has submitted. Picks are revealed only after the deadline closes.
-                </p>
-              </div>
-
-              <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/65">
-                {deadlineClosed ? (
-                  <span className="inline-flex items-center gap-2">
-                    <Eye size={14} />
-                    Picks visible
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-2">
-                    <EyeOff size={14} />
-                    Picks hidden until deadline
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {membersLoading ? (
-              <div className="flex justify-center py-12">
-                <Spinner />
-              </div>
-            ) : memberEntries.length === 0 ? (
-              <EmptyState
-                icon={Users}
-                title="No members"
-                description="No members are in this pot yet."
+          <div className="space-y-5">
+            {isPotAdmin ? (
+              <InviteCard
+                potId={potId}
+                inviteCode={pot.invite_code}
+                existingMemberIds={new Set(members.map((m) => m.user_id))}
+                onChange={async () => {
+                  await loadPot()
+                  await loadMembers()
+                }}
               />
-            ) : (
-              <div className="space-y-4">
-                {memberEntries.map((entryRow) => {
-                  const displayName =
-                    entryRow.member?.profiles?.display_name ||
-                    entryRow.member?.profiles?.username ||
-                    'User'
+            ) : null}
 
-                  const username = entryRow.member?.profiles?.username || 'unknown'
-                  const canRevealPicks = deadlineClosed && entryRow.picks.length > 0
+            <Card className="p-5">
+              <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Members</h2>
+                  <p className="mt-1 text-sm text-white/45">
+                    See who's paid and submitted. Picks are revealed only after the deadline closes.
+                  </p>
+                </div>
 
-                  return (
-                    <div
-                      key={entryRow.member.id}
-                      className="rounded-2xl border border-white/8 bg-surface-1 p-4"
-                    >
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                          <div className="font-medium text-white">{displayName}</div>
-                          <div className="text-sm text-white/45">@{username}</div>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          <span className="rounded-full bg-white/8 px-3 py-1 text-xs text-white/70">
-                            {entryRow.member.role}
-                          </span>
-
-                          <span
-                            className={`rounded-full px-3 py-1 text-xs ${
-                              entryRow.hasEntry
-                                ? 'bg-accent/15 text-accent'
-                                : 'bg-white/8 text-white/60'
-                            }`}
-                          >
-                            {entryRow.hasEntry ? 'Selected' : 'Not selected'}
-                          </span>
-
-                          {isPotAdmin ? (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => setPendingRemoval(entryRow.member)}
-                              aria-label={`Remove ${displayName}`}
-                            >
-                              Remove
-                            </Button>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      {deadlineClosed ? (
-                        canRevealPicks ? (
-                          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                            {entryRow.picks.map((pick) => (
-                              <div
-                                key={pick.id}
-                                className="rounded-2xl border border-white/8 bg-black/10 p-3"
-                              >
-                                <div className="mb-1 text-xs uppercase tracking-wide text-white/35">
-                                  Pick {pick.pick_position}
-                                </div>
-                                <div className="font-medium text-white">{pick.display_name}</div>
-                                <div className="text-sm text-white/45">
-                                  {pick.team_name || pick.team_short_name || 'Unknown team'} · {pick.position || 'Player'}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="mt-4 text-sm text-white/45">
-                            No picks saved for this round.
-                          </div>
-                        )
-                      ) : (
-                        <div className="mt-4 text-sm text-white/45">
-                          Picks will be revealed when the deadline has passed.
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
+                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/65">
+                  {deadlineClosed ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Eye size={14} />
+                      Picks visible
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-2">
+                      <EyeOff size={14} />
+                      Picks hidden until deadline
+                    </span>
+                  )}
+                </div>
               </div>
-            )}
-          </Card>
+
+              {membersLoading ? (
+                <div className="flex justify-center py-12">
+                  <Spinner />
+                </div>
+              ) : memberEntriesWithPayments.length === 0 ? (
+                <EmptyState
+                  icon={Users}
+                  title="No members"
+                  description="No members are in this pot yet."
+                />
+              ) : (
+                <div className="space-y-3">
+                  {memberEntriesWithPayments.map((entryRow) => (
+                    <MemberCard
+                      key={entryRow.member.id}
+                      member={entryRow}
+                      isAdmin={isPotAdmin}
+                      deadlineClosed={deadlineClosed}
+                      onRemove={() => setPendingRemoval(entryRow.member)}
+                    />
+                  ))}
+                </div>
+              )}
+            </Card>
           </div>
         )}
       </section>
