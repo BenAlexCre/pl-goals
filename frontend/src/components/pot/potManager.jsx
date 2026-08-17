@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Users, PlusCircle, ChevronDown } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
@@ -23,47 +23,67 @@ const FEE_TYPES = [
   { value: 'percentage', label: 'Percentage' },
 ]
 
+// Order matches the brief's own listed order: split, roll into next
+// competition, roll into next season.
 const WIPEOUT_OPTIONS = [
   { value: 'split_prize', label: 'Split the prize evenly' },
-  { value: 'roll_prize', label: 'Roll the prize into next season' },
   { value: 'roll_next_competition', label: 'Roll the prize into my next competition' },
+  { value: 'roll_prize', label: 'Roll the prize into next season' },
 ]
 
-// Phase 7 — Competition Configuration UX Polish. The season-end tie rule
-// used to also offer "Final-prediction tiebreak (not yet supported)" here.
-// Removed: the backend detects it and fails loudly rather than guessing
-// (LmsFinalPredictionNotImplementedError), but the resolution mechanism
-// itself (its own pick type, scoring, everything) doesn't exist yet —
-// presenting it as choosable was presenting an option that can't actually
-// be used. season_end_tie_rule can now only ever be 'split_prize' from
-// this form, so there's no options list or selector left to render (see
-// the plain-text note in the JSX below) — re-add both once Final
-// Prediction is genuinely implemented, not before.
+// season_end_tie_rule can only ever be 'split_prize' from this form today —
+// 'final_prediction' has no resolution mechanism built (no pick type, no
+// scoring), so it was never a real option, only a disabled one that read
+// "not yet supported." Never expose it as choosable; when a second real
+// option exists, add it back as a genuine <select>, not before.
+const SEASON_END_SUPPORTED_LABEL = 'The prize is split evenly among everyone still alive.'
 
-// 'two_halves' is the pre-existing DB default and stays the default choice
-// here; 'single_cycle' is relabeled "Custom competition" and gains real
-// Start/End Gameweek selectors (see predictorCycleMode-conditional JSX
-// below) — both values are unchanged, only their labels and what's exposed
-// around them changed.
+// Both LMS and Score Predictor now share the same "Full season (default) /
+// Custom competition" duration model — Full season hides the gameweek
+// selectors entirely and lets the engine resolve the whole span
+// automatically (first available gameweek -> the season's actual final
+// gameweek, exactly as both engines already did before this concept
+// existed); Custom competition exposes Start/End Gameweek, capped at
+// MAX_CUSTOM_COMPETITION_GAMEWEEKS.
+const LMS_DURATION_OPTIONS = [
+  { value: 'full_season', label: 'Full season' },
+  { value: 'custom', label: 'Custom competition' },
+]
+
 const CYCLE_MODE_OPTIONS = [
   { value: 'two_halves', label: 'Two half-season competitions' },
   { value: 'single_cycle', label: 'Custom competition' },
 ]
 
-const MAX_CUSTOM_PREDICTOR_GAMEWEEKS = 20
+const MAX_CUSTOM_COMPETITION_GAMEWEEKS = 20
 
 const SCORER_SCOPE_OPTIONS = [
   { value: 'fixture_only', label: 'Fixture only' },
   { value: 'gameweek_wide', label: 'Gameweek-wide' },
 ]
 
-const inputClass =
-  'w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white placeholder:text-white/25 outline-none transition-colors focus:border-accent/50'
-const selectClass = `${inputClass} appearance-none pr-12`
+// Border colour is kept separate from the rest of the field styling so an
+// error state never has to fight a default border class for specificity —
+// exactly one border-colour class is ever applied at a time.
+const fieldBaseClass =
+  'w-full rounded-xl border bg-surface-2 px-4 py-3 text-white placeholder:text-white/25 outline-none transition-colors'
+const fieldBorderClass = (hasError) =>
+  hasError ? 'border-red-goal/60 focus:border-red-goal/60' : 'border-white/10 focus:border-accent/50'
+const inputClassFor = (hasError) => `${fieldBaseClass} ${fieldBorderClass(hasError)}`
+const selectClassFor = (hasError) => `${inputClassFor(hasError)} appearance-none pr-12`
+const inputClass = inputClassFor(false)
+const selectClass = selectClassFor(false)
 const labelClass = 'mb-2 block text-sm text-white/70'
 const hintClass = 'mt-2 text-xs text-white/45'
+const sectionHeadingClass = 'text-base font-semibold text-white'
+const sectionCardClass = 'space-y-4 rounded-2xl border border-white/8 bg-surface-2/30 p-5'
 
-function FeeFields({ idPrefix, label, type, onTypeChange, amount, onAmountChange, percentage, onPercentageChange }) {
+function FieldError({ message }) {
+  if (!message) return null
+  return <p className="mt-1.5 text-xs font-medium text-red-goal">{message}</p>
+}
+
+function FeeFields({ idPrefix, label, type, onTypeChange, amount, onAmountChange, percentage, onPercentageChange, amountError, percentageError, amountRef, percentageRef }) {
   return (
     <div>
       <label className={labelClass} htmlFor={`${idPrefix}-type`}>{label}</label>
@@ -82,46 +102,55 @@ function FeeFields({ idPrefix, label, type, onTypeChange, amount, onAmountChange
       </div>
 
       {type === 'fixed' ? (
-        <input
-          type="number"
-          min="0"
-          step="0.01"
-          value={amount}
-          onChange={(e) => onAmountChange(e.target.value)}
-          placeholder="e.g. 5.00"
-          className={`${inputClass} mt-2`}
-          aria-label={`${label} amount`}
-        />
+        <>
+          <input
+            ref={amountRef}
+            type="number"
+            min="0"
+            step="0.01"
+            value={amount}
+            onChange={(e) => onAmountChange(e.target.value)}
+            placeholder="e.g. 5.00"
+            className={`${inputClassFor(!!amountError)} mt-2`}
+            aria-label={`${label} amount`}
+          />
+          <FieldError message={amountError} />
+        </>
       ) : null}
 
       {type === 'percentage' ? (
-        <input
-          type="number"
-          min="0"
-          max="100"
-          step="0.01"
-          value={percentage}
-          onChange={(e) => onPercentageChange(e.target.value)}
-          placeholder="e.g. 5"
-          className={`${inputClass} mt-2`}
-          aria-label={`${label} percentage`}
-        />
+        <>
+          <input
+            ref={percentageRef}
+            type="number"
+            min="0"
+            max="100"
+            step="0.01"
+            value={percentage}
+            onChange={(e) => onPercentageChange(e.target.value)}
+            placeholder="e.g. 5"
+            className={`${inputClassFor(!!percentageError)} mt-2`}
+            aria-label={`${label} percentage`}
+          />
+          <FieldError message={percentageError} />
+        </>
       ) : null}
     </div>
   )
 }
 
-function GameweekSelect({ id, label, value, onChange, gameweeks, loading, placeholder }) {
+function GameweekSelect({ id, label, value, onChange, gameweeks, loading, placeholder, error, fieldRef }) {
   return (
     <div>
       <label className={labelClass} htmlFor={id}>{label}</label>
       <div className="relative">
         <select
+          ref={fieldRef}
           id={id}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={loading}
-          className={selectClass}
+          className={selectClassFor(!!error)}
         >
           <option value="">{loading ? 'Loading gameweeks...' : placeholder}</option>
           {gameweeks.map((gw) => (
@@ -132,9 +161,30 @@ function GameweekSelect({ id, label, value, onChange, gameweeks, loading, placeh
         </select>
         <ChevronDown size={18} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45" />
       </div>
+      <FieldError message={error} />
     </div>
   )
 }
+
+// Visual top-to-bottom order of every validated field, used to find "the
+// first invalid field" to scroll to and focus — a fixed list rather than
+// walking the DOM, since it's simpler and exactly matches the form's own
+// section order (Competition -> Financial settings -> Competition rules).
+const FIELD_ORDER = [
+  'name',
+  'league',
+  'entryFee',
+  'maxMembers',
+  'adminFeeAmount',
+  'adminFeePercentage',
+  'charityFeeAmount',
+  'charityFeePercentage',
+  'startGameweek',
+  'endGameweek',
+  'predictorExactScorePoints',
+  'predictorCorrectResultPoints',
+  'predictorScorerBonusPoints',
+]
 
 export default function PotManager() {
   const { user } = useAuthStore()
@@ -164,8 +214,9 @@ export default function PotManager() {
 
   // LMS-only
   const [startGameweekId, setStartGameweekId] = useState('')
+  const [lmsDurationMode, setLmsDurationMode] = useState('full_season')
   const [wipeoutResolution, setWipeoutResolution] = useState('split_prize')
-  const [seasonEndTieRule, setSeasonEndTieRule] = useState('split_prize')
+  const [seasonEndTieRule] = useState('split_prize') // only supported value — never user-editable, see SEASON_END_SUPPORTED_LABEL
 
   // LMS + Predictor (shared season-conclusion marker)
   const [endGameweekId, setEndGameweekId] = useState('')
@@ -176,6 +227,24 @@ export default function PotManager() {
   const [predictorExactScorePoints, setPredictorExactScorePoints] = useState('5')
   const [predictorCorrectResultPoints, setPredictorCorrectResultPoints] = useState('3')
   const [predictorScorerBonusPoints, setPredictorScorerBonusPoints] = useState('2')
+
+  // Inline validation UX — replaces bottom-of-page toasts for ordinary
+  // client-side validation. `errors` maps field key -> message; toasts are
+  // reserved for successful creation, server errors, and other failures the
+  // organiser can't fix by editing a specific field (see handleCreatePot).
+  const [errors, setErrors] = useState({})
+  const fieldRefs = useRef({})
+  const setFieldRef = (key) => (el) => {
+    fieldRefs.current[key] = el
+  }
+  const clearError = (key) => {
+    setErrors((prev) => {
+      if (!prev[key]) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
 
   const createPot = useCreatePot()
 
@@ -311,12 +380,12 @@ export default function PotManager() {
   const showLeagueSelector = leagues.length > 1
   const noActiveLeagues = !loading && leagues.length === 0
 
-  // Phase 7 — LMS Pot Creation UX Polish. "Next available" per the product
-  // definition: the first gameweek (by number) whose entry deadline hasn't
-  // passed yet — not hardcoded GW1, so a pot created mid-season starts
-  // correctly. A null deadline (not yet computed by compute-deadlines) is
-  // treated as not-yet-passed rather than excluded. Returns '' if every
-  // gameweek's deadline has already passed (nothing left to default to).
+  // "Next available" per the product definition: the first gameweek (by
+  // number) whose entry deadline hasn't passed yet — not hardcoded GW1, so
+  // a pot created mid-season starts correctly. A null deadline (not yet
+  // computed by compute-deadlines) is treated as not-yet-passed rather than
+  // excluded. Returns '' if every gameweek's deadline has already passed
+  // (nothing left to default to).
   function defaultStartGameweekId(rows) {
     const now = Date.now()
     const next = rows.find((gw) => !gw.deadline_utc || new Date(gw.deadline_utc).getTime() > now)
@@ -331,16 +400,15 @@ export default function PotManager() {
     return last ? String(last.id) : ''
   }
 
-  // Predictor "Custom competition" default: MAX_CUSTOM_PREDICTOR_GAMEWEEKS
-  // (20) gameweeks on from the start gameweek, inclusive, capped at the
-  // season's actual last gameweek if fewer than 20 remain. Never a
-  // hardcoded gameweek number — reads directly off whichever gameweeks this
-  // league/season actually returned.
+  // Custom competition default (LMS and Predictor both): 20 gameweeks on
+  // from the start gameweek, inclusive, capped at the season's actual last
+  // gameweek if fewer than 20 remain. Never a hardcoded gameweek number —
+  // reads directly off whichever gameweeks this league/season returned.
   function defaultCustomEndGameweekId(rows, startId) {
     const startGw = rows.find((gw) => String(gw.id) === String(startId))
     if (!startGw) return defaultEndGameweekId(rows)
 
-    const targetNumber = startGw.number + MAX_CUSTOM_PREDICTOR_GAMEWEEKS - 1
+    const targetNumber = startGw.number + MAX_CUSTOM_COMPETITION_GAMEWEEKS - 1
     const eligible = rows.filter((gw) => gw.number >= startGw.number)
     const withinCap = eligible.filter((gw) => gw.number <= targetNumber)
     const chosen = withinCap.length > 0 ? withinCap[withinCap.length - 1] : eligible[eligible.length - 1]
@@ -364,10 +432,10 @@ export default function PotManager() {
     init()
   }, [])
 
-  // Gameweeks are only needed for LMS's start/end selectors and Predictor's
-  // end (and, for a Custom competition, start) selector — fetched per
-  // selected league/season rather than eagerly, since most pots (Pick 5)
-  // never need this list at all.
+  // Gameweeks are only needed for LMS's and Predictor's Custom-competition
+  // start/end selectors — fetched per selected league/season rather than
+  // eagerly, since most pots (Pick 5, and any Full-season/Two-half pot)
+  // never need this list rendered at all.
   useEffect(() => {
     if (!selectedLeague) {
       setGameweeksForLeague([])
@@ -404,15 +472,24 @@ export default function PotManager() {
 
   // Start/Final Gameweek defaults recompute whenever the available
   // gameweeks change (new league/season loaded) or the organiser switches
-  // game mode / Predictor cycle mode — each combination has its own
-  // sensible default, and switching modes is already a natural reset point
-  // for every other mode-specific field on this form. LMS always shows and
-  // uses both; a Predictor "Custom competition" shows and uses both with
-  // its own 20-gameweek default span; a Predictor "Two half-season" pot
-  // (and Pick 5) never shows a selector and just gets end_gameweek_id
-  // resolved automatically behind the scenes.
+  // game mode / duration mode / Predictor cycle mode — each combination has
+  // its own sensible default, and switching modes is already a natural
+  // reset point for every other mode-specific field on this form.
+  //
+  // LMS Full season and Predictor Two-half-season both resolve
+  // start/end automatically (first available -> the season's actual final
+  // gameweek) with no selector shown at all — "the engine automatically
+  // uses the first available and final gameweek," per the brief, is already
+  // exactly what both engines do once these values are set; nothing new is
+  // needed there. LMS Custom and Predictor Custom competition both show and
+  // use both selectors, each defaulting to a 20-gameweek span from the
+  // start gameweek.
   useEffect(() => {
-    if (gameType === 'last_man_standing') {
+    if (gameType === 'last_man_standing' && lmsDurationMode === 'custom') {
+      const start = defaultStartGameweekId(gameweeksForLeague)
+      setStartGameweekId(start)
+      setEndGameweekId(defaultCustomEndGameweekId(gameweeksForLeague, start))
+    } else if (gameType === 'last_man_standing') {
       setStartGameweekId(defaultStartGameweekId(gameweeksForLeague))
       setEndGameweekId(defaultEndGameweekId(gameweeksForLeague))
     } else if (gameType === 'score_predictor' && predictorCycleMode === 'single_cycle') {
@@ -426,7 +503,7 @@ export default function PotManager() {
       setStartGameweekId('')
       setEndGameweekId('')
     }
-  }, [gameweeksForLeague, gameType, predictorCycleMode])
+  }, [gameweeksForLeague, gameType, lmsDurationMode, predictorCycleMode])
 
   function resetForm() {
     setName('')
@@ -442,85 +519,132 @@ export default function PotManager() {
     setCharityFeeAmount('')
     setCharityFeePercentage('')
     // Start/Final Gameweek reset themselves reactively via the
-    // [gameweeksForLeague, gameType, predictorCycleMode] effect above, once
-    // gameType/predictorCycleMode below take effect.
+    // [gameweeksForLeague, gameType, lmsDurationMode, predictorCycleMode]
+    // effect above, once gameType/duration mode below take effect.
+    setLmsDurationMode('full_season')
     setWipeoutResolution('split_prize')
-    setSeasonEndTieRule('split_prize')
     setPredictorCycleMode('two_halves')
     setPredictorScorerScope('gameweek_wide')
     setPredictorExactScorePoints('5')
     setPredictorCorrectResultPoints('3')
     setPredictorScorerBonusPoints('2')
+    setErrors({})
   }
 
+  // Returns a field-key -> message map covering every rule that used to
+  // return a single bottom-toast string. Every rule runs (no short-
+  // circuiting) so every invalid field gets its own inline message at once;
+  // only the FIRST (per FIELD_ORDER) is scrolled to and focused — see
+  // handleCreatePot.
   function validate() {
+    const nextErrors = {}
+
     const trimmedName = name.trim()
-    if (!trimmedName) return 'Pot name is required'
-    if (leagues.length === 0) return 'No active league is available right now — pots cannot be created until one is configured'
-    if (!selectedLeague) return 'Select a league/tournament'
+    if (!trimmedName) nextErrors.name = 'Pot name is required'
+
+    if (showLeagueSelector && !selectedLeague) {
+      nextErrors.league = 'Select a league/tournament'
+    }
 
     const fee = Number(entryFee)
-    if (entryFee === '' || Number.isNaN(fee) || fee < 0) return 'Entry fee must be zero or a positive amount'
+    if (entryFee === '' || Number.isNaN(fee) || fee < 0) {
+      nextErrors.entryFee = 'Entry fee must be zero or a positive amount'
+    }
 
-    if (maxMembers !== '' && Number(maxMembers) < 2) return 'Max members must be at least 2, or left blank for unlimited'
+    if (maxMembers !== '' && Number(maxMembers) < 2) {
+      nextErrors.maxMembers = 'Max members must be at least 2, or left blank for unlimited'
+    }
 
     if (adminFeeType === 'fixed' && (adminFeeAmount === '' || Number(adminFeeAmount) < 0)) {
-      return 'Enter the admin fee amount'
+      nextErrors.adminFeeAmount = 'Enter the admin fee amount'
     }
     if (adminFeeType === 'percentage' && (adminFeePercentage === '' || Number(adminFeePercentage) < 0 || Number(adminFeePercentage) > 100)) {
-      return 'Enter an admin fee percentage between 0 and 100'
+      nextErrors.adminFeePercentage = 'Enter an admin fee percentage between 0 and 100'
     }
     if (charityFeeType === 'fixed' && (charityFeeAmount === '' || Number(charityFeeAmount) < 0)) {
-      return 'Enter the charity fee amount'
+      nextErrors.charityFeeAmount = 'Enter the charity fee amount'
     }
     if (charityFeeType === 'percentage' && (charityFeePercentage === '' || Number(charityFeePercentage) < 0 || Number(charityFeePercentage) > 100)) {
-      return 'Enter a charity fee percentage between 0 and 100'
+      nextErrors.charityFeePercentage = 'Enter a charity fee percentage between 0 and 100'
     }
 
     if (gameType === 'last_man_standing') {
-      if (!startGameweekId) return 'Select the gameweek Last Man Standing picks begin (this is also the entry-window cutoff)'
-      if (!endGameweekId) return "Select the season's final gameweek — without it, a season-end tie can never be resolved"
-    }
+      if (!startGameweekId) nextErrors.startGameweek = 'Select the gameweek Last Man Standing picks begin (this is also the entry-window cutoff)'
+      if (!endGameweekId) nextErrors.endGameweek = "Select the season's final gameweek — without it, a season-end tie can never be resolved"
 
-    if (gameType === 'score_predictor') {
-      if (!endGameweekId) return "Select the season's final gameweek — Score Predictor has no other way to conclude the competition"
-
-      if (predictorCycleMode === 'single_cycle') {
-        if (!startGameweekId) return 'Select the start gameweek for this custom competition'
-
+      if (lmsDurationMode === 'custom' && !nextErrors.startGameweek && !nextErrors.endGameweek) {
         const startGw = gameweeksForLeague.find((gw) => String(gw.id) === String(startGameweekId))
         const endGw = gameweeksForLeague.find((gw) => String(gw.id) === String(endGameweekId))
 
         if (startGw && endGw) {
-          if (endGw.number < startGw.number) return 'The final gameweek must be on or after the start gameweek'
-          if (endGw.number - startGw.number + 1 > MAX_CUSTOM_PREDICTOR_GAMEWEEKS) {
-            return `A custom competition can span at most ${MAX_CUSTOM_PREDICTOR_GAMEWEEKS} gameweeks`
+          if (endGw.number < startGw.number) {
+            nextErrors.endGameweek = 'The final gameweek must be on or after the start gameweek'
+          } else if (endGw.number - startGw.number + 1 > MAX_CUSTOM_COMPETITION_GAMEWEEKS) {
+            nextErrors.endGameweek = `A custom competition can span at most ${MAX_CUSTOM_COMPETITION_GAMEWEEKS} gameweeks`
+          }
+        }
+      }
+    }
+
+    if (gameType === 'score_predictor') {
+      if (!endGameweekId) nextErrors.endGameweek = "Select the season's final gameweek — Score Predictor has no other way to conclude the competition"
+
+      if (predictorCycleMode === 'single_cycle') {
+        if (!startGameweekId) nextErrors.startGameweek = 'Select the start gameweek for this custom competition'
+
+        if (!nextErrors.startGameweek && !nextErrors.endGameweek) {
+          const startGw = gameweeksForLeague.find((gw) => String(gw.id) === String(startGameweekId))
+          const endGw = gameweeksForLeague.find((gw) => String(gw.id) === String(endGameweekId))
+
+          if (startGw && endGw) {
+            if (endGw.number < startGw.number) {
+              nextErrors.endGameweek = 'The final gameweek must be on or after the start gameweek'
+            } else if (endGw.number - startGw.number + 1 > MAX_CUSTOM_COMPETITION_GAMEWEEKS) {
+              nextErrors.endGameweek = `A custom competition can span at most ${MAX_CUSTOM_COMPETITION_GAMEWEEKS} gameweeks`
+            }
           }
         }
       }
 
-      for (const [label, val] of [
-        ['exact score', predictorExactScorePoints],
-        ['correct result', predictorCorrectResultPoints],
-        ['scorer bonus', predictorScorerBonusPoints],
-      ]) {
-        if (val === '' || Number(val) < 0) return `Enter a valid, non-negative ${label} point value`
+      if (predictorExactScorePoints === '' || Number(predictorExactScorePoints) < 0) {
+        nextErrors.predictorExactScorePoints = 'Enter a valid, non-negative exact score point value'
+      }
+      if (predictorCorrectResultPoints === '' || Number(predictorCorrectResultPoints) < 0) {
+        nextErrors.predictorCorrectResultPoints = 'Enter a valid, non-negative correct result point value'
+      }
+      if (predictorScorerBonusPoints === '' || Number(predictorScorerBonusPoints) < 0) {
+        nextErrors.predictorScorerBonusPoints = 'Enter a valid, non-negative scorer bonus point value'
       }
     }
 
-    return null
+    return nextErrors
   }
 
   async function handleCreatePot(e) {
     e.preventDefault()
 
-    const validationError = validate()
-    if (validationError) {
-      setErrorMessage(validationError)
-      setMessage('')
+    // Not a field the organiser can fix by editing the form — the submit
+    // button is already disabled in this state; this is defense-in-depth
+    // only. An environment/data problem, not a validation failure, so it
+    // stays a toast rather than trying to focus a field that doesn't exist.
+    if (noActiveLeagues) {
+      setErrorMessage('No active league is available right now — pots cannot be created until one is configured')
       return
     }
 
+    const validationErrors = validate()
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors)
+      const firstInvalidKey = FIELD_ORDER.find((key) => validationErrors[key])
+      const target = firstInvalidKey ? fieldRefs.current[firstInvalidKey] : null
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        target.focus({ preventScroll: true })
+      }
+      return
+    }
+
+    setErrors({})
     setErrorMessage('')
     setMessage('')
 
@@ -554,6 +678,7 @@ export default function PotManager() {
       setMessage('Pot created successfully')
       await loadPots()
     } catch (err) {
+      // Server/unexpected failure — exactly what toasts are reserved for.
       setErrorMessage(err.message || 'Failed to create pot')
     }
   }
@@ -576,18 +701,23 @@ export default function PotManager() {
         <Card className="p-5">
           <h2 className="mb-4 text-lg font-semibold text-white">Create pot</h2>
 
-          <form onSubmit={handleCreatePot} className="space-y-6">
-            <div className="space-y-4">
+          <form onSubmit={handleCreatePot} noValidate className="space-y-6">
+            {/* Competition — identity and format. Nothing here ever locks. */}
+            <div className={sectionCardClass}>
+              <h3 className={sectionHeadingClass}>Competition</h3>
+
               <div>
                 <label className={labelClass} htmlFor="pot-name">Pot name</label>
                 <input
+                  ref={setFieldRef('name')}
                   id="pot-name"
                   type="text"
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => { setName(e.target.value); clearError('name') }}
                   placeholder="Office pool"
-                  className={inputClass}
+                  className={inputClassFor(!!errors.name)}
                 />
+                <FieldError message={errors.name} />
               </div>
 
               <div>
@@ -624,10 +754,11 @@ export default function PotManager() {
                   <label className={labelClass} htmlFor="pot-league">League / tournament</label>
                   <div className="relative">
                     <select
+                      ref={setFieldRef('league')}
                       id="pot-league"
                       value={leagueId}
-                      onChange={(e) => setLeagueId(e.target.value)}
-                      className={selectClass}
+                      onChange={(e) => { setLeagueId(e.target.value); clearError('league') }}
+                      className={selectClassFor(!!errors.league)}
                     >
                       <option value="">Select a league/tournament</option>
                       {leagues.map((league) => (
@@ -644,6 +775,7 @@ export default function PotManager() {
                       className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45"
                     />
                   </div>
+                  <FieldError message={errors.league} />
 
                   {selectedLeague ? (
                     <p className={hintClass}>Season: {selectedLeague.seasons?.name || 'Unknown'}</p>
@@ -656,108 +788,156 @@ export default function PotManager() {
                   {selectedLeague.seasons?.name || 'Unknown'}
                 </p>
               ) : null}
-            </div>
-
-            <div>
-              <span className={labelClass}>Game mode</span>
-              <div className="grid gap-2 sm:grid-cols-3">
-                {GAME_TYPES.map((gt) => (
-                  <button
-                    key={gt.value}
-                    type="button"
-                    onClick={() => setGameType(gt.value)}
-                    className={`rounded-xl border p-3 text-left transition-colors ${
-                      gameType === gt.value
-                        ? 'border-accent/50 bg-accent/10'
-                        : 'border-white/10 bg-surface-2 hover:border-white/20'
-                    }`}
-                  >
-                    <div className="text-sm font-semibold text-white">{gt.label}</div>
-                    <div className="mt-1 text-xs text-white/45">{gt.description}</div>
-                  </button>
-                ))}
-              </div>
-              <p className={hintClass}>Game mode cannot be changed once the pot is created.</p>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelClass} htmlFor="pot-entry-fee">Entry fee</label>
-                <input
-                  id="pot-entry-fee"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={entryFee}
-                  onChange={(e) => setEntryFee(e.target.value)}
-                  className={inputClass}
-                />
-              </div>
 
               <div>
-                <label className={labelClass} htmlFor="pot-max-members">Max members (optional)</label>
-                <input
-                  id="pot-max-members"
-                  type="number"
-                  min="2"
-                  step="1"
-                  value={maxMembers}
-                  onChange={(e) => setMaxMembers(e.target.value)}
-                  placeholder="Unlimited"
-                  className={inputClass}
-                />
-              </div>
-
-              <FeeFields
-                idPrefix="admin-fee"
-                label="Admin fee"
-                type={adminFeeType}
-                onTypeChange={setAdminFeeType}
-                amount={adminFeeAmount}
-                onAmountChange={setAdminFeeAmount}
-                percentage={adminFeePercentage}
-                onPercentageChange={setAdminFeePercentage}
-              />
-
-              <FeeFields
-                idPrefix="charity-fee"
-                label="Charity fee"
-                type={charityFeeType}
-                onTypeChange={setCharityFeeType}
-                amount={charityFeeAmount}
-                onAmountChange={setCharityFeeAmount}
-                percentage={charityFeePercentage}
-                onPercentageChange={setCharityFeePercentage}
-              />
-            </div>
-            <p className={hintClass}>
-              Entry fee and fees lock as soon as the first player joins — double-check these before creating the pot.
-            </p>
-
-            {gameType === 'last_man_standing' ? (
-              <div className="space-y-4 rounded-xl border border-white/10 bg-surface-2/50 p-4">
-                <h3 className="text-sm font-semibold text-white">Last Man Standing settings</h3>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <GameweekSelect
-                    id="pot-start-gameweek"
-                    label="Start gameweek (entry-window cutoff)"
-                    value={startGameweekId}
-                    onChange={setStartGameweekId}
-                    gameweeks={gameweeksForLeague}
-                    loading={gameweeksLoading}
-                    placeholder="Select a gameweek"
-                  />
-                  <GameweekSelect
-                    id="pot-end-gameweek-lms"
-                    label="Final gameweek (season conclusion)"
-                    value={endGameweekId}
-                    onChange={setEndGameweekId}
-                    gameweeks={gameweeksForLeague}
-                    loading={gameweeksLoading}
-                    placeholder="Select a gameweek"
-                  />
+                <span className={labelClass}>Game mode</span>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {GAME_TYPES.map((gt) => (
+                    <button
+                      key={gt.value}
+                      type="button"
+                      onClick={() => setGameType(gt.value)}
+                      className={`rounded-xl border p-3 text-left transition-colors ${
+                        gameType === gt.value
+                          ? 'border-accent/50 bg-accent/10'
+                          : 'border-white/10 bg-surface-2 hover:border-white/20'
+                      }`}
+                    >
+                      <div className="text-sm font-semibold text-white">{gt.label}</div>
+                      <div className="mt-1 text-xs text-white/45">{gt.description}</div>
+                    </button>
+                  ))}
                 </div>
+                <p className={hintClass}>Game mode cannot be changed once the pot is created.</p>
+              </div>
+            </div>
+
+            {/* Financial settings — everything that locks at first join. */}
+            <div className={sectionCardClass}>
+              <h3 className={sectionHeadingClass}>Financial settings</h3>
+              <p className={hintClass}>
+                Entry fee and fees lock as soon as the first player joins — double-check these before creating the pot.
+              </p>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelClass} htmlFor="pot-entry-fee">Entry fee</label>
+                  <input
+                    ref={setFieldRef('entryFee')}
+                    id="pot-entry-fee"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={entryFee}
+                    onChange={(e) => { setEntryFee(e.target.value); clearError('entryFee') }}
+                    className={inputClassFor(!!errors.entryFee)}
+                  />
+                  <FieldError message={errors.entryFee} />
+                </div>
+
+                <div>
+                  <label className={labelClass} htmlFor="pot-max-members">Max members (optional)</label>
+                  <input
+                    ref={setFieldRef('maxMembers')}
+                    id="pot-max-members"
+                    type="number"
+                    min="2"
+                    step="1"
+                    value={maxMembers}
+                    onChange={(e) => { setMaxMembers(e.target.value); clearError('maxMembers') }}
+                    placeholder="Unlimited"
+                    className={inputClassFor(!!errors.maxMembers)}
+                  />
+                  <FieldError message={errors.maxMembers} />
+                </div>
+
+                <FeeFields
+                  idPrefix="admin-fee"
+                  label="Admin fee"
+                  type={adminFeeType}
+                  onTypeChange={setAdminFeeType}
+                  amount={adminFeeAmount}
+                  onAmountChange={(v) => { setAdminFeeAmount(v); clearError('adminFeeAmount') }}
+                  percentage={adminFeePercentage}
+                  onPercentageChange={(v) => { setAdminFeePercentage(v); clearError('adminFeePercentage') }}
+                  amountError={errors.adminFeeAmount}
+                  percentageError={errors.adminFeePercentage}
+                  amountRef={setFieldRef('adminFeeAmount')}
+                  percentageRef={setFieldRef('adminFeePercentage')}
+                />
+
+                <FeeFields
+                  idPrefix="charity-fee"
+                  label="Charity fee"
+                  type={charityFeeType}
+                  onTypeChange={setCharityFeeType}
+                  amount={charityFeeAmount}
+                  onAmountChange={(v) => { setCharityFeeAmount(v); clearError('charityFeeAmount') }}
+                  percentage={charityFeePercentage}
+                  onPercentageChange={(v) => { setCharityFeePercentage(v); clearError('charityFeePercentage') }}
+                  amountError={errors.charityFeeAmount}
+                  percentageError={errors.charityFeePercentage}
+                  amountRef={setFieldRef('charityFeeAmount')}
+                  percentageRef={setFieldRef('charityFeePercentage')}
+                />
+              </div>
+            </div>
+
+            {/* Competition rules — only what's relevant to the selected mode. */}
+            {gameType === 'last_man_standing' ? (
+              <div className={sectionCardClass}>
+                <h3 className={sectionHeadingClass}>Competition rules</h3>
+
+                <div>
+                  <label className={labelClass} htmlFor="pot-lms-duration">Competition duration</label>
+                  <div className="relative">
+                    <select
+                      id="pot-lms-duration"
+                      value={lmsDurationMode}
+                      onChange={(e) => setLmsDurationMode(e.target.value)}
+                      className={selectClass}
+                    >
+                      {LMS_DURATION_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={18} className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-white/45" />
+                  </div>
+                </div>
+
+                {lmsDurationMode === 'custom' ? (
+                  <div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <GameweekSelect
+                        id="pot-start-gameweek"
+                        label="Start gameweek (entry-window cutoff)"
+                        value={startGameweekId}
+                        onChange={(v) => { setStartGameweekId(v); clearError('startGameweek') }}
+                        gameweeks={gameweeksForLeague}
+                        loading={gameweeksLoading}
+                        placeholder="Select a gameweek"
+                        error={errors.startGameweek}
+                        fieldRef={setFieldRef('startGameweek')}
+                      />
+                      <GameweekSelect
+                        id="pot-end-gameweek-lms"
+                        label="Final gameweek (season conclusion)"
+                        value={endGameweekId}
+                        onChange={(v) => { setEndGameweekId(v); clearError('endGameweek') }}
+                        gameweeks={gameweeksForLeague}
+                        loading={gameweeksLoading}
+                        placeholder="Select a gameweek"
+                        error={errors.endGameweek}
+                        fieldRef={setFieldRef('endGameweek')}
+                      />
+                    </div>
+                    <p className={hintClass}>
+                      A custom competition can span at most {MAX_CUSTOM_COMPETITION_GAMEWEEKS} gameweeks.
+                    </p>
+                  </div>
+                ) : (
+                  <p className={hintClass}>Runs from the first available gameweek to the season's final gameweek — no gameweeks to choose.</p>
+                )}
 
                 <div>
                   <label className={labelClass} htmlFor="pot-wipeout">If everyone is eliminated in the same gameweek</label>
@@ -778,14 +958,14 @@ export default function PotManager() {
 
                 <div>
                   <label className={labelClass}>If multiple players are still alive at the final gameweek</label>
-                  <p className="text-sm text-white/60">The prize is split evenly among everyone still alive.</p>
+                  <p className="text-sm text-white/60">{SEASON_END_SUPPORTED_LABEL}</p>
                 </div>
               </div>
             ) : null}
 
             {gameType === 'score_predictor' ? (
-              <div className="space-y-4 rounded-xl border border-white/10 bg-surface-2/50 p-4">
-                <h3 className="text-sm font-semibold text-white">Score Predictor settings</h3>
+              <div className={sectionCardClass}>
+                <h3 className={sectionHeadingClass}>Competition rules</h3>
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
@@ -830,23 +1010,27 @@ export default function PotManager() {
                         id="pot-start-gameweek-predictor"
                         label="Start gameweek"
                         value={startGameweekId}
-                        onChange={setStartGameweekId}
+                        onChange={(v) => { setStartGameweekId(v); clearError('startGameweek') }}
                         gameweeks={gameweeksForLeague}
                         loading={gameweeksLoading}
                         placeholder="Select a gameweek"
+                        error={errors.startGameweek}
+                        fieldRef={setFieldRef('startGameweek')}
                       />
                       <GameweekSelect
                         id="pot-end-gameweek-predictor"
                         label="End gameweek"
                         value={endGameweekId}
-                        onChange={setEndGameweekId}
+                        onChange={(v) => { setEndGameweekId(v); clearError('endGameweek') }}
                         gameweeks={gameweeksForLeague}
                         loading={gameweeksLoading}
                         placeholder="Select a gameweek"
+                        error={errors.endGameweek}
+                        fieldRef={setFieldRef('endGameweek')}
                       />
                     </div>
                     <p className={hintClass}>
-                      A custom competition can span at most {MAX_CUSTOM_PREDICTOR_GAMEWEEKS} gameweeks.
+                      A custom competition can span at most {MAX_CUSTOM_COMPETITION_GAMEWEEKS} gameweeks.
                     </p>
                   </div>
                 ) : (
@@ -857,38 +1041,44 @@ export default function PotManager() {
                   <div>
                     <label className={labelClass} htmlFor="pot-exact-score-points">Exact score points</label>
                     <input
+                      ref={setFieldRef('predictorExactScorePoints')}
                       id="pot-exact-score-points"
                       type="number"
                       min="0"
                       step="1"
                       value={predictorExactScorePoints}
-                      onChange={(e) => setPredictorExactScorePoints(e.target.value)}
-                      className={inputClass}
+                      onChange={(e) => { setPredictorExactScorePoints(e.target.value); clearError('predictorExactScorePoints') }}
+                      className={inputClassFor(!!errors.predictorExactScorePoints)}
                     />
+                    <FieldError message={errors.predictorExactScorePoints} />
                   </div>
                   <div>
                     <label className={labelClass} htmlFor="pot-correct-result-points">Correct result points</label>
                     <input
+                      ref={setFieldRef('predictorCorrectResultPoints')}
                       id="pot-correct-result-points"
                       type="number"
                       min="0"
                       step="1"
                       value={predictorCorrectResultPoints}
-                      onChange={(e) => setPredictorCorrectResultPoints(e.target.value)}
-                      className={inputClass}
+                      onChange={(e) => { setPredictorCorrectResultPoints(e.target.value); clearError('predictorCorrectResultPoints') }}
+                      className={inputClassFor(!!errors.predictorCorrectResultPoints)}
                     />
+                    <FieldError message={errors.predictorCorrectResultPoints} />
                   </div>
                   <div>
                     <label className={labelClass} htmlFor="pot-scorer-bonus-points">Goalscorer bonus points</label>
                     <input
+                      ref={setFieldRef('predictorScorerBonusPoints')}
                       id="pot-scorer-bonus-points"
                       type="number"
                       min="0"
                       step="1"
                       value={predictorScorerBonusPoints}
-                      onChange={(e) => setPredictorScorerBonusPoints(e.target.value)}
-                      className={inputClass}
+                      onChange={(e) => { setPredictorScorerBonusPoints(e.target.value); clearError('predictorScorerBonusPoints') }}
+                      className={inputClassFor(!!errors.predictorScorerBonusPoints)}
                     />
+                    <FieldError message={errors.predictorScorerBonusPoints} />
                   </div>
                 </div>
               </div>
