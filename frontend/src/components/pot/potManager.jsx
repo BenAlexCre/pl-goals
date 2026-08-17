@@ -25,7 +25,7 @@ const FEE_TYPES = [
 
 const WIPEOUT_OPTIONS = [
   { value: 'split_prize', label: 'Split the prize evenly' },
-  { value: 'roll_prize', label: 'Roll the prize into a new competition' },
+  { value: 'roll_prize', label: 'Roll the entire prize into next season' },
 ]
 
 const SEASON_END_TIE_OPTIONS = [
@@ -209,6 +209,27 @@ export default function PotManager() {
   }
 
   async function loadLeagues() {
+    // Phase 7 — LMS Pot Creation UX Corrections. Root cause of the empty
+    // Start/Final Gameweek dropdowns, confirmed directly against the live
+    // database, not assumed: `leagues.is_active = true` alone does not mean
+    // a league is usable for pot creation. This project currently has
+    // three `is_active = true` rows — one "Premier League" whose season has
+    // zero `gameweeks` rows synced at all (ISSUE-39), and one "FIFA World
+    // Cup" left over from an earlier/parallel exploration of the codebase
+    // before it was repointed at the Premier League (architecture.md's own
+    // "two parallel data fetching patterns" note) — neither can support
+    // Pick 5, LMS, or Score Predictor, since none of the three modes can
+    // resolve a current/start/final gameweek without real gameweek rows to
+    // choose from. `defaultLeagueId()`'s own "prefer the current season"
+    // tie-break was silently auto-selecting the zero-gameweek league
+    // whenever it existed, which is exactly why Start/Final Gameweek came
+    // back empty — not a query, filtering, or mapping bug in this
+    // component itself. The two non-functional leagues have also now been
+    // deactivated at the data level (they were never meant to be real,
+    // user-facing options — see architecture.md), but that alone doesn't
+    // stop this from recurring if league data drifts again, so the
+    // requirement is enforced here too: a league only counts as a valid
+    // pot-creation option if it actually has at least one gameweek.
     const { data, error } = await supabase
       .from('leagues')
       .select(`
@@ -223,14 +244,17 @@ export default function PotManager() {
           year_start,
           year_end,
           is_current
-        )
+        ),
+        gameweeks (count)
       `)
       .eq('is_active', true)
       .order('name', { ascending: true })
 
     if (error) throw error
 
-    const rows = Array.isArray(data) ? data : []
+    const rows = (Array.isArray(data) ? data : []).filter(
+      (league) => (league.gameweeks?.[0]?.count ?? 0) > 0
+    )
 
     rows.sort((a, b) => {
       const aCurrent = a.seasons?.is_current ? 1 : 0
