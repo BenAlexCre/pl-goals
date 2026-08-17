@@ -15,7 +15,7 @@ const REASONS = [
   {
     icon: Layers,
     title: 'Multiple prediction formats',
-    text: 'Pick 5, Last Man Standing, or Score Predictor — three genuinely different ways to play, in the same app.',
+    text: 'Pick 5, Last Man Standing, or Score Predictor — three genuinely different competition formats, in the same app.',
   },
   {
     icon: Wallet,

@@ -6,24 +6,24 @@ const MODES = [
     icon: Target,
     name: 'Pick 5',
     tagline: 'Weekly',
-    description: 'Pick five goalscorers every gameweek. Get all five right and you win the jackpot — miss, and it rolls over.',
-    points: ['Five goalscorer picks per gameweek', 'Jackpot rolls over if nobody hits 5/5', 'Live scoring as goals go in'],
+    description: 'Pick five goalscorers every gameweek. Get all five right and win the jackpot. If nobody wins, the jackpot rolls over to the next gameweek.',
+    points: ['Five goalscorer picks every gameweek', 'Win only with a perfect 5/5', 'Jackpot rolls over until someone wins', 'Live scoring during matches'],
     accent: 'from-accent/15',
   },
   {
     icon: ShieldCheck,
     name: 'Last Man Standing',
     tagline: 'Season-long',
-    description: 'Pick one team to win each gameweek. Lose or draw and you’re out — survive the longest to take the prize.',
-    points: ['One team pick per gameweek', 'A loss or draw eliminates you', 'Last player standing wins'],
+    description: 'Pick one team to win each gameweek. A loss or draw eliminates you. Be the last player standing to win the prize.',
+    points: ['One team pick every gameweek', 'A loss or draw knocks you out', 'Choose each team only once', 'Last player standing wins'],
     accent: 'from-amber/15',
   },
   {
     icon: Crosshair,
     name: 'Score Predictor',
     tagline: 'Season-long',
-    description: 'Predict exact scorelines across the season, with an optional goalscorer bonus, and climb the season leaderboard.',
-    points: ['Exact scoreline predictions', 'Optional goalscorer bonus points', 'Configurable season scoring'],
+    description: 'Predict the score of one fixture every gameweek. Earn points for accurate predictions and climb the leaderboard. Optional goalscorer predictions can earn bonus points.',
+    points: ['One scoreline prediction each gameweek', 'Exact score bonuses', 'Optional goalscorer bonus', 'Season-long leaderboard'],
     accent: 'from-red-goal/15',
   },
 ]
@@ -32,13 +32,12 @@ export default function GameModes() {
   return (
     <section id="game-modes" className="mx-auto max-w-6xl px-5 py-24 md:py-32">
       <Reveal className="max-w-2xl">
-        <p className="text-sm font-semibold uppercase tracking-wider text-accent">Game modes</p>
+        <p className="text-sm font-semibold uppercase tracking-wider text-accent">Competition formats</p>
         <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
-          Three ways to play. One competition.
+          Choose your competition
         </h2>
         <p className="mt-4 text-[15px] leading-relaxed text-white/50">
-          Every pot picks one mode — each feels like its own product, with its own
-          scoring, its own rhythm, and its own path to winning.
+          Three distinct competition formats. Three different ways to win.
         </p>
       </Reveal>
 

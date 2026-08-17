@@ -24,15 +24,15 @@ export default function Hero() {
 
           <p className="mt-6 max-w-xl text-lg leading-relaxed text-white/55">
             PL Predictor is the best way to run private Premier League prediction
-            competitions with friends, family, or colleagues — three ways to
-            play, live scoring every gameweek, and standings that update
-            themselves.
+            competitions with friends, family, or colleagues — three distinct
+            competition formats, live scoring every gameweek, and standings
+            that update themselves.
           </p>
 
           <div className="mt-9 flex flex-col gap-3 sm:flex-row">
             <Link to="/sign-up">
               <Button size="lg" fullWidth className="sm:w-auto">
-                Create account <ArrowRight size={17} />
+                Create free account <ArrowRight size={17} />
               </Button>
             </Link>
             <Link to="/sign-in">

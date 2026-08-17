@@ -8,7 +8,7 @@ const FAQS = [
   },
   {
     q: 'Can I create multiple competitions?',
-    a: 'Yes — you can create and belong to as many pots as you like, across any of the three game modes, all from the same account.',
+    a: 'Yes — you can create and belong to as many pots as you like, across any of the three competition formats, all from the same account.',
   },
   {
     q: 'When do predictions lock?',
@@ -16,7 +16,7 @@ const FAQS = [
   },
   {
     q: 'How are prizes calculated?',
-    a: 'The prize pool is the entry fees collected for that competition, minus any admin or charity fee the organiser has configured, split according to the mode’s own rules — winner-takes-all, last player standing, or season leaderboard.',
+    a: 'The prize pool is the entry fees collected for that competition, minus any admin or charity fee the organiser has configured, split according to that format’s own rules — winner-takes-all, last player standing, or season leaderboard.',
   },
   {
     q: 'Can organisers record payments?',

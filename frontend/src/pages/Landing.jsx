@@ -36,7 +36,7 @@ export default function Landing() {
             <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
               <Link to="/sign-up">
                 <Button size="lg" fullWidth className="sm:w-auto">
-                  Create account <ArrowRight size={17} />
+                  Start a competition <ArrowRight size={17} />
                 </Button>
               </Link>
               <Link to="/sign-in">

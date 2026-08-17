@@ -24,7 +24,7 @@ export default function LandingFooter() {
 
           <div className="grid grid-cols-2 gap-10 sm:grid-cols-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-white/30">Game Modes</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-white/30">Competition Formats</p>
               <ul className="mt-4 space-y-2.5 text-sm text-white/50">
                 <li><a href="#game-modes" className="transition-colors hover:text-white">Pick 5</a></li>
                 <li><a href="#game-modes" className="transition-colors hover:text-white">Last Man Standing</a></li>

@@ -18,8 +18,8 @@ const ROWS = [
   },
   {
     eyebrow: 'Predictions',
-    title: 'A prediction screen for every mode',
-    text: 'Whichever mode your pot plays, submitting a prediction takes seconds — and locks itself automatically at kickoff.',
+    title: 'A prediction screen for every format',
+    text: 'Whichever format your pot plays, submitting a prediction takes seconds — and locks itself automatically at kickoff.',
     mock: <PredictionCardMock />,
     label: 'Score Predictor',
   },

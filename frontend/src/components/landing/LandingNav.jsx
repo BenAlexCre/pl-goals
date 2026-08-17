@@ -5,7 +5,7 @@ import Button from '../ui/Button'
 
 const LINKS = [
   { href: '#how-it-works', label: 'How it works' },
-  { href: '#game-modes', label: 'Game Modes' },
+  { href: '#game-modes', label: 'Competition Formats' },
   { href: '#features', label: 'Features' },
   { href: '#faq', label: 'FAQ' },
 ]
@@ -60,7 +60,7 @@ export default function LandingNav() {
 
         <div className="hidden items-center gap-2 md:flex">
           <Link to="/sign-in"><Button variant="ghost">Sign in</Button></Link>
-          <Link to="/sign-up"><Button>Get started</Button></Link>
+          <Link to="/sign-up"><Button>Create free account</Button></Link>
         </div>
 
         <button
@@ -93,7 +93,7 @@ export default function LandingNav() {
               <Button variant="secondary" fullWidth>Sign in</Button>
             </Link>
             <Link to="/sign-up" onClick={() => setMenuOpen(false)}>
-              <Button fullWidth>Get started</Button>
+              <Button fullWidth>Create free account</Button>
             </Link>
           </div>
         </div>
