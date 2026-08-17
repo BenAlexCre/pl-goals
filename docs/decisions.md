@@ -4591,3 +4591,79 @@ and an explicit no-bounds-set control case — plus live end-to-end pot
 creation for both cycle modes and a live 400 from the frontend's own
 20-gameweek validation, all verified in the database and cleaned up by exact
 ID afterward.
+
+## Match Centre core: two new read-only views, no Game Engine changes
+
+Phase 8a — Match Centre & Rich Picking Experience (scoped down from a
+14-item brief to just the shared fixture/player component system and its
+data layer, per explicit user sign-off — see the approved plan for the
+full scoping rationale). Adds `league_team_standings` and
+`player_season_stats` (migration `025_match_centre_views.sql`), both plain
+views (not materialized — the codebase already has one materialized view,
+`player_fixture_goals`, that silently goes stale because nothing refreshes
+it, ISSUE-3; this deliberately avoids repeating that bug class).
+
+**Context**: nothing in the schema computed team form, league position,
+fixture difficulty, or player season stats before this — confirmed by
+research before writing any code. Building a shared `FixtureCard`/
+`MatchCentreDrawer`/`PlayerDrawer` system needed this data to exist
+somewhere real, not fabricated.
+
+**Decision**: `league_team_standings` computes the table (played/won/
+drawn/lost/goals/points/position via a window function) from `fixtures`
+where `status = 'finished'` — the actual `fixture_status` enum value for a
+completed match, not `'completed'`. `player_season_stats` sums goals/
+assists/cards from `fixture_events` — the reliable source — and
+deliberately excludes minutes/starts/appearances, since those depend on
+`fixture_player_status`, a table with a documented, pre-existing gap
+(ISSUE-2: not present in the migration history at all, and confirmed empty
+in this environment). The frontend (`hooks/useMatchCentre.js`) queries that
+table separately, best-effort, and hides the field entirely when
+unavailable rather than showing a fabricated zero. Team form (last 5
+results) and fixture difficulty (a plain top-6/bottom-6 heuristic over real
+league position) are both computed client-side, not stored — neither
+needed SQL complexity to justify a view.
+
+**A real mistake caught during implementation, not before it**: a new
+`components/ui/Drawer.jsx` was written and initially overwrote an
+existing, differently-shaped `Drawer.jsx` (a global, `useUiStore`-driven
+single-instance drawer already mounted in `AppShell.jsx`, powering the
+notification panel) without reading it first — a direct violation of this
+project's own "read before write" discipline. Caught via `git status`
+showing the file as modified rather than new, before committing anything.
+Fixed by restoring the original file exactly (`git checkout`) and writing
+the new component as `components/ui/SlideDrawer.jsx` instead — a
+differently-named, differently-shaped primitive for a component that needs
+many independent instances with per-instance props, which the store-driven
+original was never designed for. Both drawers verified working
+independently afterward (notification panel via the original store-driven
+`Drawer`; Match Centre/Player via the new `SlideDrawer`) — not just
+assumed fixed.
+
+**Consequences**: `useGameweek`/`useCurrentGameweek`'s `fixture_events`
+select gained player/assist-player name joins (via explicit FK constraint
+names, `fixture_events_player_id_fkey`/`fixture_events_assist_player_id_fkey`,
+since the table has two FKs to `players` and PostgREST needs
+disambiguation) — additive only, every existing field and caller
+unaffected. `GameweekPage.jsx`'s fixture list now renders `FixtureCard`
+instead of the old plain `Card` + inline `FixtureEvents`; the latter is
+generalized into `components/matchcentre/FixtureEventsTimeline.jsx` (now
+also rendering substitutions, which the data already supported but the old
+component never displayed) and reused by both the drawer and the page — no
+second live-polling path. Both new views verified correct against real
+data before any frontend code was written: `league_team_standings`
+hand-checked against raw fixture results for two real teams in a
+non-active league that already has finished fixtures (the real, currently
+active Premier League has none yet — season hasn't started);
+`player_season_stats` verified via a temporary, real `fixture_events` row
+inserted against an actual fixture/player, checked, then deleted by exact
+ID — `fixture_events` is otherwise empty in this environment today, so
+this was the only way to prove the aggregation logic without fabricating
+anything permanent.
+
+**Deferred, not built this phase**: the three picker redesigns (Pick 5,
+LMS, Score Predictor) that would actually consume `FixtureCard`/
+`PlayerDrawer` — the brief's items 4-6 — plus identity/email verification,
+super admin, and the demo environment (items 10-14). Each is independently
+large; attempting all 14 in one pass was assessed and explicitly declined
+in favor of phasing, confirmed with the user before any code was written.

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { useGameweek } from '../hooks/useGameweek'
 import { usePotEntries, useFixturePlayerStatuses } from '../hooks/useEntry'
@@ -7,55 +8,8 @@ import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
 import LivePickCard from '../components/picks/LivePickCard'
 import LeaderboardTable from '../components/leaderboard/LeaderboardTable'
-import { toLocalTimeShort } from '../utils/time'
-
-function eventLabel(event) {
-  if (event.event_type === 'goal') {
-    if (event.is_own_goal) return '⚽ OG'
-    if (event.is_penalty) return '⚽ P'
-    return '⚽'
-  }
-  if (event.event_type === 'yellow_card') return '🟨'
-  if (event.event_type === 'red_card') return '🟥'
-  if (event.event_type === 'sub_on') return '↑'
-  if (event.event_type === 'sub_off') return '↓'
-  return ''
-}
-
-function FixtureEvents({ events = [] }) {
-  const goals = events
-    .filter(e => e.event_type === 'goal')
-    .sort((a, b) => a.minute - b.minute)
-
-  const cards = events
-    .filter(e => e.event_type === 'yellow_card' || e.event_type === 'red_card')
-    .sort((a, b) => a.minute - b.minute)
-
-  if (!goals.length && !cards.length) return null
-
-  return (
-    <div className="mt-3 space-y-1 border-t border-white/6 pt-3">
-      {goals.map(e => (
-        <div key={e.id} className="flex items-center gap-2 text-sm text-white/70">
-          <span className="text-white/30 tabular w-8 text-right">{e.minute}'</span>
-          <span>{eventLabel(e)}</span>
-          {e.is_own_goal && (
-            <span className="text-xs text-white/40 bg-white/5 px-1.5 py-0.5 rounded">OG</span>
-          )}
-          {e.is_penalty && (
-            <span className="text-xs text-white/40 bg-white/5 px-1.5 py-0.5 rounded">P</span>
-          )}
-        </div>
-      ))}
-      {cards.map(e => (
-        <div key={e.id} className="flex items-center gap-2 text-sm text-white/50">
-          <span className="text-white/30 tabular w-8 text-right">{e.minute}'</span>
-          <span>{eventLabel(e)}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
+import FixtureCard from '../components/matchcentre/FixtureCard'
+import PlayerDrawer from '../components/matchcentre/PlayerDrawer'
 
 function AppearanceBadge({ statusRow }) {
   if (!statusRow) return null
@@ -84,14 +38,24 @@ function AppearanceBadge({ statusRow }) {
   )
 }
 
+// Phase 8a — Match Centre Core. Fixture rows now render as FixtureCard
+// (crest, kickoff, live score, league position, form, difficulty) instead
+// of the old plain Card + inline FixtureEvents — clicking one opens
+// MatchCentreDrawer (FixtureCard owns that itself). Player names in both
+// the events timeline (inside the drawer) and the Entries section below
+// now open the same shared PlayerDrawer — one instance at this page
+// level, driven by `activePlayerId`, rather than one per card.
 export default function GameweekPage() {
   const { potId, gameweekId } = useParams()
   const { data: gameweek } = useGameweek(gameweekId)
   const { data: entries = [] } = usePotEntries(potId, gameweekId)
   const { data: playerStatusMap = new Map() } = useFixturePlayerStatuses(gameweekId)
   const { data: standings = [] } = useLeaderboard(potId, gameweekId ? Number(gameweekId) : null)
+  const [activePlayerId, setActivePlayerId] = useState(null)
 
   useLiveScores(gameweekId, potId)
+
+  const competitionName = gameweek?.leagues?.name || 'Competition'
 
   return (
     <div className="space-y-6">
@@ -110,29 +74,14 @@ export default function GameweekPage() {
       <section>
         <h2 className="text-lg font-semibold text-white mb-3">Fixtures</h2>
         <div className="grid gap-3">
-          {(gameweek?.fixtures ?? []).map(fixture => (
-            <Card key={fixture.id} className="p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-white font-medium">
-                    {fixture.home_team?.name} vs {fixture.away_team?.name}
-                  </p>
-                  <p className="text-xs text-white/35 mt-1">
-                    {toLocalTimeShort(fixture.kickoff_utc)}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <Badge status={fixture.status}>{fixture.status}</Badge>
-                  <p className="mt-1 text-sm text-white/60 tabular-nums">
-                    {fixture.home_goals} – {fixture.away_goals}
-                    {fixture.status === 'live' && fixture.minute && (
-                      <span className="ml-2 text-xs text-green-400">{fixture.minute}'</span>
-                    )}
-                  </p>
-                </div>
-              </div>
-              <FixtureEvents events={fixture.fixture_events ?? []} />
-            </Card>
+          {(gameweek?.fixtures ?? []).map((fixture) => (
+            <FixtureCard
+              key={fixture.id}
+              fixture={fixture}
+              leagueId={gameweek?.league_id}
+              seasonId={gameweek?.season_id}
+              competitionName={competitionName}
+            />
           ))}
         </div>
       </section>
@@ -156,16 +105,22 @@ export default function GameweekPage() {
               <div className="grid md:grid-cols-2 gap-3">
                 {(entry.pick5_picks ?? []).map(pick => (
                   <div key={pick.id} className="space-y-1">
-                    <LivePickCard
-                      pick={{
-                        player_name: pick.players?.display_name ?? `Player #${pick.player_id}`,
-                        player_photo: pick.players?.photo_url,
-                        goals_scored: pick.goals_scored,
-                        goal_threshold: pick.goal_threshold,
-                        result: pick.result,
-                        appearance: playerStatusMap.get(pick.player_id) ?? null,
-                      }}
-                    />
+                    <button
+                      type="button"
+                      onClick={() => pick.player_id && setActivePlayerId(pick.player_id)}
+                      className="block w-full text-left"
+                    >
+                      <LivePickCard
+                        pick={{
+                          player_name: pick.players?.display_name ?? `Player #${pick.player_id}`,
+                          player_photo: pick.players?.photo_url,
+                          goals_scored: pick.goals_scored,
+                          goal_threshold: pick.goal_threshold,
+                          result: pick.result,
+                          appearance: playerStatusMap.get(pick.player_id) ?? null,
+                        }}
+                      />
+                    </button>
                     <AppearanceBadge statusRow={playerStatusMap.get(pick.player_id)} />
                   </div>
                 ))}
@@ -183,6 +138,12 @@ export default function GameweekPage() {
         <h2 className="text-lg font-semibold text-white mb-3">Standings</h2>
         <LeaderboardTable rows={standings} />
       </section>
+
+      <PlayerDrawer
+        open={!!activePlayerId}
+        onClose={() => setActivePlayerId(null)}
+        playerId={activePlayerId}
+      />
     </div>
   )
 }
