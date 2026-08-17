@@ -4,8 +4,17 @@ import SlideDrawer from '../ui/SlideDrawer'
 import TeamForm from './TeamForm'
 import FixtureEventsTimeline from './FixtureEventsTimeline'
 import PlayerDrawer from './PlayerDrawer'
-import { useTeamHomeAwayRecord } from '../../hooks/useMatchCentre'
+import PlayerCard from './PlayerCard'
+import { useTeamHomeAwayRecord, useHeadToHead, fixtureDifficultyFromStanding } from '../../hooks/useMatchCentre'
+import { usePlayersForFixture } from '../../hooks/usePredictorEntry'
 import { toLocalTimeShort } from '../../utils/time'
+
+const DIFFICULTY_STYLES = {
+  easy: 'border-accent/30 bg-accent/10 text-accent',
+  balanced: 'border-amber/30 bg-amber/10 text-amber',
+  difficult: 'border-red-goal/30 bg-red-goal/10 text-red-goal',
+}
+const DIFFICULTY_LABEL = { easy: 'Easy', balanced: 'Balanced', difficult: 'Difficult' }
 
 function Crest({ url }) {
   return (
@@ -45,11 +54,31 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
 
   const { data: homeRecord } = useTeamHomeAwayRecord(fixture?.home_team?.id, leagueId, seasonId)
   const { data: awayRecord } = useTeamHomeAwayRecord(fixture?.away_team?.id, leagueId, seasonId)
+  const { data: meetings = [] } = useHeadToHead(fixture?.home_team?.id, fixture?.away_team?.id)
+  const { data: squad = [] } = usePlayersForFixture(fixture?.home_team?.id, fixture?.away_team?.id)
 
   if (!fixture) return null
 
   const isLive = fixture.status === 'live'
   const isFinished = fixture.status === 'finished'
+
+  const difficulty = fixtureDifficultyFromStanding(homeStanding) === 'difficult' || fixtureDifficultyFromStanding(awayStanding) === 'difficult'
+    ? 'difficult'
+    : (fixtureDifficultyFromStanding(homeStanding) === 'easy' && fixtureDifficultyFromStanding(awayStanding) === 'easy')
+      ? 'easy'
+      : (fixtureDifficultyFromStanding(homeStanding) || fixtureDifficultyFromStanding(awayStanding))
+
+  // usePlayersForFixture() returns bare {id, display_name, photo_url,
+  // position, team_id} — no club name/crest, since Score Predictor's
+  // goalscorer <select> (its original consumer) never needed one.
+  // PlayerCard wants team_name/team_short_name/crest_url, so they're
+  // filled in here from the fixture's own home_team/away_team objects,
+  // already available — not a second query.
+  function withTeam(p, team) {
+    return { ...p, team_name: team?.name, team_short_name: team?.short_name, crest_url: team?.crest_url }
+  }
+  const homeSquad = squad.filter((p) => p.team_id === fixture.home_team?.id).map((p) => withTeam(p, fixture.home_team))
+  const awaySquad = squad.filter((p) => p.team_id === fixture.away_team?.id).map((p) => withTeam(p, fixture.away_team))
 
   return (
     <>
@@ -77,11 +106,18 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
               <span>{fixture.home_team?.name}</span>
               <span>{fixture.away_team?.name}</span>
             </div>
-            <div className="mt-4 space-y-1 rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/45">
-              <p>Kickoff: {toLocalTimeShort(fixture.kickoff_utc)}</p>
-              <p>Competition: {competitionName}</p>
-              {/* Venue intentionally omitted — fixtures has no venue
-                  column; nothing invented in its place. */}
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/45">
+              <div className="space-y-1">
+                <p>Kickoff: {toLocalTimeShort(fixture.kickoff_utc)}</p>
+                <p>Competition: {competitionName}</p>
+                {/* Venue intentionally omitted — fixtures has no venue
+                    column; nothing invented in its place. */}
+              </div>
+              {difficulty && (
+                <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium ${DIFFICULTY_STYLES[difficulty]}`}>
+                  {DIFFICULTY_LABEL[difficulty]}
+                </span>
+              )}
             </div>
           </section>
 
@@ -126,6 +162,23 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
             </section>
           )}
 
+          {/* Last meetings — head-to-head, any season, matches wasn't
+              limited to only this league/season since two teams' recent
+              history against each other is what's actually useful. */}
+          {meetings.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-sm font-semibold text-white">Last meetings</h3>
+              <div className="space-y-1.5">
+                {meetings.map((m) => (
+                  <div key={m.id} className="flex items-center justify-between rounded-lg border border-white/8 bg-black/10 px-3 py-2 text-sm text-white/70">
+                    <span>{m.home_team?.short_name} {m.home_goals}&ndash;{m.away_goals} {m.away_team?.short_name}</span>
+                    <span className="text-xs text-white/35">{toLocalTimeShort(m.kickoff_utc)}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* Live/finished events */}
           {(isLive || isFinished) && (
             <section>
@@ -134,6 +187,28 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
                 events={fixture.fixture_events ?? []}
                 onPlayerClick={setActivePlayerId}
               />
+            </section>
+          )}
+
+          {/* Player list — browsing context, no select action, so
+              PlayerCard's whole body opens the Player Drawer directly. */}
+          {squad.length > 0 && (
+            <section>
+              <h3 className="mb-2 text-sm font-semibold text-white">Squads</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-white/40">{fixture.home_team?.short_name}</p>
+                  {homeSquad.map((p) => (
+                    <PlayerCard key={p.id} player={{ ...p, player_id: p.id }} seasonId={seasonId} size="sm" />
+                  ))}
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-white/40">{fixture.away_team?.short_name}</p>
+                  {awaySquad.map((p) => (
+                    <PlayerCard key={p.id} player={{ ...p, player_id: p.id }} seasonId={seasonId} size="sm" />
+                  ))}
+                </div>
+              </div>
             </section>
           )}
         </div>

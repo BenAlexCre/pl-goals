@@ -4667,3 +4667,103 @@ LMS, Score Predictor) that would actually consume `FixtureCard`/
 super admin, and the demo environment (items 10-14). Each is independently
 large; attempting all 14 in one pass was assessed and explicitly declined
 in favor of phasing, confirmed with the user before any code was written.
+
+## Phase 8B — Fixture-First Competition Experience
+
+Redesigns all three picker UIs (Pick 5, Last Man Standing, Score Predictor)
+to lead with fixtures rather than a flat player/team list, consuming the
+`FixtureCard`/`MatchCentreDrawer`/`PlayerDrawer` system built in Phase 8a
+instead of each mode inventing its own presentation. Explicitly a frontend
+UX change only — no Game Engine, scoring, settlement, or payments code was
+touched.
+
+**Context**: before this sprint, each picker had its own, unrelated
+selection UI: Pick 5 was a flat searchable player list with no fixture
+grouping; LMS was a flat team-button grid (fixture pairing computed but
+discarded before render); Predictor was already fixture-scoped but via a
+plain `<select>` dropdown. None reused Phase 8a's Match Centre components.
+
+**Decision — new shared components**: `PlayerCard` and `TeamCard`
+(`components/matchcentre/`) join the existing `FixtureCard`/
+`MatchCentreDrawer`/`PlayerDrawer`, all four now genuinely shared across
+every picker and the Match Centre drawer's own new "Squads"/"Last
+meetings" sections — confirmed via a duplicate-component audit
+(`components/matchcentre/` contains exactly one file per component, no
+forked copies). `PlayerCard` deliberately does not render an injury/
+suspension indicator — no such data exists anywhere in the schema, and
+this project does not fabricate data to fill a design gap.
+
+**Decision — LMS's "Draw" option**: the original brief's mockup implied a
+third "○ Draw" pick alongside the two teams. Checked against
+`business-rules.md` and the actual `lms_team_picks.team_id` schema: no
+"Draw" pick has ever been a submittable option — only a `team_id`. The
+redesigned picker offers exactly two `TeamCard`s per fixture (home/away),
+never a fabricated third option the backend cannot accept.
+
+**Decision — `PotDetail.jsx` kept its existing submission hooks**:
+research surfaced `hooks/useEntry.js` (`useSubmitPicks`/`useEntry`) as the
+more architecturally "correct" pairing for Pick 5 — consistent query-key
+invalidation, used by the (orphaned, unreachable — confirmed via
+`grep`, no route links to it) `PicksPage.jsx`. Deliberately not adopted:
+its `pick5_picks.players` select omits `position`, which `PickCard` needs,
+and switching the data-loading path on a business-critical submission flow
+carries regression risk this sprint's own scope ("purely a frontend UX
+improvement... do not change validation") explicitly rules out. Kept
+`loadSavedEntry`/`handleSaveEntry`'s existing `get-or-create-pick5-entry`/
+`submit-pick5-picks` Edge Function calls untouched; only the picker's
+presentational/selection layer changed.
+
+**Decision — shirt numbers via one bulk query, not per-player**: Pick 5's
+existing data source (`available_players_by_gameweek`) has no
+`shirt_number` column. Added a single bulk query against
+`player_team_history` (scoped to the gameweek's whole player set, `.in()`
+on player IDs) built into a `Map` lookup, rather than N per-player queries.
+
+**Decision — enriching bare player rows with team display fields
+locally**: `usePlayersForFixture` (reused, unmodified, by both the
+Predictor goalscorer picker and the Match Centre drawer's Squads section)
+returns players without `crest_url`/`team_name`/`team_short_name`.
+Enriched locally via a `withTeam()`/`eligiblePlayersWithTeam` mapping using
+team data the caller already has loaded (`fixture.home_team`/`away_team`)
+— no second query added.
+
+**A bug caught before any live verification**: `PlayerCard`'s hover-reveal
+info button initially had Tailwind's `group` class on the wrong element —
+the inner select `<button>` rather than the outer wrapping `<div>` that
+actually contains both sibling buttons. `group-hover:` only activates
+relative to an ancestor, not a sibling; the info button never appeared on
+hover with `group` misplaced. Caught via code review while writing the
+component, not via a runtime failure.
+
+**Verification**: live-verified on the real, persistent Pick 5 test pot
+(all 5 saved picks, `getPlayerPickCount`/`selectedCount` cross-referencing
+between the fixture-grouped squad view and the sidebar panel, disabled
+state once 5/5 reached) plus two temporary pots — one Last Man Standing,
+one Score Predictor — created solely to exercise the save/submit flow on
+game modes the account had no existing entry for. Confirmed: LMS's
+`usedTeamIds` disabling across gameweeks, Score Predictor's goalscorer
+grid correctly including goalkeepers (Predictor has no position
+restriction, unlike Pick 5's server-side exclusion), the "Goalscorer"
+label with no "optional" wording, nested `PlayerDrawer`-inside-
+`MatchCentreDrawer` stacking, and graceful hiding of "Last meetings"/
+difficulty badge/club form/appearances when the underlying data is empty
+(new season, no finished fixtures yet) rather than showing fabricated
+zeros. Checked 375px, 820px, and desktop breakpoints — no horizontal
+overflow at any of them; the mobile sticky bottom sheet sits correctly
+above `BottomNav`. Zero console errors throughout. Both temporary pots and
+their `game_entries`/picks rows deleted by exact ID after verification,
+confirmed zero residue across `pots`, `game_entries`, `lms_entries`,
+`predictor_entries`, and `pot_members`.
+
+**Consequences**: `PotDetail.jsx` lost its player-search/filter UI
+(`Search`/`Filter` state, the debounced search effect, team/position
+dropdowns) — fixture grouping replaces free-text search as the primary
+navigation method, per the brief's explicit intent. `LmsPotDetail.jsx`
+swapped `useTeamsForGameweek` for `useFixturesForGameweek` (reused from
+`usePredictorEntry.js`); `usedTeamIds`/`canPick`/`handleSubmitPick` logic
+is otherwise byte-for-byte unchanged. `PredictorPotDetail.jsx`'s fixture
+`<select>` became a per-fixture toggle list; `handleSubmit`/the score-input
+state/the pre-fill effect are otherwise unchanged. Bundle size grew
+(`dist/assets/index-*.js` now ~690 kB) — pre-existing single-chunk
+warning, not a regression introduced this sprint, and out of scope for a
+UX-only sprint to address via code-splitting.

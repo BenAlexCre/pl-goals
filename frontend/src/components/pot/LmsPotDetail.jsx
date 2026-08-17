@@ -11,8 +11,11 @@ import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
 import InviteCard from './InviteCard'
 import MemberList from './MemberList'
+import FixtureCard from '../matchcentre/FixtureCard'
+import TeamCard from '../matchcentre/TeamCard'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
-import { useLmsEntry, useTeamsForGameweek, useGetOrCreateLmsEntry, useSubmitLmsPick } from '../../hooks/useLmsEntry'
+import { useLmsEntry, useGetOrCreateLmsEntry, useSubmitLmsPick } from '../../hooks/useLmsEntry'
+import { useFixturesForGameweek } from '../../hooks/usePredictorEntry'
 import { useLeaderboard } from '../../hooks/useLeaderboard'
 import { usePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
@@ -51,7 +54,12 @@ export default function LmsPotDetail({ pot, potId }) {
     setSelectedGameweekId(String((upcoming ?? gameweeks[gameweeks.length - 1]).id))
   }, [gameweeks, selectedGameweekId])
 
-  const { data: teams = [], isLoading: teamsLoading } = useTeamsForGameweek(
+  // Phase 8B — fixture-first redesign. Was useTeamsForGameweek() (a flat,
+  // deduped team list with the fixture pairing thrown away); now the
+  // actual fixture pairs, reused as-is from Score Predictor's own hook —
+  // a plain "fixtures for this gameweek" query has no LMS-specific
+  // business logic in it, so there's nothing mode-specific to duplicate.
+  const { data: fixtures = [], isLoading: fixturesLoading } = useFixturesForGameweek(
     selectedGameweekId ? Number(selectedGameweekId) : null
   )
 
@@ -179,31 +187,51 @@ export default function LmsPotDetail({ pot, potId }) {
                   <p className="text-sm text-white/45">No pick was made for this gameweek.</p>
                 )}
               </div>
-            ) : teamsLoading ? (
+            ) : fixturesLoading ? (
               <div className="flex justify-center py-6">
                 <Spinner />
               </div>
-            ) : teams.length === 0 ? (
+            ) : fixtures.length === 0 ? (
               <EmptyState icon={Shield} title="No fixtures" description="This gameweek has no fixtures yet." />
             ) : (
               <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {teams.map((team) => {
-                    const disabled = usedTeamIds.has(team.id)
-                    const selected = String(selectedTeamId) === String(team.id) || (!selectedTeamId && currentPick?.team_id === team.id)
+                <div className="space-y-3">
+                  {fixtures.map((fixture) => {
+                    const homeDisabled = usedTeamIds.has(fixture.home_team?.id)
+                    const awayDisabled = usedTeamIds.has(fixture.away_team?.id)
+                    const homeSelected = String(selectedTeamId) === String(fixture.home_team?.id) || (!selectedTeamId && currentPick?.team_id === fixture.home_team?.id)
+                    const awaySelected = String(selectedTeamId) === String(fixture.away_team?.id) || (!selectedTeamId && currentPick?.team_id === fixture.away_team?.id)
                     return (
-                      <button
-                        key={team.id}
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => setSelectedTeamId(String(team.id))}
-                        title={disabled ? 'Already used this competition' : undefined}
-                        className={`rounded-xl border p-3 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-                          selected ? 'border-accent/50 bg-accent/10 text-white' : 'border-white/10 bg-surface-2 text-white/70 hover:border-white/20'
-                        }`}
-                      >
-                        {team.name}
-                      </button>
+                      <div key={fixture.id} className="space-y-2">
+                        <FixtureCard
+                          fixture={fixture}
+                          leagueId={pot.league_id}
+                          seasonId={pot.season_id}
+                          competitionName={pot.leagues?.name}
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <TeamCard
+                            team={fixture.home_team}
+                            leagueId={pot.league_id}
+                            seasonId={pot.season_id}
+                            venue="home"
+                            selected={homeSelected}
+                            disabled={homeDisabled}
+                            disabledReason="Already used this competition"
+                            onSelect={() => setSelectedTeamId(String(fixture.home_team.id))}
+                          />
+                          <TeamCard
+                            team={fixture.away_team}
+                            leagueId={pot.league_id}
+                            seasonId={pot.season_id}
+                            venue="away"
+                            selected={awaySelected}
+                            disabled={awayDisabled}
+                            disabledReason="Already used this competition"
+                            onSelect={() => setSelectedTeamId(String(fixture.away_team.id))}
+                          />
+                        </div>
+                      </div>
                     )
                   })}
                 </div>

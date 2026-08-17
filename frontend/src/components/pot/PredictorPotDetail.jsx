@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Target, Lock, Trophy, Star } from 'lucide-react'
+import { Target, Lock, Trophy, Star, ChevronDown } from 'lucide-react'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -11,6 +11,8 @@ import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
 import InviteCard from './InviteCard'
 import MemberList from './MemberList'
+import FixtureCard from '../matchcentre/FixtureCard'
+import PlayerCard from '../matchcentre/PlayerCard'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import {
   usePredictorEntry,
@@ -81,6 +83,15 @@ export default function PredictorPotDetail({ pot, potId }) {
     selectedFixture?.home_team?.id,
     selectedFixture?.away_team?.id
   )
+  // usePlayersForFixture() returns bare {id, display_name, photo_url,
+  // position, team_id} — no club name/crest, since its original consumer
+  // (the plain <select> this replaces) never needed one. PlayerCard wants
+  // team_name/team_short_name/crest_url/player_id, filled in here from
+  // the already-loaded selectedFixture, not a second query.
+  const eligiblePlayersWithTeam = eligiblePlayers.map((p) => {
+    const team = p.team_id === selectedFixture?.home_team?.id ? selectedFixture?.home_team : selectedFixture?.away_team
+    return { ...p, player_id: p.id, team_name: team?.name, team_short_name: team?.short_name, crest_url: team?.crest_url }
+  })
 
   if (gameweeksLoading || entryLoading) {
     return (
@@ -223,76 +234,95 @@ export default function PredictorPotDetail({ pot, potId }) {
             ) : fixtures.length === 0 ? (
               <EmptyState icon={Target} title="No fixtures" description="This gameweek has no fixtures yet." />
             ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="mb-2 block text-sm text-white/70" htmlFor="predictor-fixture">Fixture</label>
-                  <select
-                    id="predictor-fixture"
-                    value={selectedFixtureId}
-                    onChange={(e) => {
-                      setSelectedFixtureId(e.target.value)
-                      setGoalscorerId('')
-                    }}
-                    className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none"
-                  >
-                    <option value="">Select a fixture</option>
-                    {fixtures.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.home_team?.name} vs {f.away_team?.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {selectedFixture ? (
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">{selectedFixture.home_team?.name}</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={homeScore}
-                        onChange={(e) => setHomeScore(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none"
+              <div className="space-y-3">
+                {/* Phase 8B — fixture-first redesign. One fixture predicted
+                    per gameweek (unchanged rule) — each row shows the
+                    shared FixtureCard (crests/form/position/difficulty,
+                    click -> Match Centre) plus a "Predict" toggle;
+                    selecting a different fixture replaces the prior
+                    selection, same single-value selectedFixtureId as
+                    before, just chosen by tapping a card instead of a
+                    <select>. */}
+                {fixtures.map((fixture) => {
+                  const isSelected = String(fixture.id) === selectedFixtureId
+                  return (
+                    <div key={fixture.id} className="space-y-2">
+                      <FixtureCard
+                        fixture={fixture}
+                        leagueId={pot.league_id}
+                        seasonId={pot.season_id}
+                        competitionName={pot.leagues?.name}
                       />
-                    </div>
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">{selectedFixture.away_team?.name}</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={awayScore}
-                        onChange={(e) => setAwayScore(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none"
-                      />
-                    </div>
-                  </div>
-                ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedFixtureId(isSelected ? '' : String(fixture.id))
+                          setGoalscorerId('')
+                        }}
+                        aria-expanded={isSelected}
+                        className={`flex w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
+                          isSelected ? 'border-accent/40 bg-accent/10 text-accent' : 'border-white/10 bg-surface-2 text-white/60 hover:text-white'
+                        }`}
+                      >
+                        {isSelected ? 'Predicting this fixture' : 'Predict this fixture'}
+                        <ChevronDown size={14} className={`transition-transform ${isSelected ? 'rotate-180' : ''}`} />
+                      </button>
 
-                {selectedFixture ? (
-                  <div>
-                    <label className="mb-2 block text-sm text-white/70" htmlFor="predictor-scorer">
-                      Goalscorer (optional)
-                    </label>
-                    <select
-                      id="predictor-scorer"
-                      value={goalscorerId}
-                      onChange={(e) => setGoalscorerId(e.target.value)}
-                      className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none"
-                    >
-                      <option value="">No prediction</option>
-                      {eligiblePlayers.map((p) => (
-                        <option key={p.id} value={p.id}>{p.display_name}</option>
-                      ))}
-                    </select>
-                  </div>
-                ) : null}
+                      {isSelected && selectedFixture ? (
+                        <div className="space-y-4 rounded-2xl border border-accent/20 bg-accent/5 p-4">
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <label className="mb-2 block text-sm text-white/70">{selectedFixture.home_team?.name}</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={homeScore}
+                                onChange={(e) => setHomeScore(e.target.value)}
+                                className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-center text-2xl font-bold text-white outline-none focus:border-accent/50"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-2 block text-sm text-white/70">{selectedFixture.away_team?.name}</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={awayScore}
+                                onChange={(e) => setAwayScore(e.target.value)}
+                                className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-center text-2xl font-bold text-white outline-none focus:border-accent/50"
+                              />
+                            </div>
+                          </div>
 
-                <Button onClick={handleSubmit} loading={submitPicks.isPending} disabled={submitPicks.isPending || !canPick}>
-                  {currentPick ? 'Update prediction' : 'Save prediction'}
-                </Button>
+                          <div>
+                            {/* Backend genuinely treats a goalscorer guess
+                                as optional (submitting none is fully
+                                valid) — deliberately not labeled
+                                "optional" anywhere here, per the brief. */}
+                            <p className="mb-2 text-sm text-white/70">Goalscorer</p>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                              {eligiblePlayersWithTeam.map((p) => (
+                                <PlayerCard
+                                  key={p.id}
+                                  player={p}
+                                  seasonId={pot.season_id}
+                                  size="sm"
+                                  selectedCount={String(p.id) === goalscorerId ? 1 : 0}
+                                  onSelect={() => setGoalscorerId((current) => (current === String(p.id) ? '' : String(p.id)))}
+                                />
+                              ))}
+                            </div>
+                          </div>
+
+                          <Button onClick={handleSubmit} loading={submitPicks.isPending} disabled={submitPicks.isPending || !canPick} className="w-full sm:w-auto">
+                            {currentPick ? 'Update prediction' : 'Save prediction'}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </Card>

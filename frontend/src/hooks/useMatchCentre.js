@@ -300,3 +300,29 @@ export function usePlayerRecentAppearances(playerId, limit = 5) {
     },
   })
 }
+
+// Phase 8B — "Last meetings" (head-to-head). Deliberately NOT scoped to
+// the current season alone — two teams' history is more useful across
+// seasons, and `fixtures` already carries every synced match regardless
+// of season, so this is a real, non-invented lookup, not a guess. Matches
+// either way round (home_a vs away_b, or home_b vs away_a).
+export function useHeadToHead(teamAId, teamBId, limit = 5) {
+  return useQuery({
+    queryKey: ['head-to-head', teamAId, teamBId, limit],
+    enabled: !!teamAId && !!teamBId,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('fixtures')
+        .select('id, kickoff_utc, home_goals, away_goals, home_team:teams!home_team_id(id,name,short_name,crest_url), away_team:teams!away_team_id(id,name,short_name,crest_url)')
+        .or(
+          `and(home_team_id.eq.${teamAId},away_team_id.eq.${teamBId}),and(home_team_id.eq.${teamBId},away_team_id.eq.${teamAId})`
+        )
+        .eq('status', 'finished')
+        .order('kickoff_utc', { ascending: false })
+        .limit(limit)
+      if (error) throw error
+      return data ?? []
+    },
+  })
+}

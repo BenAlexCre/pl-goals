@@ -1,33 +1,32 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
-  Search,
   Users,
-  Target,
   Trophy,
   ChevronRight,
-  CheckCircle2,
-  Filter,
+  ChevronUp,
   Eye,
   EyeOff,
   Radio,
 } from 'lucide-react'
 import { supabase, extractFunctionError } from '../lib/supabase'
 import Card from '../components/ui/Card'
-import Button from '../components/ui/Button'
 import Spinner from '../components/ui/Spinner'
 import Toast from '../components/ui/Toast'
 import EmptyState from '../components/ui/EmptyState'
 import Modal from '../components/ui/Modal'
+import Button from '../components/ui/Button'
 import LmsPotDetail from '../components/pot/LmsPotDetail'
 import PredictorPotDetail from '../components/pot/PredictorPotDetail'
 import InviteCard from '../components/pot/InviteCard'
 import JackpotCard from '../components/pot/pick5/JackpotCard'
 import EntryStatusBar from '../components/pot/pick5/EntryStatusBar'
-import PickCard from '../components/pot/pick5/PickCard'
 import MemberCard from '../components/pot/pick5/MemberCard'
+import Pick5FixturePicker from '../components/pot/pick5/Pick5FixturePicker'
+import PicksSummaryPanel from '../components/pot/pick5/PicksSummaryPanel'
 import { useAuthStore } from '../store/authStore'
 import { useRemoveMember } from '../hooks/useMembership'
+import { useFixturesForGameweek } from '../hooks/usePredictorEntry'
 
 const PAGE_SIZE = 1000
 const MAX_PICKS = 5
@@ -59,8 +58,8 @@ export default function PotDetailPage() {
   const [gameweeks, setGameweeks] = useState([])
   const [selectedGameweekId, setSelectedGameweekId] = useState('')
 
-  const [players, setPlayers] = useState([])
   const [allFilterRows, setAllFilterRows] = useState([])
+  const [shirtNumbers, setShirtNumbers] = useState(new Map())
   const [savedEntry, setSavedEntry] = useState(null)
   const [savedPicks, setSavedPicks] = useState([])
   const [memberEntries, setMemberEntries] = useState([])
@@ -79,16 +78,11 @@ export default function PotDetailPage() {
   })
   const [jackpotLoading, setJackpotLoading] = useState(true)
 
-  const [search, setSearch] = useState('')
-  const [debouncedSearch, setDebouncedSearch] = useState('')
-  const [positionFilter, setPositionFilter] = useState('')
-  const [teamFilter, setTeamFilter] = useState('')
   const [selectedPlayers, setSelectedPlayers] = useState([])
 
   const [activeTab, setActiveTab] = useState('entry')
-  const [showPicker, setShowPicker] = useState(false)
+  const [mobilePicksOpen, setMobilePicksOpen] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [playersLoading, setPlayersLoading] = useState(false)
   const [membersLoading, setMembersLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
@@ -301,56 +295,30 @@ export default function PotDetailPage() {
     setAllFilterRows(dedupeByPlayerId(rows))
   }
 
-  async function loadPlayers() {
-    if (!selectedGameweekId) {
-      setPlayers([])
+  // Phase 8B — fixture-first picker: shirt numbers, in bulk (one query per
+  // gameweek's whole player set, not per player) for the new PlayerCard's
+  // "shirt number (if available)" field. player_team_history.shirt_number
+  // is nullable — genuinely absent for some players, not a loading gap;
+  // PlayerCard already renders nothing when it's missing.
+  async function loadShirtNumbers(playerIds) {
+    if (!playerIds.length || !pot) {
+      setShirtNumbers(new Map())
       return
     }
 
-    setPlayersLoading(true)
+    const { data, error } = await supabase
+      .from('player_team_history')
+      .select('player_id, shirt_number')
+      .eq('season_id', pot.season_id)
+      .eq('is_active', true)
+      .in('player_id', playerIds)
 
-    try {
-      const rows = await fetchAllRows(() => {
-        let query = supabase
-          .from('available_players_by_gameweek')
-          .select(`
-            player_id,
-            display_name,
-            position,
-            photo_url,
-            team_id,
-            team_name,
-            team_short_name,
-            crest_url,
-            gameweek_id,
-            gameweek_number
-          `)
-          .eq('gameweek_id', Number(selectedGameweekId))
-          .neq('position', 'Goalkeeper')
-          .order('display_name', { ascending: true })
-
-        if (debouncedSearch.trim()) {
-          const term = debouncedSearch.trim().replace(/[%_]/g, '')
-          query = query.or(
-            `display_name.ilike.%${term}%,team_name.ilike.%${term}%,team_short_name.ilike.%${term}%`
-          )
-        }
-
-        if (positionFilter) {
-          query = query.eq('position', positionFilter)
-        }
-
-        if (teamFilter) {
-          query = query.eq('team_name', teamFilter)
-        }
-
-        return query
-      })
-
-      setPlayers(dedupeByPlayerId(rows))
-    } finally {
-      setPlayersLoading(false)
+    if (error) {
+      setShirtNumbers(new Map())
+      return
     }
+
+    setShirtNumbers(new Map((data || []).map((row) => [row.player_id, row.shirt_number])))
   }
 
   async function loadSavedEntry(gameweekId) {
@@ -630,29 +598,14 @@ export default function PotDetailPage() {
     syncFilterData()
   }, [selectedGameweekId])
 
-  // Production readiness audit (2026-08-05): this previously re-queried
-  // available_players_by_gameweek on every keystroke (search was a direct
-  // effect dependency) — a real query per character typed, against a view
-  // joining four tables with an ilike/or filter. Debounced so a query only
-  // fires once typing pauses; `search` itself still updates the input
-  // immediately for responsive UI feedback, only the query trigger is delayed.
+  // Phase 8B — shirt numbers loaded once per gameweek's player set
+  // (allFilterRows, already fetched above), not per keystroke — there's no
+  // search/filter UI left to debounce against now that the picker is
+  // fixture-first.
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 300)
-    return () => clearTimeout(timer)
-  }, [search])
-
-  useEffect(() => {
-    async function syncPlayers() {
-      try {
-        setErrorMessage('')
-        await loadPlayers()
-      } catch (err) {
-        setErrorMessage(err.message || 'Failed to load players')
-      }
-    }
-
-    syncPlayers()
-  }, [selectedGameweekId, debouncedSearch, positionFilter, teamFilter])
+    loadShirtNumbers(allFilterRows.map((p) => p.player_id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allFilterRows, pot])
 
   useEffect(() => {
     async function syncSavedEntry() {
@@ -716,6 +669,13 @@ export default function PotDetailPage() {
     return new Date(selectedGameweek.deadline_utc).getTime() <= Date.now()
   }, [selectedGameweek])
 
+  // Phase 8B — fixture-first picker. Reused as-is from Score Predictor's
+  // own hook (usePredictorEntry.js) — a plain "fixtures for this
+  // gameweek" query has no Pick5-specific logic to duplicate.
+  const { data: fixtures = [], isLoading: fixturesLoading } = useFixturesForGameweek(
+    selectedGameweekId ? Number(selectedGameweekId) : null
+  )
+
   const isPotAdmin = useMemo(
     () => members.some((m) => m.user_id === user?.id && m.role === 'admin'),
     [members, user]
@@ -751,29 +711,6 @@ export default function PotDetailPage() {
       setErrorMessage(err.message || 'Failed to remove member')
     }
   }
-
-  const teamOptions = useMemo(() => {
-    const values = new Set()
-
-    allFilterRows.forEach((player) => {
-      const teamName = player.team_name || player.team_short_name
-      if (teamName) values.add(teamName)
-    })
-
-    return Array.from(values).sort((a, b) => a.localeCompare(b))
-  }, [allFilterRows])
-
-  const positionOptions = useMemo(() => {
-    const values = new Set()
-
-    allFilterRows.forEach((player) => {
-      if (player.position && player.position !== 'Goalkeeper') {
-        values.add(player.position)
-      }
-    })
-
-    return Array.from(values).sort((a, b) => a.localeCompare(b))
-  }, [allFilterRows])
 
   function getPlayerPickCount(playerId) {
     return selectedPlayers.filter((player) => player.player_id === playerId).length
@@ -981,10 +918,7 @@ export default function PotDetailPage() {
 
           <button
             type="button"
-            onClick={() => {
-              setActiveTab('members')
-              setShowPicker(false)
-            }}
+            onClick={() => setActiveTab('members')}
             className={`rounded-2xl border px-4 py-2 text-sm font-medium transition ${
               activeTab === 'members'
                 ? 'border-accent/30 bg-accent/10 text-accent'
@@ -996,216 +930,62 @@ export default function PotDetailPage() {
         </div>
 
         {activeTab === 'entry' ? (
-          <>
-            {showPicker ? (
-              <Card className="w-full p-5">
-                <div className="mb-5 flex flex-col gap-4">
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                    <div>
-                      <h2 className="text-xl font-semibold text-white">Player picker</h2>
-                      <p className="mt-1 text-sm text-white/45">
-                        Search, filter, and add players until you have exactly {MAX_PICKS} picks.
-                      </p>
-                    </div>
-
-                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/65">
-                      {playersLoading ? 'Loading players...' : `${players.length} available`}
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 lg:grid-cols-4">
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">Gameweek</label>
-                      <select
-                        value={selectedGameweekId}
-                        onChange={(e) => setSelectedGameweekId(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
-                      >
-                        <option value="">Select a gameweek</option>
-                        {gameweeks.map((gw) => (
-                          <option key={gw.id} value={gw.id}>
-                            GW{gw.number} — {gw.name}
-                            {gw.is_current ? ' — Current' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">Search</label>
-                      <div className="relative">
-                        <Search
-                          size={16}
-                          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-white/35"
-                        />
-                        <input
-                          type="text"
-                          value={search}
-                          onChange={(e) => setSearch(e.target.value)}
-                          placeholder="Player or team"
-                          className="w-full rounded-xl border border-white/10 bg-surface-2 py-3 pl-10 pr-4 text-white placeholder:text-white/25 outline-none transition-colors focus:border-accent/50"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">Position</label>
-                      <select
-                        value={positionFilter}
-                        onChange={(e) => setPositionFilter(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
-                      >
-                        <option value="">All outfield positions</option>
-                        {positionOptions.map((position) => (
-                          <option key={position} value={position}>
-                            {position}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="mb-2 block text-sm text-white/70">Team</label>
-                      <select
-                        value={teamFilter}
-                        onChange={(e) => setTeamFilter(e.target.value)}
-                        className="w-full rounded-xl border border-white/10 bg-surface-2 px-4 py-3 text-white outline-none transition-colors focus:border-accent/50"
-                      >
-                        <option value="">All teams</option>
-                        {teamOptions.map((team) => (
-                          <option key={team} value={team}>
-                            {team}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs text-white/40">
-                    <Filter size={14} />
-                    Goalkeepers are excluded. Filter dropdowns stay complete for the selected gameweek.
-                  </div>
+          <div className="md:grid md:grid-cols-[1fr_320px] md:items-start md:gap-5">
+            <div className="min-w-0">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Fixtures</h2>
+                  <p className="mt-0.5 text-sm text-white/45">
+                    {selectedGameweek ? `GW${selectedGameweek.number} — ${selectedGameweek.name}` : 'Select a gameweek'}
+                  </p>
                 </div>
+                <select
+                  value={selectedGameweekId}
+                  onChange={(e) => setSelectedGameweekId(e.target.value)}
+                  className="rounded-xl border border-white/10 bg-surface-2 px-3 py-2 text-sm text-white outline-none"
+                >
+                  <option value="">Select a gameweek</option>
+                  {gameweeks.map((gw) => (
+                    <option key={gw.id} value={gw.id}>
+                      GW{gw.number} — {gw.name}
+                      {gw.is_current ? ' — Current' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-                {playersLoading ? (
-                  <div className="flex justify-center py-12">
-                    <Spinner />
-                  </div>
-                ) : players.length === 0 ? (
-                  <EmptyState
-                    icon={Search}
-                    title="No players found"
-                    description="Try another search or change the filters."
-                  />
-                ) : (
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {players.map((player) => {
-                      const playerCount = getPlayerPickCount(player.player_id)
+              <Pick5FixturePicker
+                fixtures={fixtures}
+                fixturesLoading={fixturesLoading}
+                players={allFilterRows}
+                shirtNumbers={shirtNumbers}
+                leagueId={pot.league_id}
+                seasonId={pot.season_id}
+                competitionName={pot.leagues?.name}
+                getPlayerPickCount={getPlayerPickCount}
+                selectedCount={selectedPlayers.length}
+                maxPicks={MAX_PICKS}
+                onSelectPlayer={addPlayer}
+                deadlineClosed={deadlineClosed}
+              />
+            </div>
 
-                      return (
-                        <button
-                          key={player.player_id}
-                          type="button"
-                          onClick={() => addPlayer(player)}
-                          disabled={
-                            selectedPlayers.length >= MAX_PICKS ||
-                            playerCount >= MAX_SAME_PLAYER
-                          }
-                          className={`rounded-2xl border p-4 text-left transition-all ${
-                            playerCount > 0
-                              ? 'border-accent/40 bg-accent/10'
-                              : 'border-white/8 bg-surface-1 hover:border-white/15 hover:bg-surface-2'
-                          } disabled:cursor-not-allowed disabled:opacity-70`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <h3 className="truncate font-semibold text-white">{player.display_name}</h3>
-                              <p className="mt-1 truncate text-sm text-white/45">
-                                {player.team_name || player.team_short_name || 'Unknown team'}
-                              </p>
-                            </div>
-
-                            <div className="flex flex-col items-end gap-2">
-                              <span className="shrink-0 rounded-full bg-white/8 px-2.5 py-1 text-xs text-white/70">
-                                {player.position || 'Player'}
-                              </span>
-                              {playerCount > 0 ? (
-                                <span className="rounded-full bg-accent/15 px-2.5 py-1 text-xs text-accent">
-                                  Selected {playerCount}x
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
+            {/* Persistent picks panel — desktop/tablet only (md+); mobile
+                gets the sticky bottom sheet below instead. */}
+            <div className="mt-5 hidden md:sticky md:top-4 md:mt-0 md:block">
+              <Card className="p-4">
+                <PicksSummaryPanel
+                  selectedPlayers={selectedPlayers}
+                  maxPicks={MAX_PICKS}
+                  onRemove={removePickByIndex}
+                  onSave={handleSaveEntry}
+                  saving={saving}
+                  savedEntry={savedEntry}
+                  deadlineClosed={deadlineClosed}
+                />
               </Card>
-            ) : (
-              <Card className="p-5">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-semibold text-white">Your picks</h2>
-                    <p className="mt-0.5 text-sm text-white/45">
-                      {selectedGameweek ? `GW${selectedGameweek.number} — ${selectedGameweek.name}` : 'Select a gameweek'}
-                    </p>
-                  </div>
-                  {!deadlineClosed && (
-                    <Button type="button" variant="secondary" size="sm" onClick={() => setShowPicker(true)}>
-                      <Target size={14} />
-                      {selectedPlayers.length > 0 ? 'Edit picks' : 'Open player picker'}
-                    </Button>
-                  )}
-                </div>
-
-                {selectedPlayers.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-6 text-center">
-                    <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/10 text-accent">
-                      <Target size={20} />
-                    </div>
-                    <h3 className="text-base font-semibold text-white">No picks made yet</h3>
-                    <p className="mx-auto mt-1.5 max-w-sm text-sm text-white/45">
-                      Choose exactly {MAX_PICKS} players for this gameweek to enter.
-                    </p>
-                    <div className="mt-4">
-                      <Button type="button" onClick={() => setShowPicker(true)}>
-                        <Target size={16} />
-                        Start picks
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                      {selectedPlayers.map((player, index) => (
-                        <PickCard
-                          key={`${player.player_id}-${index}`}
-                          pickNumber={index + 1}
-                          displayName={player.display_name}
-                          teamName={player.team_name || player.team_short_name}
-                          crestUrl={player.crest_url}
-                          position={player.position}
-                          onRemove={showPicker || deadlineClosed ? undefined : () => removePickByIndex(index)}
-                        />
-                      ))}
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      <Button
-                        type="button"
-                        onClick={handleSaveEntry}
-                        disabled={saving || selectedPlayers.length !== MAX_PICKS || !selectedGameweekId || deadlineClosed}
-                      >
-                        <CheckCircle2 size={16} />
-                        {saving ? 'Saving picks...' : savedEntry ? 'Update picks' : 'Save entry'}
-                      </Button>
-                    </div>
-                  </>
-                )}
-              </Card>
-            )}
-          </>
+            </div>
+          </div>
         ) : (
           <div className="space-y-5">
             {isPotAdmin ? (
@@ -1271,6 +1051,39 @@ export default function PotDetailPage() {
           </div>
         )}
       </section>
+
+      {/* Mobile sticky bottom sheet — same PicksSummaryPanel as the
+          desktop sidebar, collapsed to a tap-to-expand bar so it stays
+          usable one-handed and never covers the fixture list by default.
+          md:hidden matches BottomNav's own breakpoint (components/layout/
+          BottomNav.jsx) so this sits directly above it, not floating with
+          a gap or overlapping. */}
+      {activeTab === 'entry' && (
+        <div className="fixed inset-x-0 bottom-16 z-40 px-4 md:hidden">
+          {mobilePicksOpen && (
+            <div className="mb-2 max-h-[55vh] overflow-y-auto rounded-2xl border border-white/10 bg-pitch-950/95 p-4 shadow-card backdrop-blur-lg">
+              <PicksSummaryPanel
+                selectedPlayers={selectedPlayers}
+                maxPicks={MAX_PICKS}
+                onRemove={removePickByIndex}
+                onSave={handleSaveEntry}
+                saving={saving}
+                savedEntry={savedEntry}
+                deadlineClosed={deadlineClosed}
+              />
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setMobilePicksOpen((v) => !v)}
+            aria-expanded={mobilePicksOpen}
+            className="flex w-full items-center justify-between rounded-2xl border border-accent/30 bg-pitch-950/95 px-4 py-3 text-sm font-semibold text-accent shadow-card backdrop-blur-lg"
+          >
+            <span>{selectedPlayers.length} / {MAX_PICKS} selected</span>
+            <ChevronUp size={16} className={`transition-transform ${mobilePicksOpen ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+      )}
 
       <Modal open={!!pendingRemoval} onClose={() => setPendingRemoval(null)} title="Remove member" size="sm">
         <p className="text-sm text-white/60">
