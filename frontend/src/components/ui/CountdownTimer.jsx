@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { getCountdownParts } from '../../utils/time'
 import { Clock } from 'lucide-react'
 
-export default function CountdownTimer({ deadlineUtc, onExpire, className = '' }) {
+export default function CountdownTimer({ deadlineUtc, onExpire, className = '', showSeconds = true }) {
   const [parts, setParts] = useState(() => getCountdownParts(deadlineUtc))
 
   useEffect(() => {
@@ -41,8 +41,8 @@ export default function CountdownTimer({ deadlineUtc, onExpire, className = '' }
     <span className={`inline-flex items-center gap-1.5 font-mono tabular ${colour} ${className}`}>
       <Clock size={14} className="flex-shrink-0" />
       {parts.h > 0 && <span>{parts.h}h </span>}
-      <span>{pad(parts.m)}m </span>
-      <span>{pad(parts.s)}s</span>
+      <span>{pad(parts.m)}m{showSeconds ? ' ' : ''}</span>
+      {showSeconds && <span>{pad(parts.s)}s</span>}
     </span>
   )
 }

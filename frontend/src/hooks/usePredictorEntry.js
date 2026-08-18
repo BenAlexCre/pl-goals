@@ -80,6 +80,52 @@ export function usePlayersForFixture(homeTeamId, awayTeamId) {
   })
 }
 
+// Phase 9 — Predictor prediction-screen polish. Pot-wide participation for
+// one gameweek: "N of M pot members have predicted this gameweek" — a
+// social/progress stat, distinct from the viewer's own single prediction
+// (only one fixture can ever be an entrant's actual pick per gameweek —
+// see business-rules.md § Score Predictor: "chooses exactly one fixture").
+// Two small, RLS-scoped reads (pot_members count, predictor_fixture_picks
+// count for this gameweek's entries) — no new table, no schema change.
+// refetchInterval matches useLeaderboard's own cadence for "stays
+// reasonably fresh without a new realtime channel"; the viewer's own save
+// invalidates it immediately via useSubmitPredictorPicks below.
+export function usePredictorGameweekProgress(potId, gameweekId) {
+  return useQuery({
+    queryKey: ['predictor-gameweek-progress', potId, gameweekId],
+    enabled: !!potId && !!gameweekId,
+    refetchInterval: 30_000,
+    queryFn: async () => {
+      const { count: totalMembers, error: membersError } = await supabase
+        .from('pot_members')
+        .select('user_id', { count: 'exact', head: true })
+        .eq('pot_id', potId)
+      if (membersError) throw membersError
+
+      const { data: entries, error: entriesError } = await supabase
+        .from('game_entries')
+        .select('id')
+        .eq('pot_id', potId)
+        .is('gameweek_id', null)
+      if (entriesError) throw entriesError
+      const entryIds = (entries ?? []).map((e) => e.id)
+
+      let predictedCount = 0
+      if (entryIds.length > 0) {
+        const { count, error: picksError } = await supabase
+          .from('predictor_fixture_picks')
+          .select('id', { count: 'exact', head: true })
+          .eq('gameweek_id', gameweekId)
+          .in('game_entry_id', entryIds)
+        if (picksError) throw picksError
+        predictedCount = count ?? 0
+      }
+
+      return { predictedCount, totalMembers: totalMembers ?? 0 }
+    },
+  })
+}
+
 export function useGetOrCreatePredictorEntry() {
   const qc = useQueryClient()
   const { user } = useAuthStore()
@@ -120,6 +166,7 @@ export function useSubmitPredictorPicks() {
     onSuccess: ({ potId }) => {
       qc.invalidateQueries({ queryKey: ['predictor-entry', potId, user?.id] })
       qc.invalidateQueries({ queryKey: ['leaderboard', potId] })
+      qc.invalidateQueries({ queryKey: ['predictor-gameweek-progress', potId] })
     },
   })
 }
