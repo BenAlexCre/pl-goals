@@ -772,6 +772,80 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-55 — Sign-in/sign-up/password-reset could hang silently on a network-level failure, with no error shown
+**Discovered and resolved 2026-08-18, Phase 13 (Authentication
+Reliability).** Reported live: `benalexcre@gmail.com` (a genuine
+`super_admin` account) could not reliably sign in, with no error message
+— the page appeared to just do nothing. Investigated the account first,
+not the code: `auth.users` showed a confirmed email, no ban, a real
+password hash, and the correct `super_admin` claim; GoTrue's own audit
+log showed several fully successful `grant_type=password` 200 responses
+for this exact account clustered within about 10 seconds of each other —
+proving the credentials were correct the whole time, and that the user
+was retrying because the app wasn't visibly completing sign-in, not
+because they were guessing a wrong password. The same logs also showed a
+**real, transient GoTrue↔Postgres connectivity failure** in this local
+environment moments earlier (`"failed SASL auth: i/o timeout"`, then a
+DNS resolution failure for the `supabase_db_pl-goals` hostname) — the
+kind of infrastructure blip this investigation was built to survive, not
+one this fix "solves" (it's outside the application's control).
+
+**Root cause, confirmed by reading `@supabase/auth-js`'s own source**
+(`node_modules/@supabase/auth-js/dist/main/lib/GoTrueClient.js`):
+`signInWithPassword()` (and `signUp()`/`resetPasswordForEmail()`) only
+catch and return `{ error }` for a structured `AuthError` (wrong
+password, unconfirmed email, banned account, etc.) — any other exception,
+including a genuine network/connectivity failure, is **rethrown**.
+`SignIn.jsx`'s `handleSubmit` (and the equivalent handlers in
+`SignUp.jsx`/`ForgotPassword.jsx`) had no `try/catch` around this call:
+a rethrown exception was an unhandled promise rejection, so
+`setLoading(false)` was never reached — the button stayed stuck on
+"Signing in..." forever, with zero error shown. `useAuth.js`'s own
+session-restoration `getSession()` call had the identical gap (its own
+`__loadSession()` "may trigger a refresh," the exact kind of network call
+that hit the confirmed connectivity blip): a failure there could leave
+`ProtectedRoute`'s loading spinner spinning forever, or — if `getSession()`
+resolved with `session: null` after an internal refresh failure — bounce
+an already-successfully-authenticated user straight back to `/sign-in`
+with no explanation, which is the more likely explanation for the
+repeated login attempts actually observed in the logs.
+
+**Fixed**: `try/catch/finally` added around the auth call in all three
+forms (`SignIn.jsx`, `SignUp.jsx`, `ForgotPassword.jsx`) so `loading`
+always resolves and a clear message is always shown; `useAuth.js`'s
+`getSession()` gained a `.catch()` that fails safe to `user: null` (never
+grants access on an error — fails closed, not open) instead of hanging.
+New `utils/authErrors.js` maps GoTrue's machine-readable `error.code` to
+human copy ("Incorrect email or password.", "Your email address has not
+been verified yet...", "Your account has been suspended.") instead of
+showing raw error text; a distinct, separately-confirmed failure shape
+(`AuthRetryableFetchError`, `status: 0`, message `"Failed to fetch"` —
+the request never got a response at all) is mapped to the same friendly
+network-error copy. The underlying error is still `console.error`'d in
+full for local debugging, never shown to the user verbatim.
+
+**Verified live**: intercepted the real `/auth/v1/token` request via
+Playwright and forced it to fail (`route.abort('failed')`) — confirmed
+*before* this fix the button hung on "Signing in…" indefinitely with no
+error (reproducing the reported symptom exactly), and *after* the fix it
+shows "Unable to reach the server right now..." and re-enables
+immediately. Re-verified the normal paths still work correctly against
+the real backend: a genuinely wrong password shows "Incorrect email or
+password."; a full sign-in via session injection (magic-link technique,
+never the real password) confirmed session persistence across a browser
+refresh and direct deep-route navigation; sign-out lands on `/`, not
+`/sign-in`; a non-`super_admin` account is correctly blocked from
+`/super-admin` (frontend guard) and still can't reach Manual Jobs
+server-side (`sync-fixtures` re-tested: `super_admin` passes the auth
+check, a plain pot-admin still gets a clean `401`) — no security
+regression from Phase 8D/10B.
+
+**Security implications**: none negative — the `.catch()` fallback in
+`useAuth.js` fails to `user: null` (denies access) rather than assuming a
+session is valid, so a transient error can never grant access it
+shouldn't. No role system, RLS policy, or server-side check was touched;
+Manual Jobs remains `super_admin`-only at both layers, re-confirmed live.
+
 #### ISSUE-54 — Dashboard showed "Make your pick" to an already-eliminated LMS entrant
 **Discovered and resolved 2026-08-18, Phase 12 (Dashboard 2.0 + Global
 Product UX Polish).** Found live testing a real (non-demo) account whose

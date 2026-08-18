@@ -18,6 +18,11 @@ const SIZES = {
   sm: { box: 'h-8 w-8', img: 'h-6 w-6', text: 'text-[9px]' },
   md: { box: 'h-9 w-9', img: 'h-7 w-7', text: 'text-[10px]' },
   lg: { box: 'h-11 w-11', img: 'h-8 w-8', text: 'text-[11px]' },
+  // Phase 13, Part 11 — added for MatchCentreDrawer's own header crest
+  // (previously its own local, near-identical Crest component). sm/md/lg
+  // are left byte-for-byte unchanged — FixtureCard.jsx's already-shipped
+  // Dashboard/GameweekPage cards depend on the exact current "md" size.
+  xl: { box: 'h-12 w-12', img: 'h-8 w-8', text: 'text-[12px]' },
 }
 
 export default function TeamCrest({ team, size = 'md', className = '' }) {

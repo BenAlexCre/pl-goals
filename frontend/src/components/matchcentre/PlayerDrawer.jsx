@@ -1,4 +1,4 @@
-import { Shield, User } from 'lucide-react'
+import { Shield } from 'lucide-react'
 import SlideDrawer from '../ui/SlideDrawer'
 import TeamForm from './TeamForm'
 import Spinner from '../ui/Spinner'
@@ -10,6 +10,7 @@ import {
   useTeamForm,
 } from '../../hooks/useMatchCentre'
 import { toLocalTimeShort } from '../../utils/time'
+import { initials } from '../../utils/format'
 
 function Stat({ label, value }) {
   if (value === null || value === undefined) return null
@@ -61,7 +62,7 @@ export default function PlayerDrawer({ open, onClose, playerId }) {
               {profile.photo_url ? (
                 <img src={profile.photo_url} alt="" className="h-full w-full object-cover" />
               ) : (
-                <User size={28} className="text-white/25" />
+                <span className="text-lg font-bold text-accent">{initials(profile.display_name)}</span>
               )}
             </div>
             <div className="min-w-0">

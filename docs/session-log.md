@@ -13,6 +13,47 @@ from here.
 
 ---
 
+## 2026-08-18 (70) — Phase 13: Authentication Reliability + Global Product UX Polish
+
+**Goal:** the real `super_admin` account (`benalexcre@gmail.com`) could
+not reliably sign in, with no error shown. Full detail — see
+[decisions.md § Phase 13](./decisions.md#phase-13--authentication-reliability--global-product-polish)
+and [current-state.md ISSUE-55](./current-state.md#issue-55--sign-insign-uppassword-reset-could-hang-silently-on-a-network-level-failure-with-no-error-shown).
+
+**Root cause:** `SignIn.jsx`/`SignUp.jsx`/`ForgotPassword.jsx` had no
+`try/catch` around their Supabase Auth calls; `auth-js` rethrows (rather
+than resolving with `{ error }`) for any non-`AuthError` exception,
+including a network failure. A real, transient GoTrue↔Postgres
+connectivity blip in this environment (confirmed in the auth container's
+own logs) hit exactly this gap, leaving the sign-in button stuck with no
+feedback. The account itself was never the problem — confirmed via
+direct `auth.users` inspection and GoTrue's own audit log, which showed
+several genuinely successful password logins for this exact account.
+
+**Fixed:** `try/catch/finally` in all three auth forms; a `.catch()` on
+`useAuth.js`'s session-restoration `getSession()` (fails safe to
+signed-out, never grants access on an error); new `utils/authErrors.js`
+mapping GoTrue's `error.code` to human copy instead of raw error text.
+Reproduced the exact failure live (intercepted the real token request)
+before and after the fix.
+
+**Also shipped:** consistent initials-based player avatar fallback
+(`PlayerCard.jsx`/`PlayerDrawer.jsx`, previously a generic icon);
+`TeamCrest.jsx` unified onto `MatchCentreDrawer.jsx`/
+`LmsFixtureSelector.jsx` (new `xl` size added, existing sizes untouched);
+full team names extended to Match Centre's header/summary cards; Pick 5's
+disabled player cards now explain why (deadline locked vs. already at
+5/5), matching the brief's own example.
+
+**Verified live**: `npm run build` clean; Deno suite 347/347 unchanged;
+full auth matrix (wrong password, network-failure interception,
+session persistence across refresh/deep-route, sign-out, `super_admin`
+route boundary, backend Manual Jobs check) — no security regression from
+Phase 8D/10B. Responsive 375/390/768/1024/1440px across Dashboard, Sign
+In, Pick 5, Join Competition, LMS — zero overflow.
+
+---
+
 ## 2026-08-18 (69) — Phase 12: Dashboard 2.0 + Global Product UX Polish
 
 **Goal:** a second product pass on Phase 11's Dashboard — it was too

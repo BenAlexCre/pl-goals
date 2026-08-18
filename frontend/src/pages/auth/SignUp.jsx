@@ -4,6 +4,7 @@ import { supabase } from '../../lib/supabase'
 import AuthLayout from '../../components/layout/AuthLayout'
 import Button from '../../components/ui/Button'
 import { useUiStore } from '../../store/uiStore'
+import { humanizeAuthError, AUTH_NETWORK_ERROR_MESSAGE } from '../../utils/authErrors'
 
 export default function SignUp() {
   const navigate = useNavigate()
@@ -22,40 +23,51 @@ export default function SignUp() {
     password: '',
   })
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
+  // Phase 13 — ISSUE-55's same bug class: no try/catch meant a network-
+  // level failure (signUp() rethrows exactly like signInWithPassword()
+  // for a non-AuthError exception — see authErrors.js) left the button
+  // stuck on "Creating account..." forever with no feedback.
   async function handleSubmit(e) {
     e.preventDefault()
     if (loading) return
     setLoading(true)
+    setError('')
 
-    const { data, error } = await supabase.auth.signUp({
-      email: form.email.trim().toLowerCase(),
-      password: form.password,
-      options: {
-        data: {
-          display_name: form.display_name.trim(),
+    try {
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: form.email.trim().toLowerCase(),
+        password: form.password,
+        options: {
+          data: {
+            display_name: form.display_name.trim(),
+          },
         },
-      },
-    })
+      })
 
-    setLoading(false)
+      if (signUpError) {
+        setError(humanizeAuthError(signUpError))
+        return
+      }
 
-    if (error) {
-      addToast({ type: 'error', message: error.message })
-      return
-    }
-
-    if (data.session) {
-      // Phase 8D — local email verification is enabled (config.toml), so
-      // this branch is effectively unreachable in this environment
-      // (data.session is only ever non-null when Supabase Auth signs a new
-      // user straight in, which it doesn't do while confirmations are
-      // required) — kept as the correct behavior if verification is ever
-      // disabled for a different environment.
-      addToast({ type: 'success', message: 'Account created. You are now signed in.' })
-      navigate(redirectTo, { replace: true })
-    } else {
-      navigate(`/verify-email?email=${encodeURIComponent(form.email.trim())}${redirectQuery ? `&redirect=${encodeURIComponent(searchParams.get('redirect'))}` : ''}`, { replace: true })
+      if (data.session) {
+        // Phase 8D — local email verification is enabled (config.toml), so
+        // this branch is effectively unreachable in this environment
+        // (data.session is only ever non-null when Supabase Auth signs a new
+        // user straight in, which it doesn't do while confirmations are
+        // required) — kept as the correct behavior if verification is ever
+        // disabled for a different environment.
+        addToast({ type: 'success', message: 'Account created. You are now signed in.' })
+        navigate(redirectTo, { replace: true })
+      } else {
+        navigate(`/verify-email?email=${encodeURIComponent(form.email.trim())}${redirectQuery ? `&redirect=${encodeURIComponent(searchParams.get('redirect'))}` : ''}`, { replace: true })
+      }
+    } catch (err) {
+      console.error('Sign-up request failed', err)
+      setError(AUTH_NETWORK_ERROR_MESSAGE)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -105,7 +117,15 @@ export default function SignUp() {
           />
         </div>
 
-        <Button type="submit" fullWidth loading={loading} disabled={loading}>Create account</Button>
+        {error ? (
+          <div role="alert" className="rounded-xl border border-red-goal/25 bg-red-goal/10 p-3 text-sm text-red-goal">
+            {error}
+          </div>
+        ) : null}
+
+        <Button type="submit" fullWidth loading={loading} disabled={loading}>
+          {loading ? 'Creating account…' : 'Create account'}
+        </Button>
       </form>
 
       <div className="mt-4 text-sm">

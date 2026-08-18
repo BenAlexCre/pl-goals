@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { Info, Lock, Shield, User } from 'lucide-react'
+import { Info, Lock, Shield } from 'lucide-react'
 import { usePlayerSeasonStats } from '../../hooks/useMatchCentre'
 import PlayerDrawer from './PlayerDrawer'
 import TeamForm from './TeamForm'
+import { initials } from '../../utils/format'
 
 // Phase 8B — the one reusable player card used everywhere a player is
 // shown: Pick 5's squad picker, Score Predictor's goalscorer picker, and
@@ -34,6 +35,7 @@ export default function PlayerCard({
   selectedCount = 0,
   locked = false,
   disabled = false,
+  disabledReason,
   onSelect,
   size = 'md',
 }) {
@@ -55,8 +57,9 @@ export default function PlayerCard({
         type="button"
         onClick={handlePrimaryClick}
         disabled={disabled}
+        title={disabled ? disabledReason : undefined}
         aria-pressed={onSelect ? selected : undefined}
-        aria-label={`${player.display_name}${selected ? `, selected${selectedCount > 1 ? ` ${selectedCount} times` : ''}` : ''}${locked ? ', locked' : ''}`}
+        aria-label={`${player.display_name}${selected ? `, selected${selectedCount > 1 ? ` ${selectedCount} times` : ''}` : ''}${locked ? ', locked' : ''}${disabled && disabledReason ? `, unavailable: ${disabledReason}` : ''}`}
         className={`
           w-full rounded-2xl border p-3 text-left transition-all
           ${selected ? 'border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(0,230,118,0.4)]' : 'border-white/8 bg-surface-1 hover:border-white/20 hover:bg-surface-2'}
@@ -69,7 +72,17 @@ export default function PlayerCard({
               {player.photo_url ? (
                 <img src={player.photo_url} alt="" className="h-full w-full object-cover" loading="lazy" />
               ) : (
-                <User size={compact ? 16 : 20} className="text-white/25" />
+                // Phase 13, Part 10 — consistent initials fallback (same
+                // treatment as Avatar.jsx's own, used everywhere a
+                // person is shown), replacing a generic person-silhouette
+                // icon. No player photo exists anywhere in this schema
+                // today (real, confirmed) — this is the shared component
+                // "used everywhere a player is shown" per its own header
+                // comment, so fixing it here covers Pick 5/Predictor/
+                // Match Centre in one place.
+                <span className={`font-bold text-accent ${compact ? 'text-[10px]' : 'text-xs'}`}>
+                  {initials(player.display_name)}
+                </span>
               )}
             </div>
             {shirtNumber ? (
@@ -94,6 +107,16 @@ export default function PlayerCard({
               <span className="text-white/20">·</span>
               <span className="shrink-0">{player.position || 'Player'}</span>
             </div>
+            {/* Phase 13, Part 21 — a disabled card previously just greyed
+                out with no explanation (confirmed live: 35+ Pick 5 cards
+                could go grey at once with nothing telling the viewer
+                why). `title` alone isn't discoverable on a touch device,
+                so the reason is also shown inline, same treatment
+                LmsFixtureSelector.jsx already uses for its own disabled
+                team options. */}
+            {disabled && disabledReason && (
+              <p className="mt-1 text-[10px] leading-tight text-red-goal/70">{disabledReason}</p>
+            )}
           </div>
 
           {selected && (

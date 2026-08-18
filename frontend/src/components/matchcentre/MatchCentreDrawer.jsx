@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Shield } from 'lucide-react'
 import SlideDrawer from '../ui/SlideDrawer'
 import TeamForm from './TeamForm'
 import FixtureEventsTimeline from './FixtureEventsTimeline'
 import PlayerDrawer from './PlayerDrawer'
 import PlayerCard from './PlayerCard'
+import TeamCrest from '../ui/TeamCrest'
 import { useTeamHomeAwayRecord, useHeadToHead, fixtureDifficultyFromStanding } from '../../hooks/useMatchCentre'
 import { usePlayersForFixture } from '../../hooks/usePredictorEntry'
 import { toLocalTimeShort } from '../../utils/time'
+import { formatTeamName } from '../../utils/format'
 
 const DIFFICULTY_STYLES = {
   easy: 'border-accent/30 bg-accent/10 text-accent',
@@ -19,14 +20,6 @@ const DIFFICULTY_STYLES = {
 // bare "Easy"/"Difficult".
 const DIFFICULTY_LABEL = { easy: 'Easier fixture', balanced: 'Balanced fixture', difficult: 'Tough fixture' }
 const DIFFICULTY_TITLE = 'Fixture difficulty — based on the opponent’s league position, not an official rating'
-
-function Crest({ url }) {
-  return (
-    <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-surface-3">
-      {url ? <img src={url} alt="" className="h-8 w-8 object-contain" /> : <Shield size={22} className="text-white/25" />}
-    </div>
-  )
-}
 
 function StatRow({ label, home, away }) {
   return (
@@ -112,7 +105,7 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
               visually prominent"). */}
           <section>
             <div className="flex items-center justify-between">
-              <Crest url={fixture.home_team?.crest_url} />
+              <TeamCrest team={fixture.home_team} size="xl" />
               <div className="text-center">
                 {isLive || isFinished ? (
                   <p className="text-3xl font-bold tabular text-white">
@@ -126,11 +119,11 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
                 )}
                 {isFinished && <p className="mt-1 text-xs font-medium text-white/40">Full time</p>}
               </div>
-              <Crest url={fixture.away_team?.crest_url} />
+              <TeamCrest team={fixture.away_team} size="xl" />
             </div>
             <div className="mt-3 flex items-center justify-between text-sm font-semibold text-white">
-              <span>{fixture.home_team?.name}</span>
-              <span>{fixture.away_team?.name}</span>
+              <span>{formatTeamName(fixture.home_team)}</span>
+              <span>{formatTeamName(fixture.away_team)}</span>
             </div>
             <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/45">
               <div className="space-y-1">
@@ -179,7 +172,7 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
                   { team: fixture.away_team, standing: awayStanding, form: awayForm },
                 ].map(({ team, standing, form }) => (
                   <div key={team?.id ?? 'team'} className="rounded-xl border border-white/8 bg-surface-2/40 p-3">
-                    <p className="truncate text-sm font-semibold text-white">{team?.name}</p>
+                    <p className="truncate text-sm font-semibold text-white">{formatTeamName(team)}</p>
                     {standing ? (
                       <p className="mt-1 text-xs text-white/45">
                         {standing.position}{standing.position === 1 ? 'st' : standing.position === 2 ? 'nd' : standing.position === 3 ? 'rd' : 'th'} in table
@@ -224,7 +217,7 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
                   { team: fixture.away_team, form: awayForm, record: awayRecord?.away, recordLabel: 'Away record' },
                 ].map(({ team, form, record, recordLabel }) => (
                   <div key={team?.id ?? recordLabel} className="rounded-xl border border-white/8 bg-surface-2/40 p-3">
-                    <p className="truncate text-sm font-semibold text-white">{team?.name}</p>
+                    <p className="truncate text-sm font-semibold text-white">{formatTeamName(team)}</p>
                     {form && form.played > 0 ? (
                       <p className="mt-2 text-xs text-white/45">
                         {form.goalsFor} scored &middot; {form.goalsAgainst} conceded &middot; {form.cleanSheets} clean sheets

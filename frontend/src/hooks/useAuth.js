@@ -9,18 +9,36 @@ export function useAuth() {
   useEffect(() => {
     let mounted = true
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!mounted) return
-      setUser(session?.user ?? null)
-      setLoading(false)
-    })
+    // Phase 13 — ISSUE-55's second occurrence of the same bug class.
+    // getSession() can also reject rather than resolve — its own docs
+    // (auth-js GoTrueClient) note it may trigger a network refresh
+    // internally, and that refresh call is exactly what a transient
+    // GoTrue<->Postgres connectivity failure (confirmed live in this
+    // environment's own auth logs) would break. With no `.catch()`,
+    // `setLoading(false)` was never reached on failure, leaving
+    // ProtectedRoute's spinner spinning forever with no error and no way
+    // out. Failing to `user: null` on a session-restore error is the
+    // correct safe default — it sends the visitor to sign in again
+    // rather than leaving them stuck, and never grants access on an
+    // error (fails closed, not open).
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        if (!mounted) return
+        setUser(session?.user ?? null)
+        setLoading(false)
+      })
+      .catch((err) => {
+        console.error('Failed to restore session', err)
+        if (!mounted) return
+        setUser(null)
+        setLoading(false)
+      })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
       setLoading(false)
-      console.log('auth changed', session?.user?.id, session?.user?.email)
     })
 
     return () => {

@@ -5752,3 +5752,90 @@ already-eliminated LMS entry correctly shows "Eliminated" not "Make your
 pick" (`ISSUE-54`'s own fix), Join Competition's back link tested both
 with and without a real Dashboard origin. Responsive: 375/390/768/1024/
 1440px, zero horizontal overflow at any of them.
+
+## Phase 13 — Authentication Reliability + Global Product Polish
+
+Led with a reported login failure on the real `super_admin` account
+(`benalexcre@gmail.com`) — investigated as data first, code second, per
+the user's own explicit instruction not to assume the password was
+wrong. `auth.users` was completely healthy (confirmed email, no ban,
+correct `super_admin` claim); GoTrue's own audit log proved the
+credentials were correct (several genuine `grant_type=password` 200s for
+this account within a 10-second window) and also showed a real, transient
+GoTrue↔Postgres connectivity failure moments earlier. Root cause and fix
+are recorded in full under `ISSUE-55` in `current-state.md` — in short,
+`SignIn.jsx`/`SignUp.jsx`/`ForgotPassword.jsx` had no `try/catch` around
+their Supabase Auth calls, and `auth-js` rethrows (rather than resolving
+with `{ error }`) for any non-`AuthError` exception, including a network
+failure — so a connectivity blip could leave the sign-in button stuck
+forever with zero feedback. Fixed with `try/catch/finally` in all three
+forms plus a `.catch()` on `useAuth.js`'s own session-restoration
+`getSession()` call (fails safe to signed-out, never grants access on an
+error), and a new `utils/authErrors.js` mapping GoTrue's `error.code` to
+human copy instead of raw error text. Verified by reproducing the exact
+failure live (intercepting the real token request and forcing it to
+fail) before and after the fix, and confirmed no change to the
+authorization boundary itself (Phase 8D's role model, RLS, and Manual
+Jobs' `super_admin`-only backend check all re-tested live, unchanged).
+
+### Global UX consistency pass
+
+**Player avatars** (Part 10): `PlayerCard.jsx`/`PlayerDrawer.jsx` — the
+shared components used everywhere a player is shown (Pick 5's picker,
+Score Predictor's goalscorer picker, Match Centre's squad lists and
+player profile) — fell back to a generic person-silhouette icon instead
+of the initials treatment `Avatar.jsx` already uses in leaderboards. Now
+consistent everywhere: reuses `utils/format.js`'s existing `initials()`
+helper, no new component, no fabricated photo.
+
+**Crest consistency** (Part 11): `TeamCrest.jsx` gained one new size
+(`xl`, for `MatchCentreDrawer`'s own match header) — `sm`/`md`/`lg` are
+untouched, since `FixtureCard.jsx`'s already-shipped Dashboard/
+GameweekPage cards depend on the exact current `md` size. Unified
+`MatchCentreDrawer.jsx` and `LmsFixtureSelector.jsx` onto it, removing
+their own near-identical local `Crest` components.
+`PredictorFixtureCard.jsx`'s own local Crest was deliberately left
+untouched — that file has been treated as protected since the Score
+Predictor rework two phases ago, and its sizing doesn't map exactly onto
+any existing `TeamCrest` size, so unifying it wasn't the low-risk case
+this phase's own scope asked for.
+
+**Full team names** (Part 12): extended Phase 12's `formatTeamName()`
+principle (full name, "FC" suffix stripped, wrap rather than truncate)
+to `MatchCentreDrawer.jsx`'s score header and team-summary cards, and to
+`LmsFixtureSelector.jsx`'s pick buttons. Left genuinely compact/secondary
+labels alone (head-to-head one-line results, squad-list subheadings,
+Pick 5's own "show players" section label) — these were judged low-value,
+higher-diff spots to touch, not an oversight.
+
+**Unexplained disabled controls** (Part 21): `PlayerCard.jsx` gained a
+`disabledReason` prop (mirroring `LmsFixtureSelector.jsx`'s own existing
+pattern), shown both as a native `title` tooltip and as visible inline
+text (a tooltip alone isn't discoverable on a touch device). Wired up in
+`Pick5FixturePicker.jsx`, which previously collapsed two different
+disabled reasons — deadline passed vs. already at 5/5 picks — into one
+unexplained grey-out. Confirmed live: selecting 5 picks now shows
+"5/5 selected — remove a player to choose someone else" on every other
+player's card, matching the brief's own example exactly.
+
+Confirmed already clean, no action needed: no remaining "Join
+competition" copy anywhere in the app, no remaining raw `season.name`
+reads outside `formatSeasonName()`, the create-competition flow still
+navigates straight into `/pot/:id/manage`, and `JoinPot.jsx`'s Part 17
+back-link (added Phase 12) still correctly prefers the real referring
+page with a signed-in-appropriate fallback.
+
+### Verification performed, live, this session
+
+`npm run build` clean throughout; Deno suite 347/347 unchanged (no
+backend files touched this phase). Auth: reproduced the exact reported
+failure via request interception, before/after; wrong-password path
+against the real backend; full sign-in/refresh/deep-route/sign-out cycle
+via the established magic-link session-injection technique (real
+password never touched, never reset); `/super-admin` blocked for a
+non-`super_admin` account; `sync-fixtures` backend check re-confirmed
+(`super_admin` passes, plain pot-admin still `401`). UX: Pick 5's new
+disabled-reason messaging confirmed live (unsaved local selection only,
+nothing written to the pot). Responsive: 375/390/768/1024/1440px across
+Dashboard, Sign In, Pick 5, Join Competition, and LMS — zero horizontal
+overflow anywhere.

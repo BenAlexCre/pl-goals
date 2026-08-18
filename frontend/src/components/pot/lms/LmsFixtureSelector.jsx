@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Shield, BarChart3 } from 'lucide-react'
+import { BarChart3 } from 'lucide-react'
 import { useLeagueStandings, useTeamForm, fixtureDifficultyFromStanding } from '../../../hooks/useMatchCentre'
 import TeamForm from '../../matchcentre/TeamForm'
 import MatchCentreDrawer from '../../matchcentre/MatchCentreDrawer'
+import TeamCrest from '../../ui/TeamCrest'
 import { toLocalTimeShort } from '../../../utils/time'
+import { formatTeamName } from '../../../utils/format'
 
 const DIFFICULTY_STYLES = {
   easy: 'border-accent/30 bg-accent/10 text-accent',
@@ -11,20 +13,6 @@ const DIFFICULTY_STYLES = {
   difficult: 'border-red-goal/30 bg-red-goal/10 text-red-goal',
 }
 const DIFFICULTY_LABEL = { easy: 'Easy', balanced: 'Balanced', difficult: 'Difficult' }
-
-function Crest({ url, alt, size = 'md' }) {
-  const box = size === 'sm' ? 'h-8 w-8' : 'h-11 w-11'
-  const icon = size === 'sm' ? 20 : 26
-  return (
-    <div className={`flex ${box} shrink-0 items-center justify-center overflow-hidden rounded-xl bg-surface-3`}>
-      {url ? (
-        <img src={url} alt="" className={size === 'sm' ? 'h-6 w-6 object-contain' : 'h-8 w-8 object-contain'} loading="lazy" />
-      ) : (
-        <Shield size={icon} className="text-white/25" aria-label={alt} />
-      )}
-    </div>
-  )
-}
 
 function ordinalSuffix(n) {
   if (!n) return ''
@@ -53,9 +41,9 @@ function TeamOption({ team, standing, form, selected, isSaved, disabled, disable
         disabled:cursor-not-allowed disabled:opacity-35
       `}
     >
-      <Crest url={team?.crest_url} alt={team?.name} />
+      <TeamCrest team={team} size="lg" />
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-white">{team?.short_name || team?.name || 'TBD'}</p>
+        <p className="text-sm font-semibold leading-tight text-white">{formatTeamName(team)}</p>
         <div className={`mt-1 flex items-center justify-center gap-1.5 ${align === 'right' ? 'flex-row-reverse' : ''}`}>
           {standing ? (
             <span className="text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>

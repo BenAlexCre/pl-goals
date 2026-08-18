@@ -92,7 +92,17 @@ export default function Pick5FixturePicker({
                     ) : (
                       squad.map((player) => {
                         const count = getPlayerPickCount(player.player_id)
-                        const disabled = deadlineClosed || (selectedCount >= maxPicks && count === 0)
+                        const atMaxPicks = selectedCount >= maxPicks && count === 0
+                        const disabled = deadlineClosed || atMaxPicks
+                        // Phase 13, Part 21 — two genuinely different
+                        // reasons were collapsed into one boolean before;
+                        // each gets its own real explanation now instead
+                        // of an unexplained grey-out.
+                        const disabledReason = deadlineClosed
+                          ? 'Picks are locked for this gameweek'
+                          : atMaxPicks
+                            ? `${maxPicks}/${maxPicks} selected — remove a player to choose someone else`
+                            : undefined
                         return (
                           <PlayerCard
                             key={`${player.player_id}-${fixture.id}`}
@@ -101,6 +111,7 @@ export default function Pick5FixturePicker({
                             shirtNumber={shirtNumbers?.get(player.player_id) ?? null}
                             selectedCount={count}
                             disabled={disabled}
+                            disabledReason={disabledReason}
                             onSelect={() => onSelectPlayer(player)}
                           />
                         )
