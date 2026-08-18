@@ -1,9 +1,9 @@
 import { Link, NavLink, useLocation } from 'react-router-dom'
-import { Home, Trophy, Users, User, Settings, LogOut, Bell } from 'lucide-react'
+import { Home, Trophy, Users, User, Settings, LogOut, Bell, ShieldCheck } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUiStore } from '../../store/uiStore'
 import { useNotifications } from '../../hooks/useNotifications'
-import { useIsAdmin } from '../../hooks/useAdmin'
+import { useIsAdmin, useIsSuperAdmin } from '../../hooks/useAdmin'
 import Avatar from '../ui/Avatar'
 import NotificationPanel from '../notifications/NotificationPanel'
 
@@ -18,12 +18,17 @@ export default function TopNav() {
   // substitute for it — the route itself blocks a non-admin regardless of
   // whether this link is visible.
   const { isAdmin } = useIsAdmin()
+  const isSuperAdmin = useIsSuperAdmin()
 
   const links = [
     { to: '/dashboard', label: 'Dashboard', icon: Home },
     { to: '/pots', label: 'Pots', icon: Users },
     { to: '/profile', label: 'Profile', icon: User },
     ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
+    // Phase 8D, Part 13 — distinct from "Admin" above: shown only to a true
+    // Super Admin, never to a plain app_admin or pot admin, regardless of
+    // whether they also see the "Admin" link.
+    ...(isSuperAdmin ? [{ to: '/super-admin', label: 'Super Admin', icon: ShieldCheck }] : []),
   ]
 
   return (
@@ -61,7 +66,7 @@ export default function TopNav() {
           })}
         </nav>
 
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
             onClick={() => openDrawer(<NotificationPanel />)}
@@ -76,13 +81,22 @@ export default function TopNav() {
             ) : null}
           </button>
 
-          <Link to="/profile" className="flex items-center gap-2 rounded-xl px-2 py-1 hover:bg-white/5">
-            <Avatar name={profile?.full_name || profile?.username || 'User'} />
-            <div className="hidden sm:block">
-              <div className="text-sm text-white">
-                {profile?.full_name || profile?.username || 'User'}
+          {/* Phase 8D, Part 16 — min-w-0 + truncate fixes a real overflow
+              found live at 768px: an email-as-display-name (the default
+              for an account created before display_name was required) plus
+              a long pathname like /super-admin/users had no width bound at
+              all, so this cluster forced the whole page wider than the
+              viewport instead of the header's own flex row absorbing it.
+              Confirmed via getBoundingClientRect() before this fix, not
+              assumed — the wide Super Admin Users table itself was not the
+              cause (its own overflow-x-auto card correctly contained it). */}
+          <Link to="/profile" className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1 hover:bg-white/5">
+            <Avatar name={profile?.display_name || profile?.username || 'User'} />
+            <div className="hidden min-w-0 sm:block">
+              <div className="max-w-[160px] truncate text-sm text-white">
+                {profile?.display_name || profile?.username || 'User'}
               </div>
-              <div className="text-xs text-white/35">
+              <div className="max-w-[160px] truncate text-xs text-white/35">
                 {location.pathname}
               </div>
             </div>

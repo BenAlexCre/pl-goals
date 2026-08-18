@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { requireVerifiedActiveUser } from '../_shared/requireVerifiedActiveUser.ts'
 import { validateEntryRequest } from './validate.ts'
 
 // Milestone 6, Slice 1 (entry creation) — docs/game-engine.md § GE-5.3.
@@ -55,6 +56,15 @@ Deno.serve(async (req) => {
   if (authError || !userData.user) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), {
       status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
+  // Phase 8D, Part 5 — unverified/banned accounts cannot create entries.
+  const verifiedCheck = await requireVerifiedActiveUser(userClient, userData.user)
+  if (!verifiedCheck.ok) {
+    return new Response(JSON.stringify({ error: verifiedCheck.error }), {
+      status: verifiedCheck.status,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

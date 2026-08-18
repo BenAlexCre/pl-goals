@@ -1,11 +1,12 @@
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
-import { useIsAdmin } from './hooks/useAdmin'
+import { useIsAdmin, useIsSuperAdmin } from './hooks/useAdmin'
 import AppShell from './components/layout/AppShell'
 import Landing from './pages/Landing'
 import SignIn from './pages/auth/SignIn'
 import SignUp from './pages/auth/SignUp'
 import ForgotPassword from './pages/auth/ForgotPassword'
+import VerifyEmail from './pages/auth/VerifyEmail'
 import Dashboard from './pages/Dashboard'
 import PotDetail from './pages/PotDetail'
 import GameweekPage from './pages/GameweekPage'
@@ -13,6 +14,14 @@ import PicksPage from './pages/PicksPage'
 import AdminDashboard from './pages/AdminDashboard'
 import AdminPayments from './pages/AdminPayments'
 import AdminRollovers from './pages/AdminRollovers'
+import DemoCentre from './pages/admin/DemoCentre'
+import DemoGameweek from './pages/admin/DemoGameweek'
+import SuperAdminLayout from './pages/super-admin/SuperAdminLayout'
+import SuperAdminOverview from './pages/super-admin/Overview'
+import SuperAdminUsers from './pages/super-admin/Users'
+import SuperAdminUserDetail from './pages/super-admin/UserDetail'
+import SuperAdminRoles from './pages/super-admin/Roles'
+import SuperAdminAuditLog from './pages/super-admin/AuditLog'
 import Profile from './pages/Profile'
 import NotFound from './pages/NotFound'
 import NotAuthorized from './pages/NotAuthorized'
@@ -67,6 +76,30 @@ function AdminRoute() {
   return <Outlet />
 }
 
+// Phase 8D, Part 11 — tightened from app_admin to super_admin only, a
+// deliberate decision confirmed with the user this session (previously
+// AppAdminRoute/useIsAppAdmin(); Demo Centre generates/destroys real-shaped
+// data at will, which belongs with platform ownership, not general
+// operational admin duties). Also used for the new /super-admin/* area
+// itself, below.
+function SuperAdminRoute() {
+  const { user, loading: authLoading } = useAuth()
+  const isSuperAdmin = useIsSuperAdmin()
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-pitch-950">
+        <Spinner size="lg" />
+      </div>
+    )
+  }
+
+  if (!user) return <Navigate to="/sign-in" replace />
+  if (!isSuperAdmin) return <NotAuthorized />
+
+  return <Outlet />
+}
+
 export default function App() {
   return (
     <>
@@ -75,6 +108,12 @@ export default function App() {
         <Route path="/sign-in" element={<SignIn />} />
         <Route path="/sign-up" element={<SignUp />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+        {/* Public — enable_confirmations = true (config.toml) means signUp()
+            never returns a session, so a freshly-registered visitor lands
+            here signed out. Also reachable while signed in (the
+            UnverifiedBanner's "Verify now" link) — VerifyEmail.jsx itself
+            handles both via useAuth(). */}
+        <Route path="/verify-email" element={<VerifyEmail />} />
         {/* Public: a real invite link must work for a signed-out visitor,
             not just an existing member — see JoinPot.jsx's own note. */}
         <Route path="/join" element={<JoinPot />} />
@@ -96,6 +135,17 @@ export default function App() {
             <Route path="/admin" element={<AdminDashboard />} />
             <Route path="/admin/payments" element={<AdminPayments />} />
             <Route path="/admin/rollovers" element={<AdminRollovers />} />
+          </Route>
+          <Route element={<SuperAdminRoute />}>
+            <Route path="/admin/demo" element={<DemoCentre />} />
+            <Route path="/admin/demo/gameweek" element={<DemoGameweek />} />
+            <Route path="/super-admin" element={<SuperAdminLayout />}>
+              <Route index element={<SuperAdminOverview />} />
+              <Route path="users" element={<SuperAdminUsers />} />
+              <Route path="users/:userId" element={<SuperAdminUserDetail />} />
+              <Route path="roles" element={<SuperAdminRoles />} />
+              <Route path="audit" element={<SuperAdminAuditLog />} />
+            </Route>
           </Route>
           <Route path="/profile" element={<Profile />} />
         </Route>

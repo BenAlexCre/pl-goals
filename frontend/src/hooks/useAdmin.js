@@ -473,3 +473,27 @@ export function useIsAdmin() {
   if (isAppAdmin) return { isAdmin: true, isLoading: false }
   return { isAdmin: potAdminQuery.data ?? false, isLoading: potAdminQuery.isLoading }
 }
+
+// Phase 8C — extracted from useIsAdmin()'s conflated "app admin OR any pot's
+// admin" check. Some surfaces (Demo Centre) are meant for true platform
+// administrators only — a pot organiser who is nobody's app_admin must not
+// see them, unlike the rest of /admin, which deliberately welcomes either.
+// Reads the same app_metadata.role JWT claim useIsAdmin() already does; no
+// new query, no new backend call.
+export function useIsAppAdmin() {
+  const { user } = useAuthStore()
+  // Phase 8D — widened at the SQL level (is_app_admin(), migration 027) to
+  // also accept super_admin, since Super Admin inherits every app_admin
+  // capability. Mirrored here so this hook and the RLS/Edge Function checks
+  // it gates the same surfaces for stay in agreement.
+  return user?.app_metadata?.role === 'app_admin' || user?.app_metadata?.role === 'super_admin'
+}
+
+// Phase 8D — strict super_admin-only check, distinct from the widened
+// useIsAppAdmin() above. Used for the Super Admin area and (per this
+// session's explicit decision) Demo Centre, which must not admit a plain
+// app_admin.
+export function useIsSuperAdmin() {
+  const { user } = useAuthStore()
+  return user?.app_metadata?.role === 'super_admin'
+}

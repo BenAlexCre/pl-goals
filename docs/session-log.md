@@ -13,6 +13,50 @@ from here.
 
 ---
 
+## 2026-08-18 (64) — Phase 8D: Authentication, Identity & Super Admin
+
+**Goal:** production-ready auth/identity (unified Sign In/Sign Up design,
+required display name, real Supabase Auth email verification, unverified-
+account restrictions) plus a genuine Super Admin role — distinct from
+`app_admin`, not a rename of it — with user search/ban/role management and
+a real audit log. Explicit boundary: no homepage/picker/Match Centre/
+payment/Game Engine work.
+
+**Method:** full repository review first (confirmed the user had committed
+part of Phase 8C's own work outside this session, `a6283e4` — left
+untouched); a written plan (roles stay JWT-claim-based and widened, not a
+new `profiles` column; banning reuses GoTrue's native `banned_until`, not a
+custom status column; a genuinely new `admin_audit_log` table) presented
+and approved before any code was written, per two explicit user decisions
+(Super Admin = the user's own real account; Demo Centre tightened to
+`super_admin`-only).
+
+**Shipped**: migration `027` (`is_email_verified()`/`is_banned()`/
+`is_super_admin()`, widened `is_app_admin()`, `pots_insert_authenticated`/
+`redeem_invite()` verification+ban gates, `admin_audit_log`); new
+`super-admin-actions` Edge Function; `requireVerifiedActiveUser()` wired
+into all six competition Edge Functions; rewritten Sign In on a new shared
+`AuthLayout`, new `VerifyEmail.jsx`, updated Sign Up; new `/super-admin/*`
+area (Overview/Users/Roles/Audit); Demo Centre tightened to `super_admin`;
+`config.toml`'s `site_url` and `enable_confirmations` fixed. Full detail,
+including three unrelated pre-existing bugs found and fixed
+(`TopNav.jsx`'s dead `full_name` read, `AdminDashboard.jsx`'s unwidened
+admin check, `AppShell.jsx`'s flexbox overflow) — see
+[decisions.md § Phase 8D](./decisions.md#phase-8d--authentication-identity--super-admin).
+
+**Verified live**: full network-boundary security matrix across all five
+privilege levels; a real ban/unban cycle against a live session token;
+a genuine signup → real Mailpit email → real confirmation link → unlocked
+access, end to end through the actual UI; responsive at 375/390/768/1440px
+(measured, not just eyeballed — this is what surfaced the overflow bugs).
+`benalexcre@gmail.com` provisioned as the first Super Admin via a one-off
+service-role script, documented in
+[DEPLOYMENT.md](./DEPLOYMENT.md#super-admin-provisioning), not a migration.
+Full suite 347/347 unchanged; `deno check`/`npm run build` both clean.
+All test accounts removed by exact ID afterward, zero residue confirmed.
+
+---
+
 ## 2026-08-18 (63) — Phase 8C, Slice 1: Demo Environment Verification & Finalisation
 
 **Goal:** recover from an overnight restart (previous session's Demo Centre/Demo

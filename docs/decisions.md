@@ -5034,3 +5034,241 @@ this one (`provider_name = 'demo'`, zero teams/players/pots/users
 attached, first flagged in the prior session's own entry above) is still
 present — harmless, and still not this teardown's call to force-clean
 per that same entry's own reasoning.
+
+## Phase 8D — Authentication, Identity & Super Admin
+
+Full identity/auth overhaul plus a genuine Super Admin role, distinct from
+`app_admin` (explicitly not a rename — see below), account banning, and a
+real Super Admin audit log. Scope, and the two decisions made before any
+code was written, both confirmed with the user directly:
+
+- The first Super Admin is the user's own real local account
+  (`benalexcre@gmail.com`), provisioned via a one-off service-role script —
+  never hard-coded, never a public signup path (Part 10).
+- **Demo Centre becomes `super_admin`-only**, not `app_admin` — a
+  deliberate tightening of Phase 8C's own boundary, the user's explicit
+  choice when asked to pick between the two reasoned options presented.
+
+**Repository review before any change** (per the user's own explicit
+instruction): `git log`/`git status`/`git diff` showed a new commit,
+`a6283e4`, had landed since the previous session — the user had committed
+part of Phase 8C's demo work themselves (shared demo logic, gameweek
+control, docs) outside this session, leaving the routing/UI glue and the
+rest of the demo generator uncommitted. Left entirely alone, not touched,
+not "cleaned up" — exactly the pre-existing/unrelated-work boundary the
+task set.
+
+### Architecture — why each piece is shaped the way it is
+
+**Roles stay JWT-claim-based (`app_metadata.role`), widened, not
+replaced.** No new `profiles` role column. `is_app_admin()` (SQL,
+`002_rls_policies.sql`) and `useIsAppAdmin()` (frontend) now accept
+`role IN ('app_admin', 'super_admin')` — Super Admin inherits every
+App Admin capability, matching the stated hierarchy, and this is purely
+additive: with no `super_admin` provisioned before this session, it changed
+nothing for any existing `app_admin`. A new `is_super_admin()`/
+`useIsSuperAdmin()` pair does the strict check for the handful of surfaces
+that must never admit a plain `app_admin` (role/ban management, Demo
+Centre). Role grants only ever happen via a service-role Edge Function
+(`auth.admin.updateUserById()`) — identical trust model to today's
+`app_admin`, so this genuinely extends the existing mechanism rather than
+inventing a parallel one, per the user's own explicit "don't just rename
+app_admin, understand it first" instruction.
+
+**Banning reuses Supabase Auth's own native `banned_until`
+(`auth.users`), not a new `profiles.account_status` column.**
+`auth.admin.updateUserById(uid, { ban_duration })` is GoTrue's own
+mechanism — confirmed live, not assumed: it refuses a banned account's
+fresh sign-in outright (`{"error_code":"user_banned","msg":"User is
+banned"}`) with zero custom code. The one real gap — a *currently valid,
+not-yet-expired* JWT must still be blocked immediately, since GoTrue does
+not proactively revoke already-issued tokens on ban — is closed by two new
+`security definer` SQL functions (migration `027`, mirroring the
+already-accepted `handle_new_user()`/`redeem_invite()` pattern of crossing
+the `auth`/`public` schema boundary): `is_email_verified()` and
+`is_banned()`, both reading `auth.users` live on every call, never cached
+in a JWT claim. **A genuine, useful discovery made live, not assumed**:
+GoTrue's own `/auth/v1/user` endpoint (what `userClient.auth.getUser()`
+calls) independently rejects a banned account's request with its own
+`401`, even on an otherwise-still-valid token — confirmed by banning a real
+test user mid-session and reusing their existing token against
+`get-or-create-pick5-entry`, which failed at the *first* auth check
+(`Unauthorized`), before ever reaching the new `is_banned()` gate. This
+means GoTrue's enforcement is broader than assumed going in; `is_banned()`
+remains essential regardless, since it is the only enforcement point for
+the two pure-RLS/RPC paths (`pots_insert_authenticated`, `redeem_invite()`)
+that never call `getUser()` at all.
+
+**`admin_audit_log` is a genuinely new table shape, not a duplicate of
+anything existing.** `020_reinstatement_audit.sql`'s own precedent ("one
+durable fact gets two plain columns, not a table") applies to a single
+fact per row; a heterogeneous event log (ban/unban/role grant/revoke) is a
+different problem with no existing table to extend. `actor_id`/
+`target_user_id` reference `profiles(id)` with the default `NO ACTION` —
+**confirmed live before writing this, not assumed**: this exactly matches
+this codebase's own existing accountability-column precedent
+(`entry_payments.marked_by`, `game_entries.reinstated_by`,
+`demo_sessions.created_by` are all `NO ACTION` too, verified via
+`pg_constraint.confdeltype`) — deleting a user who has ever appeared in the
+audit log requires deleting their audit rows first, the same operational
+reality those columns already have. The migration's own first-draft
+comment overstated this ("never lost if either account is later
+deleted") — caught live during this session's own test-account cleanup
+(a real `23503` FK violation trying to delete a banned-then-unbanned test
+user), and corrected in place rather than left wrong.
+
+**Email verification enforcement is split between two layers, not one**,
+because pot creation and pot joining are *not* Edge Functions — they're a
+plain RLS `INSERT` (`pots_insert_authenticated`) and a `security definer`
+RPC (`redeem_invite()`) respectively, with no Edge Function in front of
+either. Both gained `is_email_verified()`/`is_banned()` checks directly
+(migration `027`, same drop/recreate policy discipline `021`/`022` already
+established for the former). The six real competition-mutating Edge
+Functions (`get-or-create-{pick5,lms,predictor}-entry`,
+`submit-{pick5-picks,lms-pick,predictor-picks}`) share one new helper,
+`_shared/requireVerifiedActiveUser.ts`, called immediately after each
+one's own already-existing `userClient.auth.getUser()` resolution — no
+behavior duplicated six times. **A real assumption caught before it became
+a bug**: the plan draft assumed `banned_until` would be present on the
+`auth.getUser()` response object for free, the same way `email_confirmed_at`
+is; a direct `/auth/v1/user` call before writing the helper showed
+`banned_until` is genuinely absent from that response (privileged,
+admin-only information) — the helper reads `email_confirmed_at` directly
+off the resolved user object (free) and calls `is_banned()` via one small
+RPC (the ban check specifically), not two redundant implementations of
+"is this user allowed to act."
+
+**`config.toml` required two real fixes for verification to work at
+all**, both already flagged as open gaps in a prior session's own
+`DEPLOYMENT.md` entry, now actually fixed: `site_url`/
+`additional_redirect_urls` were still the CLI's scaffold default
+(`127.0.0.1:3000`), not this project's real dev port (`5173`) — a
+confirmation email's link would have redirected to a dead port;
+`[auth.email] enable_confirmations` was `false`, meaning verification
+*effectively did not exist* regardless of anything built on top of it.
+Both flipped; GoTrue restarted via `supabase stop && supabase start`
+(config changes are read at container creation, not live) — confirmed
+data-preserving (`supabase stop`'s default backs up volumes, only
+`--no-backup` deletes them) and actually preserved (7 pre-existing local
+users, migration `027`, all real pots — all still present after restart,
+confirmed by direct count both before and after).
+
+**Existing accounts were not broken by turning verification on.** Every
+one of the 7 pre-existing local accounts, including the newly-chosen
+Super Admin, already had `email_confirmed_at` set (confirmed via direct
+query before assuming a backfill was needed) — no data migration was
+required. Had they been unconfirmed, the deliberate choice would have been
+to leave them that way rather than silently backfill a fact about a real
+account, matching Part 2's own explicit instruction for `display_name`.
+
+### Super Admin capabilities — `super-admin-actions`
+
+One new Edge Function, mirroring `admin-actions/index.ts`'s exact
+auth pattern, independently requiring `app_metadata.role === 'super_admin'`
+strictly (never `app_admin`) on every action: `list_users` (a single
+bounded `auth.admin.listUsers()` scan joined with `profiles`/
+`pot_members` — GoTrue's admin API has no server-side search, and at this
+project's real scale, confirmed live at 7 users, one full scan is simpler
+and more correct than a two-step profiles-then-lookup join, and correctly
+searches email too), `inspect_user`, `ban_user`/`unban_user` (reason
+optional, audit-logged), `grant_app_admin`/`revoke_app_admin` (audit-logged;
+hard-reject `target === caller.id`; hard-reject any target currently
+`super_admin`, since either action would otherwise silently downgrade
+them — a real self-inflicted bug caught during design, not live, by
+reasoning through what `grant_app_admin` on an existing `super_admin`
+would actually do to a single-string role field), `overview_stats`,
+`list_audit_log`. Granting/revoking `super_admin` itself is not an action
+this function accepts at all — see Part 10 reasoning above.
+
+### Demo Centre boundary (Part 11)
+
+Tightened from `app_admin` to `super_admin` strictly, per the user's own
+choice: `AppAdminRoute` → `SuperAdminRoute` (`App.jsx`), all three demo
+Edge Functions' `app_metadata?.role !== 'app_admin'` → `!== 'super_admin'`.
+Live-verified, not assumed: the real `app_admin` test account
+(`bentest5@gmail.com`) now gets `403` from `demo-generate-data`/
+`demo-teardown` where it previously got `200`; the new `super_admin`
+account reaches real business logic (`404` on a fake session id, proving
+the auth gate passed, not a stub). Demo Gameweek functionality itself
+(Phase 8C) untouched — only who may reach it changed.
+
+### Three real, pre-existing bugs found live and fixed, unrelated to any
+### single new feature but surfaced by this session's own work touching
+### the same surfaces
+
+1. **`TopNav.jsx` read `profile?.full_name`** — a column that has never
+   existed on `profiles` (only `display_name`, confirmed via
+   `001_initial_schema.sql`) — so the display name shown in the top nav
+   always silently fell through to `username`. Fixed to `display_name`
+   while reviewing every user-facing display-name surface per Part 2's own
+   instruction.
+2. **`AdminDashboard.jsx`'s "Manual jobs"/`SyncLog` gate was a local,
+   unwidened `role === 'app_admin'` check** (`useAuthStore` read directly,
+   not `useIsAppAdmin()`) — meaning a `super_admin`, who should inherit
+   every `app_admin` capability per the stated hierarchy, would not have
+   seen Manual jobs at all. Fixed to the real, widened hook; Demo Centre's
+   own card on the same page deliberately kept on the strict
+   `useIsSuperAdmin()` check instead, per this session's own Part 11
+   decision.
+3. **`AppShell.jsx`'s `<main>` had no `min-w-0`** — a classic flexbox
+   overflow bug (a flex item's default `min-width` is `auto`, not `0`) that
+   let the new Super Admin Users table (`min-w-[820px]`) force the entire
+   page wider than the viewport at 768px, instead of scrolling inside its
+   own `overflow-x-auto` card. Diagnosed live via
+   `getBoundingClientRect()`/`scrollWidth` comparisons at each ancestor,
+   not guessed — the table's own containing `Card` was already correctly
+   clipping it; the real overflow traced to a second, genuinely separate
+   bug: `TopNav.jsx`'s profile-name/pathname cluster had no width bound at
+   all, and a long email-as-display-name (see the Identity section above)
+   plus a long pathname (`/super-admin/users`) pushed real page-level
+   overflow on its own. Both fixed (`min-w-0` on `AppShell`'s `<main>`,
+   `min-w-0`/`truncate`/`max-w-[160px]` on `TopNav`'s profile cluster) —
+   confirmed via `document.documentElement.scrollWidth ===
+   clientWidth` at 375/390/768/1440px afterward, not assumed fixed from
+   the code change alone.
+
+### Verification performed, live, this session
+
+- `deno check` clean on every new/touched Edge Function; full suite
+  **347/347** unchanged (no test added — every change was to
+  authorization/identity plumbing or frontend, not to code with existing
+  Deno test coverage); `npm run build` clean.
+- Migration `027` applied directly (data-preserving, not `db reset`) and
+  re-verified live via `psql`: all four new/widened SQL functions present,
+  `admin_audit_log` + its `select`-only-for-`super_admin` policy present,
+  `pots_insert_authenticated`'s new `WITH CHECK` clause present verbatim.
+- **Full network-boundary security matrix**, real HTTP calls (GoTrue admin
+  magic-link sessions for existing test accounts — no password resets on
+  real accounts): anon/`403`, normal user/`403`, `app_admin`/`403`,
+  `super_admin`/`200` against `super-admin-actions`; the same four against
+  the now-tightened Demo Centre functions confirms `app_admin` newly
+  rejected, `super_admin` newly admitted. Self-ban and self-role-change
+  both rejected live (`400`, not merely reasoned about). A disposable test
+  account was banned live, its **same still-valid token** immediately
+  showed `is_banned() = true`, `redeem_invite()` refused it, and the
+  Edge Function path independently refused it too (via GoTrue's own layer,
+  see above) — then unbanned, confirmed reversible, then deleted (audit
+  rows removed first, per the FK precedent above), zero residue confirmed.
+- **Real signup → verify → access, end to end, through the actual UI and a
+  real Mailpit-delivered email** (not simulated): signed up
+  `phase8d-e2e@example.test` via the real `/sign-up` form, landed on
+  `/verify-email` showing the correct address, found the real "Confirm
+  your email address" email in Mailpit, extracted and navigated to its
+  real confirmation link (`redirect_to=http://localhost:5173/`, proving
+  the `site_url` fix), confirmed a real session with
+  `email_confirmed_at` now set, confirmed `/dashboard` shows the real
+  typed display name ("Jordan Rivers," not the email) with no
+  `UnverifiedBanner` and no Admin/Super Admin links (correct — an
+  ordinary new user). Test account deleted afterward, zero residue.
+- **Responsive verification, real measurements, not just visual
+  inspection**: `document.documentElement.scrollWidth`/`clientWidth`
+  compared at 375/390/768/1440px for Sign In and the Super Admin Users
+  page (the widest real content in this phase) — found and fixed the two
+  overflow bugs above in the process, then re-confirmed zero overflow at
+  all four sizes afterward.
+
+### Not started, deliberately, per the user's own scope boundary
+
+Homepage/LMS/Score Predictor picker UX, Match Centre features, payment
+redesign, Game Engine redesign — none of Parts 1–21 asked for any of
+these, and none were touched.

@@ -639,22 +639,34 @@ Score Predictor pot.
 
 ## Admin permissions
 
-Two distinct admin levels exist:
+Four distinct privilege levels exist, each a superset of the one below it:
 
+- **Ordinary member** — can only see and act on their own entries within pots
+  they belong to; there is no concept of a member managing another member's
+  picks.
 - **Pot admin** (`pot_members.role = 'admin'`) — scoped to a single pot. Can mark
   entries paid/unpaid, add or remove members of that pot, and update that pot's
   details. The pot's creator is automatically its first admin.
-- **App admin** (`app_metadata.role = 'app_admin'` in the user's JWT, set outside the
-  application — there's no in-app way to grant this role) — a global admin across
-  every pot. Can do everything a pot admin can do, in any pot, plus view the
-  cross-pot `sync_runs` audit log that regular users and pot admins cannot see.
+- **App admin** (`app_metadata.role = 'app_admin'` in the user's JWT, set outside
+  the application) — a global admin across every pot. Can do everything a pot
+  admin can do, in any pot, plus view the cross-pot `sync_runs` audit log and
+  trigger manual sync/compute/settle jobs.
+- **Super Admin** (`app_metadata.role = 'super_admin'`, Phase 8D) — the
+  platform owner. Inherits every App Admin capability (`is_app_admin()` accepts
+  either role), plus platform governance App Admin does *not* have: searching/
+  inspecting any user, banning/suspending accounts, granting or revoking
+  App Admin, viewing the Super Admin audit log, and Demo Centre (Phase 8C),
+  which is Super Admin-only, not App Admin — a deliberate tightening decided
+  this session, since generating/tearing down a full demo environment at
+  will is platform ownership, not routine operational admin duty. A Super
+  Admin cannot grant or revoke Super Admin itself through the app at all —
+  see [Account provisioning & Super Admin](#account-provisioning--super-admin)
+  below.
 
-Ordinary members can only see and act on their own entries within pots they belong
-to; there is no concept of a member managing another member's picks.
-
-Implementation: `is_pot_admin()`/`is_app_admin()` RLS helper functions
+Implementation: `is_pot_admin()`/`is_app_admin()`/`is_super_admin()` RLS
+helper functions
 ([database.md § Row Level Security summary](./database.md#row-level-security-summary)),
-re-checked manually inside `admin-actions`
+re-checked manually inside `admin-actions`/`super-admin-actions`
 ([architecture.md § Security model](./architecture.md#security-model)).
 **Route-level gate, added 2026-08-10** (Launch Readiness Sprint 1A, resolves
 [current-state.md ISSUE-9](./current-state.md#issue-9--admin-has-no-ui-level-role-gate)):
@@ -666,6 +678,63 @@ user with no admin relationship anywhere sees a "Not authorised" page.
 triggers, not pot-scoped like the rest of admin permissions described
 above) is further restricted to app admins only, both in the UI and now
 also server-side — see [decisions.md § Launch Readiness Sprint 1A](./decisions.md#launch-readiness-sprint-1a--security--authorisation).
+`/super-admin/*` and `/admin/demo*` are gated by a separate `SuperAdminRoute`
+guard, strictly `super_admin` — see
+[decisions.md § Phase 8D](./decisions.md#phase-8d--authentication-identity--super-admin)
+for the full architecture.
+
+## Identity & email verification
+
+A player has three distinct identifiers, never conflated:
+
+- **email** — the authentication/contact identifier (`auth.users.email`).
+- **username** — a unique, URL/lookup-safe handle (`profiles.username`,
+  auto-generated if not supplied — unchanged by Phase 8D).
+- **display name** — the human-readable name shown to other players
+  (`profiles.display_name`). Required at signup (Phase 8D) — the sign-up
+  form collects it explicitly, described as "The name other players will
+  see." Accounts created before this requirement may still have their email
+  address as their display name (the old `handle_new_user()` fallback); this
+  is not silently backfilled — renaming a real account's visible identity
+  without asking is not this project's call to make.
+
+A new account must verify its email (Supabase Auth's own confirmation flow,
+`config.toml`'s `[auth.email] enable_confirmations = true`) before it can:
+create a pot, join a pot (via invite code), submit Pick 5/LMS/Predictor
+picks. Browsing/dashboard/profile stay available while unverified. Enforced
+server-side in two places: `pots_insert_authenticated`'s `WITH CHECK` and
+`redeem_invite()` (both migration 027) for pot creation/joining, and a
+shared `requireVerifiedActiveUser()` check inside every entry-creation/
+pick-submission Edge Function. The frontend only shows a dismissible
+reminder banner and disables the relevant buttons — never the sole
+enforcement.
+
+## Account status (banning / suspension)
+
+Uses Supabase Auth's own native ban mechanism (`auth.users.banned_until`,
+set via `auth.admin.updateUserById`) rather than a custom status column —
+GoTrue itself already refuses sign-in and token refresh for a banned
+account. A currently-valid session's very next protected action (create/
+join a pot, submit picks) is still blocked immediately regardless, via the
+same `is_email_verified()`/`is_banned()` security-definer checks verification
+uses — real-time, not dependent on the token expiring. Only a Super Admin
+can ban/unban, and never themselves or another Super Admin
+(`super-admin-actions`, Phase 8D). Banning never deletes or alters a
+player's historical competition data (past picks, standings, payments) —
+only their ability to act going forward.
+
+## Account provisioning & Super Admin
+
+There is no in-app way to grant App Admin *or* Super Admin from a
+zero-privilege account, and no public Super Admin signup path. App Admin can
+be granted/revoked by an existing Super Admin, in-app
+(`super-admin-actions`' `grant_app_admin`/`revoke_app_admin`, Phase 8D) —
+this never accepts `super_admin` as a target role, so it cannot be used to
+mint a second Super Admin even by a compromised Super Admin session. The
+*first* Super Admin (and any subsequent one) is provisioned exclusively by a
+one-off, service-role-only script run directly against the database by a
+trusted operator — see
+[DEPLOYMENT.md § Super Admin provisioning](./DEPLOYMENT.md#super-admin-provisioning).
 
 ## Member invitations
 

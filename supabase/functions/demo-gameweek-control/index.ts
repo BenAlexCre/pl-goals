@@ -39,8 +39,10 @@ Deno.serve(async (req) => {
 
   const { data: userData, error: authError } = await userClient.auth.getUser()
   if (authError || !userData.user) return jsonResponse({ error: 'Unauthorized' }, 401)
-  if (userData.user.app_metadata?.role !== 'app_admin') {
-    return jsonResponse({ error: 'Forbidden — app_admin only' }, 403)
+  // Phase 8D, Part 11 — tightened from app_admin to super_admin only, see
+  // demo-generate-data/index.ts's own comment for the reasoning.
+  if (userData.user.app_metadata?.role !== 'super_admin') {
+    return jsonResponse({ error: 'Forbidden — super_admin only' }, 403)
   }
 
   const body = await req.json().catch(() => ({}))

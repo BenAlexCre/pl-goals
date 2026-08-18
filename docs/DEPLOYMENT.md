@@ -314,16 +314,20 @@ value a migration should never hard-code.
       Vite, not read at runtime, so a value change requires a rebuild.
 - [ ] **Update `supabase/config.toml`'s `[auth]` section for the real
       production domain** before relying on any email-based auth flow
-      (password reset, email confirmation, magic link). Confirmed, not
-      assumed: this project's own `config.toml` still has `site_url =
-      "http://127.0.0.1:3000"` and `additional_redirect_urls =
-      ["https://127.0.0.1:3000"]` — the CLI's untouched scaffold default,
-      not even matching this project's own actual local dev port (Vite runs
-      on `5173`, confirmed throughout live testing). This has gone unnoticed
-      because `auth.email.enable_confirmations = false` locally means no
-      email-redirect flow is ever actually exercised in dev — it will matter
-      immediately in production, where confirmation/reset emails need a
-      correct redirect target.
+      (password reset, email confirmation, magic link). **Fixed for local
+      dev, Phase 8D (2026-08-18)**: `site_url`/`additional_redirect_urls`
+      previously still had `127.0.0.1:3000` — the CLI's untouched scaffold
+      default, not even matching this project's own local dev port (Vite
+      runs on `5173`) — corrected to `http://localhost:5173`. This was
+      invisible locally until this session because
+      `auth.email.enable_confirmations` was `false`, so no email-redirect
+      flow was ever actually exercised; **also flipped to `true` this
+      session** (Part 3, email verification is now a real, enforced
+      requirement — see [business-rules.md § Identity & email
+      verification](./business-rules.md#identity--email-verification)).
+      Production still needs its own real domain substituted for
+      `localhost:5173` before deploying — this fix only corrected the local
+      value, it did not make the setting environment-aware.
 - [ ] **Provision at least one `app_admin`.** Confirmed via grep: there is
       **no** bootstrap script, first-user-is-admin logic, or migration that
       ever sets `app_metadata.role = 'app_admin'` for any user — every
@@ -347,6 +351,34 @@ value a migration should never hard-code.
       -- {"role": null} does (confirmed the hard way during this sprint's
       -- own live testing).
       ```
+
+<a id="super-admin-provisioning"></a>
+- [ ] **Provision exactly one Super Admin (Phase 8D).** Distinct from
+      `app_admin` above, not a rename of it — Super Admin is the platform
+      owner: it inherits every `app_admin` capability (`is_app_admin()`
+      accepts either role) plus user search/ban/role-management and
+      Demo Centre. There is deliberately **no in-app way to grant or revoke
+      `super_admin`** — `super-admin-actions`' `grant_app_admin`/
+      `revoke_app_admin` never accept it as a target role, closing the
+      self-escalation path structurally, not by convention. The only way to
+      create one is this same manual, service-role-only operation
+      `app_admin` already uses, run directly by a trusted operator:
+      ```sql
+      update auth.users
+      set raw_app_meta_data = raw_app_meta_data || '{"role": "super_admin"}'::jsonb
+      where email = '<the platform owner''s real email>';
+      -- confirm: select email, raw_app_meta_data from auth.users where email = '...';
+      -- expect {"role": "super_admin", ...} merged in, not replacing
+      -- provider/providers.
+      ```
+      This project's own local Super Admin was provisioned exactly this way
+      this session, for the account the user identified as the platform
+      owner — see
+      [session-log.md](./session-log.md) for that session's record. Without
+      any Super Admin provisioned, `/super-admin/*` and the tightened
+      `/admin/demo*` routes are unreachable by anyone, including existing
+      `app_admin` accounts — this is the intended, fail-closed default, not
+      a bug to work around.
 - [ ] **Check for pre-existing `supabase_admin`-owned objects** before
       trusting a fresh project's RLS/cron state — see
       [deployment-checklist.md](./deployment-checklist.md) for the exact

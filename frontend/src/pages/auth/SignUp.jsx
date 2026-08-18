@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
+import AuthLayout from '../../components/layout/AuthLayout'
 import Button from '../../components/ui/Button'
-import Card from '../../components/ui/Card'
 import { useUiStore } from '../../store/uiStore'
 
 export default function SignUp() {
@@ -25,6 +25,7 @@ export default function SignUp() {
 
   async function handleSubmit(e) {
     e.preventDefault()
+    if (loading) return
     setLoading(true)
 
     const { data, error } = await supabase.auth.signUp({
@@ -45,52 +46,73 @@ export default function SignUp() {
     }
 
     if (data.session) {
+      // Phase 8D — local email verification is enabled (config.toml), so
+      // this branch is effectively unreachable in this environment
+      // (data.session is only ever non-null when Supabase Auth signs a new
+      // user straight in, which it doesn't do while confirmations are
+      // required) — kept as the correct behavior if verification is ever
+      // disabled for a different environment.
       addToast({ type: 'success', message: 'Account created. You are now signed in.' })
       navigate(redirectTo, { replace: true })
     } else {
-      addToast({
-        type: 'success',
-        message: 'Account created. Check your email if confirmation is enabled.',
-      })
-      navigate(`/sign-in${redirectQuery}`, { replace: true })
+      navigate(`/verify-email?email=${encodeURIComponent(form.email.trim())}${redirectQuery ? `&redirect=${encodeURIComponent(searchParams.get('redirect'))}` : ''}`, { replace: true })
     }
   }
 
   return (
-    <div className="min-h-screen bg-pitch-950 flex items-center justify-center px-4">
-      <Card className="w-full max-w-md p-6">
-        <h1 className="text-2xl font-bold text-white">Create account</h1>
-        <p className="text-sm text-white/40 mt-1">
-          Create your account to join private pots and submit picks.
-        </p>
-
-        <form onSubmit={handleSubmit} className="space-y-4 mt-6">
-          {[
-            ['Display name', 'display_name', 'text'],
-            ['Email', 'email', 'email'],
-            ['Password', 'password', 'password'],
-          ].map(([label, key, type]) => (
-            <div key={key}>
-              <label className="block text-sm text-white/70 mb-1">{label}</label>
-              <input
-                type={type}
-                required
-                value={form[key]}
-                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                className="w-full rounded-xl bg-surface-2 border border-white/8 px-4 py-3 outline-none focus:border-accent/40"
-              />
-            </div>
-          ))}
-
-          <Button fullWidth loading={loading}>Create account</Button>
-        </form>
-
-        <div className="mt-4 text-sm">
-          <Link to={`/sign-in${redirectQuery}`} className="text-accent hover:text-accent-muted">
-            Already have an account? Sign in
-          </Link>
+    <AuthLayout title="Create your account" subtitle="Create your account to join private pots and submit picks.">
+      <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+        <div>
+          <label className="block text-sm text-white/70 mb-1" htmlFor="display_name">Display name</label>
+          <input
+            id="display_name"
+            type="text"
+            autoComplete="nickname"
+            required
+            maxLength={60}
+            value={form.display_name}
+            onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
+            placeholder="e.g. Alex"
+            className="w-full rounded-xl bg-surface-2 border border-white/8 px-4 py-3 outline-none focus:border-accent/40"
+          />
+          <p className="mt-1 text-xs text-white/40">The name other players will see</p>
         </div>
-      </Card>
-    </div>
+
+        <div>
+          <label className="block text-sm text-white/70 mb-1" htmlFor="email">Email</label>
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            required
+            value={form.email}
+            onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+            className="w-full rounded-xl bg-surface-2 border border-white/8 px-4 py-3 outline-none focus:border-accent/40"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm text-white/70 mb-1" htmlFor="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            autoComplete="new-password"
+            required
+            minLength={6}
+            value={form.password}
+            onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+            className="w-full rounded-xl bg-surface-2 border border-white/8 px-4 py-3 outline-none focus:border-accent/40"
+          />
+        </div>
+
+        <Button type="submit" fullWidth loading={loading} disabled={loading}>Create account</Button>
+      </form>
+
+      <div className="mt-4 text-sm">
+        <Link to={`/sign-in${redirectQuery}`} className="text-accent hover:text-accent-muted">
+          Already have an account? Sign in
+        </Link>
+      </div>
+    </AuthLayout>
   )
 }

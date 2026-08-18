@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed: 2026-08-18.
+Last reviewed: 2026-08-18 (Phase 8D — Authentication, Identity & Super Admin).
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,

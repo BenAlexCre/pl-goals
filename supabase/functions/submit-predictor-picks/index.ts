@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { requireVerifiedActiveUser } from '../_shared/requireVerifiedActiveUser.ts'
 import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import { PredictorValidationError } from '../_shared/game-engine/predictor/index.ts'
 import type { GameEntry } from '../_shared/game-engine/types.ts'
@@ -48,6 +49,12 @@ Deno.serve(async (req) => {
   const { data: userData, error: authError } = await userClient.auth.getUser()
   if (authError || !userData.user) {
     return jsonResponse({ error: 'Unauthorized' }, 401)
+  }
+
+  // Phase 8D, Part 5 — unverified/banned accounts cannot submit predictions.
+  const verifiedCheck = await requireVerifiedActiveUser(userClient, userData.user)
+  if (!verifiedCheck.ok) {
+    return jsonResponse({ error: verifiedCheck.error }, verifiedCheck.status)
   }
 
   // Production hardening sprint pattern, applied here from the start (not
