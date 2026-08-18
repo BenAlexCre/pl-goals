@@ -13,6 +13,51 @@ from here.
 
 ---
 
+## 2026-08-18 (67) — Phase 10B: LMS UX + Global Product Polish
+
+**Goal:** LMS had never received the fixture-first UX pass Score Predictor
+just got — full main-page redesign (header, member summary, pick
+visibility/history integrated into the leaderboard, disabled-pick
+copy) — plus a cross-cutting product-polish list: create-pot flow,
+dashboard empty state, nav/admin-visibility split, Manual Jobs
+authorization, season display, sign-out. Hard boundary: Score Predictor's
+own page stays untouched except for genuinely shared components. Full
+detail — see
+[decisions.md § Phase 10B — LMS UX + Global Product Polish](./decisions.md#phase-10b--lms-ux--global-product-polish).
+
+**Shipped:** `LmsPotDetail.jsx` redesigned around a new
+`useLmsCompetitionPicks()` hook and an additive `LeaderboardTable.jsx`
+expand-per-row feature (opt-in props, zero change for Pick 5/Predictor's
+own usage); new `pages/pot/PotManage.jsx` (`/pot/:potId/manage`)
+consolidating `InviteCard`/`MemberList` off every pot-detail page;
+`formatSeasonName()` fixing inconsistent `"2026"` vs `"2025/26"` display
+everywhere; `useOwnsAnyPot()` splitting "Admin" nav visibility from the
+real `useIsAdmin()` authorization boundary; create-pot now navigates
+straight to Manage instead of resetting in place; Dashboard gained a
+real "next gameweek" fallback (`useNextGameweek()`) instead of a bare
+empty state; sign-out now lands on `/`.
+
+**Bugs found and fixed:** `_shared/adminOrCronAuth.ts` was silently
+rejecting `super_admin` (checked only the literal string `'app_admin'`),
+discovered while deliberately narrowing Manual Jobs to `super_admin`-only
+— a real, pre-existing authorization bug, not just a scope change
+(`ISSUE-51`). `TopNav.jsx`'s 768px overflow from the previous session
+(`ISSUE-50`) fixed as part of this phase's own nav work. A third bug (an
+ambiguous `profiles` embed in the new `useLmsCompetitionPicks` query,
+caught live before ever shipping) is documented in decisions.md only —
+never left in a broken state, so no `ISSUE-N`.
+
+**Verified live**: full HTTP auth matrix (anon/plain-user/`app_admin`/
+`super_admin`/cron service-role) against `sync-fixtures`; real-account
+walkthrough of the 51-member Demo LMS pot as its admin and as a
+non-admin member (pick-history expand, RLS-scoped visibility, Manage-page
+gating); a plain pot-admin account confirming Admin nav visible but
+Manual Jobs absent; full create-pot flow end to end; sign-out; responsive
+375/390/768/1440px. `npm run build` clean throughout. Nothing committed
+— per the user's explicit instruction.
+
+---
+
 ## 2026-08-18 (66) — Phase 9: Demo Gameweek / Match Centre UX Enhancement
 
 **Goal:** make the Demo Gameweek feel like a live miniature version of the

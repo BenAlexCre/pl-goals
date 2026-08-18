@@ -1,13 +1,13 @@
 import { NavLink } from 'react-router-dom'
 import { Home, User, Settings, ShieldCheck } from 'lucide-react'
-import { useIsAdmin, useIsSuperAdmin } from '../../hooks/useAdmin'
+import { useOwnsAnyPot, useIsSuperAdmin } from '../../hooks/useAdmin'
 
 export default function BottomNav() {
-  // Launch Readiness Sprint 1A — hiding the link is a small, additional
-  // layer on top of AdminRoute's real protection (App.jsx), never a
-  // substitute for it — the route itself blocks a non-admin regardless of
-  // whether this link is visible.
-  const { isAdmin } = useIsAdmin()
+  // Phase 10B, Part 22 — was useIsAdmin() (app_admin OR any pot's admin);
+  // now pot-ownership only, matching TopNav.jsx's identical change. See
+  // that file's comment — AdminRoute itself is unchanged, this is
+  // visibility only.
+  const { data: ownsAnyPot } = useOwnsAnyPot()
   // Phase 9E — the same Super Admin link TopNav.jsx already has (Phase 8D,
   // Part 13), just missing here on mobile until now.
   const isSuperAdmin = useIsSuperAdmin()
@@ -15,7 +15,7 @@ export default function BottomNav() {
   const links = [
     { to: '/dashboard', label: 'Home', icon: Home },
     { to: '/profile', label: 'Profile', icon: User },
-    ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
+    ...(ownsAnyPot ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
     ...(isSuperAdmin ? [{ to: '/super-admin', label: 'Super Admin', icon: ShieldCheck }] : []),
   ]
 

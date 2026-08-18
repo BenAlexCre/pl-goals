@@ -8,6 +8,7 @@ import Spinner from '../components/ui/Spinner'
 import EmptyState from '../components/ui/EmptyState'
 import Modal from '../components/ui/Modal'
 import { useUiStore } from '../store/uiStore'
+import { formatSeasonName } from '../utils/format'
 
 const GAME_TYPE_LABEL = {
   pick5: 'Pick 5',
@@ -186,7 +187,7 @@ function RolloverPotCard({ pot, onRename, onActivate }) {
 
       <div className="grid grid-cols-2 gap-4 rounded-xl border border-white/8 bg-black/10 p-4 sm:grid-cols-3">
         <InheritedField label="League" value={pot.league?.name ?? '—'} />
-        <InheritedField label="Season" value={pot.season?.name ?? '—'} />
+        <InheritedField label="Season" value={formatSeasonName(pot.season)} />
         <InheritedField label="Entry fee" value={pot.entry_fee} />
         <InheritedField label="Jackpot inherited" value={pot.carry_over_amount} />
         <InheritedField label="Admin fee" value={feeSummary(pot.admin_fee_type, pot.admin_fee_amount, pot.admin_fee_percentage)} />

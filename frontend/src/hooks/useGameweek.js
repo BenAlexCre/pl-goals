@@ -36,6 +36,35 @@ export function useCurrentGameweek() {
   })
 }
 
+// Phase 10B, Part 17/18/19 — Dashboard's "boring empty state" fallback.
+// useCurrentGameweek() only ever finds is_current=true (still none,
+// ISSUE-39, not fixed this phase). This finds the soonest gameweek that
+// isn't already completed — real fixture data, same
+// FIXTURES_WITH_EVENTS_SELECT shape useCurrentGameweek()/useGameweek()
+// already use, no fabrication. Deliberately global (not scoped to any one
+// league), matching useCurrentGameweek()'s own cross-league scope — the
+// real, usable gameweek data today happens to live under a non-"current"
+// league (ISSUE-39's own finding), so scoping this to "the current
+// league" would just rediscover the same empty result.
+export function useNextGameweek(enabled = true) {
+  return useQuery({
+    queryKey: ['gameweek', 'next'],
+    enabled,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('gameweeks')
+        .select(`*, leagues(name), fixtures(${FIXTURES_WITH_EVENTS_SELECT})`)
+        .neq('status', 'completed')
+        .order('deadline_utc', { ascending: true, nullsFirst: false })
+        .limit(1)
+        .maybeSingle()
+      if (error) throw error
+      return data ?? null
+    },
+  })
+}
+
 export function useGameweek(gameweekId) {
   return useQuery({
     queryKey: ['gameweek', gameweekId],

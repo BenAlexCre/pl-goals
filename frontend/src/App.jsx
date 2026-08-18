@@ -29,6 +29,7 @@ import ToastContainer from './components/ui/ToastContainer'
 import Spinner from './components/ui/Spinner'
 import PotManager from './components/pot/PotManager'
 import PotDetailPage from './pages/PotDetail'
+import PotManage from './pages/pot/PotManage'
 import JoinPot from './pages/JoinPot'
 
 function ProtectedRoute({ children }) {
@@ -129,6 +130,7 @@ export default function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/pots" element={<PotManager />} />
           <Route path="/pot/:potId" element={<PotDetail />} />
+          <Route path="/pot/:potId/manage" element={<PotManage />} />
           <Route path="/pot/:potId/gameweek/:gameweekId" element={<GameweekPage />} />
           <Route path="/pot/:potId/picks" element={<PicksPage />} />
           <Route element={<AdminRoute />}>

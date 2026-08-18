@@ -19,7 +19,6 @@ import Modal from '../components/ui/Modal'
 import Button from '../components/ui/Button'
 import LmsPotDetail from '../components/pot/LmsPotDetail'
 import PredictorPotDetail from '../components/pot/PredictorPotDetail'
-import InviteCard from '../components/pot/InviteCard'
 import JackpotCard from '../components/pot/pick5/JackpotCard'
 import EntryStatusBar from '../components/pot/pick5/EntryStatusBar'
 import MemberCard from '../components/pot/pick5/MemberCard'
@@ -28,6 +27,7 @@ import PicksSummaryPanel from '../components/pot/pick5/PicksSummaryPanel'
 import { useAuthStore } from '../store/authStore'
 import { useRemoveMember } from '../hooks/useMembership'
 import { useFixturesForGameweek } from '../hooks/usePredictorEntry'
+import { formatSeasonName } from '../utils/format'
 
 const PAGE_SIZE = 1000
 const MAX_PICKS = 5
@@ -838,19 +838,20 @@ export default function PotDetailPage() {
               {pot.leagues?.name || 'Tournament'}
             </span>
             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
-              {pot.seasons?.name || 'Season'}
+              {formatSeasonName(pot.seasons)}
             </span>
             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60 capitalize">
               {pot.status}
             </span>
           </div>
 
-          {/* Phase 9E, Part 11 — same contextual /admin/payments link as
-              LmsPotDetail.jsx/PredictorPotDetail.jsx, shown only to this
-              pot's own admin. */}
+          {/* Phase 10B, Part 2 — retargeted from /admin/payments straight to
+              this pot's own membership-management page (invite/remove
+              members, payment verification link), same as
+              LmsPotDetail.jsx/PredictorPotDetail.jsx. */}
           {isPotAdmin ? (
             <Link
-              to="/admin/payments"
+              to={`/pot/${potId}/manage`}
               className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
             >
               <Settings size={13} />
@@ -1003,18 +1004,6 @@ export default function PotDetailPage() {
           </div>
         ) : (
           <div className="space-y-5">
-            {isPotAdmin ? (
-              <InviteCard
-                potId={potId}
-                inviteCode={pot.invite_code}
-                existingMemberIds={new Set(members.map((m) => m.user_id))}
-                onChange={async () => {
-                  await loadPot()
-                  await loadMembers()
-                }}
-              />
-            ) : null}
-
             <Card className="p-5">
               <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
                 <div>

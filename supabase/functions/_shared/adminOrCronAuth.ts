@@ -16,15 +16,24 @@
 //      against the function's own service-role secret, the standard way
 //      an Edge Function recognizes "this is genuinely the platform itself
 //      calling," not a rotating per-user token to verify.
-//   2. A signed-in app admin — AdminDashboard.jsx's "Manual jobs" buttons
-//      call these same functions using the signed-in user's own session
-//      token, not the service-role key (confirmed by reading
-//      hooks/useAdmin.js's useTriggerSync) — deliberately not broken by
-//      this fix, per the explicit instruction not to lock out that
-//      existing, real feature. Gated on `app_metadata.role === 'app_admin'`,
-//      the same claim admin-actions/index.ts already checks.
-// Anything else (anon key, a signed-in non-admin user, no Authorization
-// header at all) is rejected.
+//   2. A signed-in super admin — AdminDashboard.jsx's "Manual jobs"
+//      buttons call these same functions using the signed-in user's own
+//      session token, not the service-role key (confirmed by reading
+//      hooks/useAdmin.js's useTriggerSync).
+// Anything else (anon key, a signed-in non-admin user, a plain app_admin,
+// no Authorization header at all) is rejected.
+//
+// Phase 10B, Part 23 — tightened from `role === 'app_admin'` to
+// `role === 'super_admin'`, the user's own explicit instruction (Manual
+// Jobs triggers platform-wide sync/scoring/settlement, reserved for
+// platform ownership — same reasoning already applied to Demo Centre in
+// Phase 8D). This also fixes a real, confirmed-live mismatch the old
+// check had: it accepted the literal string 'app_admin' only, so a
+// super_admin — who is supposed to inherit every app_admin capability —
+// was actually being REJECTED by this exact check the whole time,
+// despite AdminDashboard.jsx's frontend showing them the buttons. That
+// mismatch is now moot: this checks `super_admin` only, matching what
+// the frontend gate now also requires.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -44,5 +53,5 @@ export async function isAuthorizedAdminOrCron(req: Request): Promise<boolean> {
   const { data, error } = await userClient.auth.getUser()
   if (error || !data.user) return false
 
-  return data.user.app_metadata?.role === 'app_admin'
+  return data.user.app_metadata?.role === 'super_admin'
 }

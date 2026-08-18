@@ -474,6 +474,35 @@ export function useIsAdmin() {
   return { isAdmin: potAdminQuery.data ?? false, isLoading: potAdminQuery.isLoading }
 }
 
+// Phase 10B, Part 22 — nav-link visibility only, deliberately distinct from
+// useIsAdmin() above. useIsAdmin() (app_admin OR administers any pot) stays
+// exactly as-is: it's the real AdminRoute authorization boundary, and a
+// plain app_admin genuinely keeps their cross-pot /admin/payments CSV-verify
+// capability regardless of whether they personally own a pot — that's not
+// this hook's call to take away. This one answers a narrower, purely
+// presentational question: "does the TopNav/BottomNav 'Admin' link make
+// sense for this specific person" — which the user's own explicit
+// instruction says should be pot ownership alone, not the app_admin claim.
+// Hiding the link for an app_admin who owns nothing doesn't block them from
+// typing the URL — AdminRoute (unchanged) still admits them, correctly.
+export function useOwnsAnyPot() {
+  const { user } = useAuthStore()
+  return useQuery({
+    queryKey: ['owns-any-pot', user?.id],
+    enabled: !!user?.id,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('pot_members')
+        .select('pot_id')
+        .eq('user_id', user.id)
+        .eq('role', 'admin')
+        .limit(1)
+      if (error) throw error
+      return (data?.length ?? 0) > 0
+    },
+  })
+}
+
 // Phase 8C — extracted from useIsAdmin()'s conflated "app admin OR any pot's
 // admin" check. Some surfaces (Demo Centre) are meant for true platform
 // administrators only — a pot organiser who is nobody's app_admin must not

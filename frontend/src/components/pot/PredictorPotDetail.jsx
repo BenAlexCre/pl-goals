@@ -24,6 +24,7 @@ import { useLeaderboard } from '../../hooks/useLeaderboard'
 import { usePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
+import { formatSeasonName } from '../../utils/format'
 
 // Score Predictor "pot home" — the Predictor sibling of LmsPotDetail.jsx,
 // same reasoning for staying its own component rather than a branch inside
@@ -141,7 +142,7 @@ export default function PredictorPotDetail({ pot, potId }) {
               {pot.name}
             </h1>
             <p className="mt-1 text-sm text-white/45">
-              {pot.leagues?.name} · {pot.seasons?.name}
+              {pot.leagues?.name} · {formatSeasonName(pot.seasons)}
             </p>
           </div>
 

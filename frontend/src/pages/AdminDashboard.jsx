@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { CreditCard, RefreshCw, Sparkles } from 'lucide-react'
-import { useTriggerSync, useSyncLogs } from '../hooks/useAdmin'
-import { useIsAppAdmin, useIsSuperAdmin } from '../hooks/useAdmin'
+import { useTriggerSync, useSyncLogs, useIsSuperAdmin } from '../hooks/useAdmin'
 import Card from '../components/ui/Card'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
@@ -11,23 +10,15 @@ import { useUiStore } from '../store/uiStore'
 export default function AdminDashboard() {
   const addToast = useUiStore((s) => s.addToast)
   const { data: logs = [] } = useSyncLogs()
-  // Manual jobs (sync-fixtures/compute-scores/settle-gameweek) are backend-
-  // gated to app_admin only (Launch Readiness Sprint 1A, resolves ISSUE-26)
-  // — a pot organiser who reaches this page (AdminRoute admits any admin of
-  // any pot, not just app admins, since this page also links to Payment
-  // verification/Rollover management, which genuinely are for any
-  // organiser) would otherwise see buttons that always 401. Hiding the
-  // section for them is a small, security-motivated UX correction, not a
-  // new feature — the real protection is the backend check either way.
-  //
-  // Phase 8D — this used to be a local, unwidened `role === 'app_admin'`
-  // check (not useIsAppAdmin()), which meant a super_admin — who should
-  // inherit every app_admin capability per the stated role hierarchy —
-  // would NOT have seen Manual jobs at all. Fixed by using the real,
-  // widened hook. Demo Centre is intentionally kept on the strict
-  // super_admin-only check (this session's own explicit decision, Part 11)
-  // — the one card here that does NOT follow the widened check.
-  const isAppAdmin = useIsAppAdmin()
+  // Phase 10B, Part 23 — Manual jobs (sync-fixtures/compute-scores/
+  // settle-gameweek/sync-live-events) narrowed from "any app_admin" to
+  // super_admin-only, the user's own explicit instruction, enforced at
+  // both levels: this frontend gate AND `_shared/adminOrCronAuth.ts`'s
+  // backend check (now `role === 'super_admin'`, see that file's own
+  // comment). Payment verification/Rollover management below are
+  // unconditional on this page — they're correctly open to any pot
+  // organiser via AdminRoute itself, not gated locally, unaffected by
+  // this change.
   const isSuperAdmin = useIsSuperAdmin()
 
   const syncFixtures   = useTriggerSync('sync-fixtures')
@@ -92,7 +83,7 @@ export default function AdminDashboard() {
           </Card>
         )}
 
-        {isAppAdmin && (
+        {isSuperAdmin && (
           <Card className="p-4 space-y-3">
             <h2 className="text-sm font-semibold text-white">Manual jobs</h2>
             <Button fullWidth variant="secondary" loading={syncFixtures.isPending} onClick={() => runSync(syncFixtures, 'Fixture sync')}>
@@ -110,7 +101,7 @@ export default function AdminDashboard() {
           </Card>
         )}
 
-        {isAppAdmin && <SyncLog logs={logs} />}
+        {isSuperAdmin && <SyncLog logs={logs} />}
       </div>
     </div>
   )

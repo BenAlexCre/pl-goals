@@ -1,30 +1,43 @@
-import { Link, NavLink, useLocation } from 'react-router-dom'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { Home, Trophy, Users, User, Settings, LogOut, Bell, ShieldCheck } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUiStore } from '../../store/uiStore'
 import { useNotifications } from '../../hooks/useNotifications'
-import { useIsAdmin, useIsSuperAdmin } from '../../hooks/useAdmin'
+import { useOwnsAnyPot, useIsSuperAdmin } from '../../hooks/useAdmin'
 import Avatar from '../ui/Avatar'
 import NotificationPanel from '../notifications/NotificationPanel'
 
 export default function TopNav() {
   const { profile, signOut } = useAuthStore()
   const location = useLocation()
+  const navigate = useNavigate()
+
+  // Phase 10B, Part 16 — was leaving the user on /sign-in, which
+  // ProtectedRoute's own redirect only produces because the route they
+  // signed out FROM happened to require auth; signing out is a
+  // deliberate exit, not a login prompt, so it should land on the public
+  // landing page instead.
+  async function handleSignOut() {
+    await signOut()
+    navigate('/')
+  }
   const openDrawer = useUiStore((s) => s.openDrawer)
   const { data: notifications = [] } = useNotifications()
   const unreadCount = notifications.filter((n) => !n.read_at).length
-  // Launch Readiness Sprint 1A — hiding the link is a small, additional
-  // layer on top of AdminRoute's real protection (App.jsx), never a
-  // substitute for it — the route itself blocks a non-admin regardless of
-  // whether this link is visible.
-  const { isAdmin } = useIsAdmin()
+  // Phase 10B, Part 22 — was useIsAdmin() (app_admin OR any pot's admin);
+  // now pot-ownership only (useOwnsAnyPot()), per the explicit "don't use
+  // is_app_admin for this" instruction. AdminRoute (App.jsx) itself is
+  // unchanged — still admits any app_admin regardless of pot ownership —
+  // so this is visibility only, same "small additional layer, never the
+  // real protection" precedent as before.
+  const { data: ownsAnyPot } = useOwnsAnyPot()
   const isSuperAdmin = useIsSuperAdmin()
 
   const links = [
     { to: '/dashboard', label: 'Dashboard', icon: Home },
     { to: '/pots', label: 'Pots', icon: Users },
     { to: '/profile', label: 'Profile', icon: User },
-    ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
+    ...(ownsAnyPot ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
     // Phase 8D, Part 13 — distinct from "Admin" above: shown only to a true
     // Super Admin, never to a plain app_admin or pot admin, regardless of
     // whether they also see the "Admin" link.
@@ -43,7 +56,15 @@ export default function TopNav() {
           </div>
         </Link>
 
-        <nav className="hidden md:flex items-center gap-2">
+        {/* Phase 10B — ISSUE-50 fix: min-w-0 lets this row actually shrink
+            (a flex item defaults to min-width:auto, refusing to shrink
+            below its own content) instead of forcing the page wider once
+            five links (Dashboard/Pots/Profile/Admin/Super Admin) don't
+            fit at once — confirmed live at 768px for a pot-owning
+            super_admin. overflow-x-auto is the fallback if it still
+            doesn't fit at very narrow desktop widths: the nav scrolls
+            internally rather than the whole page. */}
+        <nav className="hidden md:flex min-w-0 items-center gap-1 overflow-x-auto lg:gap-2">
           {links.map((link) => {
             const Icon = link.icon
             return (
@@ -52,7 +73,7 @@ export default function TopNav() {
                 to={link.to}
                 className={({ isActive }) =>
                   [
-                    'inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm transition',
+                    'inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-sm transition lg:gap-2 lg:px-4',
                     isActive
                       ? 'bg-white/10 text-white'
                       : 'text-white/60 hover:bg-white/5 hover:text-white',
@@ -104,7 +125,7 @@ export default function TopNav() {
 
           <button
             type="button"
-            onClick={signOut}
+            onClick={handleSignOut}
             className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-white/65 hover:bg-white/5 hover:text-white"
           >
             <LogOut size={16} />

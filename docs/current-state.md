@@ -586,30 +586,6 @@ in place). The underlying data gap itself is still open.
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
 
-#### ISSUE-50 — `TopNav.jsx`'s "Sign out" button overflows the viewport at 768px for a `super_admin` account
-**Discovered 2026-08-18, Phase 9 (Demo Gameweek verification)**, while running
-the standard 375/390/768/1440px responsive sweep — confirmed live via direct
-`getBoundingClientRect()` measurement, not eyeballed: at exactly 768px,
-signed in as the real `super_admin` account (five nav links visible —
-Dashboard/Pots/Profile/Admin/Super Admin, one more than a plain `app_admin`
-or pot admin ever sees), the "Sign out" button's right edge sits at 793px
-against a 768px viewport (`document.documentElement.scrollWidth` 793 vs
-`clientWidth` 763) — a real ~25px horizontal overflow, reproduced twice,
-confirmed absent for the same account/breakpoint once fewer nav links are
-present. Initially misattributed to the Demo Gameweek page's own new pot
-cards (that page was open when first found) — re-verified on the plain
-`/dashboard` page with zero demo content once the actual cause was
-narrowed down via `getBoundingClientRect()`, confirming this is a
-`TopNav.jsx` layout issue, not anything in this phase's own new code.
-Distinct from Phase 8D's own `TopNav.jsx` fix (the profile-info block's
-`min-w-0`/`truncate`) — that fix's own verification pass evidently never
-happened to test 768px with all five super_admin-only nav links visible at
-once. **Status: confirmed, not fixed** — `TopNav.jsx` itself is out of
-this phase's scope (Demo Gameweek/Match Centre UX only); needs its own
-small follow-up (likely the same `min-w-0`/`flex-shrink` treatment already
-proven on this file, extended to the nav link row or the whole header
-flex container).
-
 #### ISSUE-27 — `PotDetail.jsx`'s data-loading effects have no stale-response guard
 **Discovered 2026-08-05**, during the production hardening sprint audit.
 `PotDetail.jsx` has five separate `useEffect` hooks driving async loads
@@ -795,6 +771,64 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-51 — `_shared/adminOrCronAuth.ts` rejected `super_admin`, accepting only the literal string `'app_admin'`
+**Discovered and resolved 2026-08-18, Phase 10B (LMS UX + Global Product
+Polish).** Found while deliberately narrowing Manual Jobs
+(`compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures`)
+from `app_admin` to `super_admin`-only, per the user's own explicit
+instruction (Manual Jobs triggers platform-wide sync/scoring/settlement,
+reserved for platform ownership — the same reasoning already applied to
+Demo Centre in Phase 8D). Reading the existing check before changing it
+(`isAuthorizedAdminOrCron()`'s final line,
+`data.user.app_metadata?.role === 'app_admin'`) revealed this was already
+narrower than intended: a `super_admin` — who is supposed to inherit every
+`app_admin` capability, per Phase 8D's own stated hierarchy — was being
+silently **rejected** by this exact check the whole time, despite
+`AdminDashboard.jsx`'s frontend gate (`useIsAppAdmin()`, which does accept
+`super_admin`) showing them the Manual Jobs buttons. A real, confirmed,
+pre-existing authorization bug, not theoretical: any `super_admin`
+clicking Manual Jobs got a `401 Unauthorized` from the Edge Function.
+**Fixed** by the same edit this phase's own deliberate narrowing already
+required — changing the check to `role === 'super_admin'` closes both the
+narrowing and the mismatch at once. **Verified live** via a full HTTP
+matrix against `sync-fixtures` with real tokens: anon key → `401`; a plain
+signed-in user → `401`; a real `app_admin` account → `401` (confirms the
+deliberate narrowing); a real `super_admin` account → passed the auth
+check (reached the function's own downstream parameter validation, not
+the `401` gate); the platform's own cron service-role key → also passed
+the auth check the same way. `AdminDashboard.jsx`'s frontend gate was
+switched from `useIsAppAdmin()` to the stricter `useIsSuperAdmin()` in the
+same change, confirmed live: a plain `app_admin` test account no longer
+sees the Manual Jobs section at all, only Payment verification/Rollover
+management.
+
+#### ISSUE-50 — `TopNav.jsx`'s "Sign out" button overflows the viewport at 768px for a `super_admin` account
+**Discovered 2026-08-18, Phase 9 (Demo Gameweek verification)**, while running
+the standard 375/390/768/1440px responsive sweep — confirmed live via direct
+`getBoundingClientRect()` measurement, not eyeballed: at exactly 768px,
+signed in as the real `super_admin` account (five nav links visible —
+Dashboard/Pots/Profile/Admin/Super Admin, one more than a plain `app_admin`
+or pot admin ever sees), the "Sign out" button's right edge sits at 793px
+against a 768px viewport (`document.documentElement.scrollWidth` 793 vs
+`clientWidth` 763) — a real ~25px horizontal overflow, reproduced twice,
+confirmed absent for the same account/breakpoint once fewer nav links are
+present. Initially misattributed to the Demo Gameweek page's own new pot
+cards (that page was open when first found) — re-verified on the plain
+`/dashboard` page with zero demo content once the actual cause was
+narrowed down via `getBoundingClientRect()`, confirming this is a
+`TopNav.jsx` layout issue, not anything in that phase's own new code.
+Distinct from Phase 8D's own `TopNav.jsx` fix (the profile-info block's
+`min-w-0`/`truncate`) — that fix's own verification pass evidently never
+happened to test 768px with all five super_admin-only nav links visible at
+once. **Resolved 2026-08-18, Phase 10B**: the nav link row itself
+(`<nav>` in `TopNav.jsx`) is now `min-w-0 overflow-x-auto` with each
+`NavLink` set to `shrink-0` and slightly tighter padding/gap below the
+`lg` breakpoint, instead of relying on the nav row refusing to shrink.
+Re-verified live at 375/390/768/1440px on the real `super_admin` account
+(all five nav links visible): zero horizontal overflow at every
+breakpoint, confirmed via `document.documentElement.scrollWidth` vs
+`clientWidth`.
 
 #### ISSUE-49 — `FixtureCard.jsx`'s team row had no width constraint, overflowing with longer names or a full form history
 **Discovered and resolved 2026-08-18, Phase 9 (Demo Gameweek verification).**

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Users, PlusCircle, ChevronDown } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useCreatePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
+import { formatSeasonName } from '../../utils/format'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -188,12 +189,12 @@ const FIELD_ORDER = [
 
 export default function PotManager() {
   const { user } = useAuthStore()
+  const navigate = useNavigate()
   const [pots, setPots] = useState([])
   const [leagues, setLeagues] = useState([])
   const [gameweeksForLeague, setGameweeksForLeague] = useState([])
   const [gameweeksLoading, setGameweeksLoading] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [message, setMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
 
   // Basics
@@ -646,10 +647,9 @@ export default function PotManager() {
 
     setErrors({})
     setErrorMessage('')
-    setMessage('')
 
     try {
-      await createPot.mutateAsync({
+      const pot = await createPot.mutateAsync({
         name: name.trim(),
         description: description.trim(),
         seasonId: selectedLeague.season_id,
@@ -674,9 +674,15 @@ export default function PotManager() {
         predictorScorerBonusPoints: Number(predictorScorerBonusPoints),
       })
 
+      // Phase 10B, Part 13 — was resetForm() + a bottom-of-page toast,
+      // leaving the organiser staring at a now-blank form with their new
+      // pot buried in the list below. The competition itself is the
+      // success state: land directly on its Manage page (invite code/
+      // add-by-username, both immediately actionable) rather than making
+      // "Invite players" a second thing they have to go find.
       resetForm()
-      setMessage('Pot created successfully')
       await loadPots()
+      navigate(`/pot/${pot.id}/manage`, { state: { justCreated: true } })
     } catch (err) {
       // Server/unexpected failure — exactly what toasts are reserved for.
       setErrorMessage(err.message || 'Failed to create pot')
@@ -778,14 +784,14 @@ export default function PotManager() {
                   <FieldError message={errors.league} />
 
                   {selectedLeague ? (
-                    <p className={hintClass}>Season: {selectedLeague.seasons?.name || 'Unknown'}</p>
+                    <p className={hintClass}>Season: {formatSeasonName(selectedLeague.seasons)}</p>
                   ) : null}
                 </div>
               ) : selectedLeague ? (
                 <p className={hintClass}>
                   League: {selectedLeague.name}
                   {selectedLeague.country ? ` (${selectedLeague.country})` : ''} · Season:{' '}
-                  {selectedLeague.seasons?.name || 'Unknown'}
+                  {formatSeasonName(selectedLeague.seasons)}
                 </p>
               ) : null}
 
@@ -1133,7 +1139,7 @@ export default function PotManager() {
 
                   <div className="mt-3 space-y-1 text-sm text-white/40">
                     <div>League / tournament: {row.pots?.leagues?.name || '-'}</div>
-                    <div>Season: {row.pots?.seasons?.name || '-'}</div>
+                    <div>Season: {formatSeasonName(row.pots?.seasons)}</div>
                   </div>
                 </Card>
               </Link>
@@ -1142,7 +1148,6 @@ export default function PotManager() {
         )}
       </section>
 
-      {message ? <Toast message={message} type="success" /> : null}
       {errorMessage ? <Toast message={errorMessage} type="error" /> : null}
     </div>
   )

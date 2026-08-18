@@ -5490,3 +5490,162 @@ role sees) — `TopNav.jsx` itself was never touched this phase. See
 Any change to Game Engine/scoring/settlement/payment/LMS/Predictor rules,
 eligibility, or deadlines — the entire phase worked on top of data the
 existing engine already produces correctly.
+
+## Phase 10B — LMS UX + Global Product Polish
+
+LMS had never received the fixture-first UX pass Score Predictor just got
+(Phase 9B/the immediately preceding session), plus a cross-cutting list of
+product-polish items (create-pot flow, dashboard, nav, season display,
+sign-out). Explicit user scope rule going in: Score Predictor
+(`PredictorPotDetail.jsx`, `PredictorFixtureCard.jsx`) is the just-completed
+baseline and stays untouched except where a genuinely shared component
+changes underneath it — every such case is called out below.
+
+### Architecture confirmed by reading the actual code/DB before planning
+
+- **LMS pick visibility was already RLS-safe.** `lms_team_picks_select_member`
+  and `game_entry_lms`'s own SELECT policy both use `is_pot_member(pot_id)` —
+  any pot member can already read any other member's picks for that pot
+  (confirmed via direct `pg_policy` introspection). Showing "who picked
+  what" is a pure frontend addition, not a security change.
+- **The "Join competition" bug on a pot the viewer owns**: `LmsPotDetail.jsx`
+  gated the button on `!entry` — whether *this specific user* has created
+  their own `game_entries` row — which is a participation flag, not an
+  ownership flag. A pot's own admin is added to `pot_members` at creation
+  but never gets an auto-created entry, so they saw the identical "Join
+  competition" copy as a total stranger. Fixed by keeping the exact same
+  `getOrCreateEntry` mechanic (no new auto-creation behavior — that would
+  silently create entries for every admin who merely views the page, an
+  unreviewed side effect) and changing only the button copy to "Start
+  playing" when the viewer is already a pot member.
+- **The "no start gameweek configured" dead end**: traced to
+  `get-or-create-lms-entry/validate.ts`'s `checkEntryWindow()`, a 403 when
+  `pot.start_gameweek_id IS NULL`. Confirmed live that every real
+  (non-rollover) LMS pot already has a non-null value — `PotManager.jsx`'s
+  own create-form validation already requires it — so this only ever fires
+  for a Game-Engine-created **rollover** pot, deliberately left with no
+  start gameweek for the organiser to set via Rollover Management
+  (documented design, see the LMS wipeout-resolution decision above).
+  `LmsPotDetail.jsx` now checks `pot.start_gameweek_id` up front and shows
+  a clear "needs setup" state with a direct link to `/admin/rollovers` for
+  the pot's own admin, instead of ever reaching that 403.
+- **Season display** (`seasons.name`) is free text and the live data is
+  already inconsistent (`"2025/26"` for one season, a bare `"2026"` for
+  another, one row with `year_end === year_start`). Added
+  `formatSeasonName(season)` to `utils/format.js` — derives `"2026/27"`
+  from `year_start` alone, never trusting the free-text `name` — and
+  switched every display call site to it. No database change.
+- **Admin nav visibility vs. Manual Jobs are two different, deliberately
+  different fixes.** `useIsAdmin()` (`is_app_admin` OR administers any pot)
+  stays exactly as-is — it still gates `AdminRoute` and `/admin/payments`'s
+  cross-pot CSV-verify capability, which a plain `app_admin` genuinely
+  keeps regardless of pot ownership. Only the **nav link visibility**
+  changed: a new `useOwnsAnyPot()` hook (a pure `pot_members.role='admin'`
+  check, no `app_admin` shortcut) now drives whether `TopNav.jsx`/
+  `BottomNav.jsx` show "Admin" — visibility only, never the security
+  boundary. **Manual Jobs** is a real, separate, two-level tightening from
+  `app_admin` to `super_admin`-only, frontend (`AdminDashboard.jsx`) and
+  backend (`_shared/adminOrCronAuth.ts`) — see `ISSUE-51` in
+  `current-state.md` for the real, pre-existing authorization bug this
+  same edit incidentally fixed (a `super_admin` was being rejected by the
+  old check the whole time).
+- **Dashboard's dead empty state**: `useCurrentGameweek()` only ever finds
+  a gameweek with `is_current = true` (still none locally, `ISSUE-39`, not
+  fixed this phase). A new `useNextGameweek()` (same fixtures+events shape
+  `useGameweek.js` already builds, ordered by soonest non-completed
+  `deadline_utc` instead of filtering `is_current`) gives the homepage a
+  real "what's coming next" fallback with real fixture data — never a
+  fabricated gameweek.
+- **"Manage" had nowhere to put member management** — it was a bare `Link`
+  to `/admin/payments`, a cross-pot payment tool, not per-pot membership.
+  A new page, `pages/pot/PotManage.jsx` (route `/pot/:potId/manage`),
+  relocates the already-working `InviteCard`/`MemberList` here from every
+  pot-detail page's own body — consolidation, not new functionality. A
+  non-admin landing here directly sees the member list read-only (never a
+  hard block) since membership isn't secret to fellow members; invite
+  generation and removal stay admin-only.
+
+### LMS main page redesign (`LmsPotDetail.jsx`)
+
+Header now states the rule inline ("a loss or draw eliminates you, and no
+team can ever be picked twice" — quoting `business-rules.md`'s own
+Elimination rule, not invented copy), the viewer's alive/eliminated status,
+and a compact member summary (count, alive/eliminated split, "Manage
+members" link) replacing the large inline `InviteCard`/`MemberList` block.
+The fixture-first picker (`LmsFixtureSelector.jsx`) is structurally
+unchanged; it gained one small additive prop, `isSaved`, distinguishing a
+locked-in saved pick ("SAVED") from a merely-selected-but-not-yet-submitted
+one ("SELECTED") — both previously rendered identically. "Previously used
+teams" (a flat pill list of the viewer's own picks) is replaced by
+integrating pick visibility into the leaderboard itself, per the user's own
+suggestion, rather than a second parallel list:
+
+- New hook `useLmsCompetitionPicks(potId, currentGameweekId)`
+  (`useLmsEntry.js`) — one query joining `game_entries` (season-scoped,
+  `gameweek_id IS NULL`) → `game_entry_lms` → `lms_team_picks` → `profiles`
+  for every entrant in the pot at once.
+- `LeaderboardTable.jsx` gained two new, optional props — `lmsPickData`
+  (a `Map` keyed by `user_id`) and `gameweeks` — purely additive: every
+  existing call site (`GameweekPage.jsx`, `PredictorPotDetail.jsx`, Pick
+  5's own leaderboard) omits them and renders exactly as before. When
+  present and `gameType === 'last_man_standing'`, each row becomes
+  clickable, expanding to that member's full gameweek-by-gameweek pick
+  history, and the row's own label switches from "Still alive" to
+  "Picked: {team}" / "No pick yet this gameweek". This is the one shared
+  component this phase touched that Score Predictor's own page also
+  renders — verified live afterward that its rendering is byte-for-byte
+  unchanged (its call site never passes the new props, so `showLmsPicks`
+  is always `false` there).
+
+**A real bug found and fixed while building `useLmsCompetitionPicks`,
+before it ever shipped**: the initial query embedded `profiles` directly
+(`profiles(id, username, display_name, avatar_url)`), which PostgREST
+rejected outright — `game_entries` has two separate foreign keys into
+`profiles` (`user_id` and `reinstated_by`), so an unqualified embed is
+ambiguous. Fixed by qualifying the embed with the explicit constraint name
+(`profiles!game_entries_user_id_fkey(...)`), confirmed via
+`pg_get_constraintdef`. Caught during this phase's own live verification
+(a `count: 50` query returning zero members' picks, live in the browser)
+before the redesign was ever considered done, not left in the shipped
+code — no `ISSUE-N` entry for this one, since it never left the working
+draft in a broken state.
+
+### Verification performed, live, this session
+
+- `npm run build` clean after every slice.
+- Full HTTP auth matrix against `sync-fixtures` (anon / plain user /
+  `app_admin` / `super_admin` / the platform's own cron service-role key) —
+  see `ISSUE-51`.
+- Real-account walkthrough via the established magic-link
+  session-injection technique (never a real password reset): the 51-member
+  Demo LMS pot's own admin (`super_admin`) — header, "Start playing" copy,
+  member summary, leaderboard pick-history expand (`GW1: Ashford`, `GW2:
+  Elmhurst` for a real entrant), `/pot/:potId/manage` with full
+  `InviteCard`/`MemberList`/Payments; a non-admin member of the same pot —
+  no "Manage" link, no "Manage members" link, `/manage` read-only, correct
+  "Eliminated in GW1" message, pick history still visible (confirms the
+  RLS read is genuinely member-wide, not admin-only); a plain pot-admin
+  account (`app_admin`-free, no `super_admin`) — "Admin" nav visible, no
+  "Super Admin" link, `/admin` reachable, Manual Jobs section absent
+  (Payment verification/Rollover management only).
+- Full create-pot flow, live, as a plain user: filled the form, chose Last
+  Man Standing, submitted — landed directly on `/pot/:id/manage` with the
+  dismissible "ready" banner, `InviteCard`, `MemberList (1)`, Payments card
+  all present; navigated back to the pot's own page and confirmed no
+  needs-setup dead end (the create form's own validation already supplies
+  a start gameweek) and a clean "No leaderboard data yet" empty state.
+- Sign-out, live: lands on `/`, not `/sign-in`.
+- Responsive: 375/390/768/1440px on the LMS main page (51-member pot, the
+  heaviest real page this phase touched), zero horizontal overflow at any
+  breakpoint — including 768px with all five `super_admin` nav links
+  visible, confirming `ISSUE-50`'s fix holds under this phase's own new
+  content.
+
+### Not committed
+
+Per the user's explicit instruction — every change this phase produced is
+left uncommitted for review, including one incidental test pot
+("Phase 10B Test Pot", created live while verifying the create-pot flow
+against a real account) left in place rather than deleted, since removing
+another session's/account's data without being asked is a bigger risk than
+a harmless extra row.

@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { usePots, useDashboardPotStatus } from '../hooks/usePots'
-import { useCurrentGameweek } from '../hooks/useGameweek'
+import { useCurrentGameweek, useNextGameweek } from '../hooks/useGameweek'
 import { useLiveScores } from '../hooks/useLiveScores'
 import Card from '../components/ui/Card'
 import Badge from '../components/ui/Badge'
@@ -8,8 +8,9 @@ import CountdownTimer from '../components/ui/CountdownTimer'
 import { SkeletonCard } from '../components/ui/Skeleton'
 import EmptyState from '../components/ui/EmptyState'
 import FixtureCard from '../components/matchcentre/FixtureCard'
-import { Trophy, Users, Shield, Target, CalendarOff, CheckCircle2, CreditCard } from 'lucide-react'
-import { isPastDeadline } from '../utils/time'
+import { Trophy, Users, Shield, Target, CalendarOff, CheckCircle2, CreditCard, CalendarClock } from 'lucide-react'
+import { isPastDeadline, toLocalTimeShort } from '../utils/time'
+import { formatSeasonName } from '../utils/format'
 
 const GAME_TYPE_LABELS = {
   pick5: 'Pick 5',
@@ -48,22 +49,40 @@ function gameweekHeadline(gw) {
 export default function Dashboard() {
   const { data: pots = [], isLoading: potsLoading } = usePots()
   const { data: currentGw, isLoading: gwLoading } = useCurrentGameweek()
+  // Phase 10B, Part 17/18/19 — only fetched once we actually know there's
+  // no live gameweek, so a real is_current gameweek never pays for a
+  // second query it doesn't need (per Part 27's own "no unnecessary
+  // queries" — see useNextGameweek()'s own comment for why this exists).
+  const { data: nextGw, isLoading: nextGwLoading } = useNextGameweek(!gwLoading && !currentGw)
+
+  const displayGw = currentGw ?? nextGw
+  const isUpcomingOnly = !currentGw && !!nextGw
+
   const potIds = pots.map((p) => p.id)
   const { data: potStatus } = useDashboardPotStatus(potIds, currentGw?.id ?? null)
 
   // Reuses the exact realtime channel GameweekPage.jsx already relies on —
   // fixtures/fixture_events/pot_standings_snapshots invalidation, no
   // second subscription, no potId here since the homepage isn't scoped to
-  // one pot's entries.
+  // one pot's entries. Deliberately still keyed on currentGw, not
+  // displayGw — an upcoming-only gameweek has nothing live to subscribe
+  // to yet.
   useLiveScores(currentGw?.id, null)
 
   const headline = gameweekHeadline(currentGw)
-  const fixtures = currentGw?.fixtures ?? []
+  const fixtures = displayGw?.fixtures ?? []
   const sortedFixtures = fixtures.slice().sort((a, b) => {
     const rank = (f) => (f.status === 'live' ? 0 : f.status === 'scheduled' || f.status === 'tbd' ? 1 : 2)
     if (rank(a) !== rank(b)) return rank(a) - rank(b)
     return new Date(a.kickoff_utc) - new Date(b.kickoff_utc)
   })
+  // Earliest real kickoff in the upcoming gameweek — not deadline_utc
+  // (that's the pick-lock cutoff, ~30 minutes before kickoff per
+  // business-rules.md, a subtly different fact from "when does football
+  // actually start").
+  const firstKickoff = isUpcomingOnly && sortedFixtures.length > 0
+    ? sortedFixtures.reduce((min, f) => (f.kickoff_utc && new Date(f.kickoff_utc) < new Date(min) ? f.kickoff_utc : min), sortedFixtures[0].kickoff_utc)
+    : null
 
   return (
     <div className="space-y-8">
@@ -72,7 +91,7 @@ export default function Dashboard() {
           currently-true state — no gameweek is marked is_current locally,
           ISSUE-24/39), this is a deliberate empty state, not a guess. */}
       <section className="overflow-hidden rounded-3xl border border-white/8 bg-gradient-to-br from-surface-1 via-surface-2 to-pitch-900 p-5 sm:p-7">
-        {gwLoading ? (
+        {gwLoading || (nextGwLoading && !currentGw) ? (
           <div className="h-24 animate-pulse rounded-2xl bg-white/5" />
         ) : currentGw ? (
           <>
@@ -90,6 +109,26 @@ export default function Dashboard() {
               </div>
             )}
           </>
+        ) : nextGw ? (
+          // Phase 10B, Part 17/18/19 — "what's happening now" has a real
+          // answer even with no live gameweek: what's coming next, with
+          // real fixtures and a real countdown, not a dead panel.
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge status="upcoming">Next gameweek</Badge>
+              <span className="text-xs text-white/35">{nextGw.leagues?.name}</span>
+            </div>
+            <h1 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+              Gameweek {nextGw.number}
+            </h1>
+            {firstKickoff && (
+              <div className="mt-3 flex items-center gap-2 text-sm text-white/50">
+                <CalendarClock size={15} className="text-white/35" />
+                <span>Starts {toLocalTimeShort(firstKickoff)}</span>
+                <CountdownTimer deadlineUtc={firstKickoff} showSeconds={false} className="text-white/60" />
+              </div>
+            )}
+          </>
         ) : (
           <EmptyState
             icon={CalendarOff}
@@ -104,10 +143,12 @@ export default function Dashboard() {
           state rendering and the same click -> MatchCentreDrawer entry
           point GameweekPage.jsx already proves out (Part 7 — "do not
           duplicate the entire Match Centre inside every card"). */}
-      {currentGw && (
+      {displayGw && (
         <section>
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">This gameweek's fixtures</h2>
+            <h2 className="text-lg font-semibold text-white">
+              {isUpcomingOnly ? 'Upcoming fixtures' : "This gameweek's fixtures"}
+            </h2>
             {sortedFixtures.length > 0 && (
               <span className="text-xs text-white/35">{sortedFixtures.length} fixtures</span>
             )}
@@ -120,9 +161,9 @@ export default function Dashboard() {
                 <FixtureCard
                   key={fixture.id}
                   fixture={fixture}
-                  leagueId={currentGw.league_id}
-                  seasonId={currentGw.season_id}
-                  competitionName={currentGw.leagues?.name}
+                  leagueId={displayGw.league_id}
+                  seasonId={displayGw.season_id}
+                  competitionName={displayGw.leagues?.name}
                 />
               ))}
             </div>
@@ -177,7 +218,7 @@ export default function Dashboard() {
                         <Trophy size={15} />
                         <span>{pot.leagues?.name}</span>
                       </div>
-                      <span className="text-white/30">{pot.seasons?.name}</span>
+                      <span className="text-white/30">{formatSeasonName(pot.seasons)}</span>
                     </div>
 
                     <div className="mt-3 flex items-center justify-between">

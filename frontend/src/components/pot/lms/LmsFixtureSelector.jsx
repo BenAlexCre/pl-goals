@@ -38,7 +38,7 @@ function ordinalSuffix(n) {
   }
 }
 
-function TeamOption({ team, standing, form, selected, disabled, disabledReason, align, onSelect }) {
+function TeamOption({ team, standing, form, selected, isSaved, disabled, disabledReason, align, onSelect }) {
   return (
     <button
       type="button"
@@ -65,8 +65,10 @@ function TeamOption({ team, standing, form, selected, disabled, disabledReason, 
       </div>
       {disabled && disabledReason ? (
         <p className="text-[10px] leading-tight text-red-goal/70">{disabledReason}</p>
+      ) : selected && isSaved ? (
+        <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-pitch-950">SAVED</span>
       ) : selected ? (
-        <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-pitch-950">PICKED</span>
+        <span className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] font-bold text-accent">SELECTED</span>
       ) : null}
     </button>
   )
@@ -93,6 +95,8 @@ export default function LmsFixtureSelector({
   competitionName,
   homeSelected,
   awaySelected,
+  homeIsSaved,
+  awayIsSaved,
   homeDisabled,
   awayDisabled,
   disabledReason,
@@ -145,6 +149,7 @@ export default function LmsFixtureSelector({
             standing={homeStanding}
             form={homeForm?.results}
             selected={homeSelected}
+            isSaved={homeIsSaved}
             disabled={homeDisabled}
             disabledReason={disabledReason}
             align="left"
@@ -174,6 +179,7 @@ export default function LmsFixtureSelector({
             standing={awayStanding}
             form={awayForm?.results}
             selected={awaySelected}
+            isSaved={awayIsSaved}
             disabled={awayDisabled}
             disabledReason={disabledReason}
             align="right"
