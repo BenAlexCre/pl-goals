@@ -4,8 +4,13 @@
 // also renders substitutions (the data already existed —
 // event_type 'sub_on'/'sub_off' — GameweekPage just never rendered it)
 // and makes each player's name clickable into PlayerDrawer via onPlayerClick.
-// No VAR event type exists anywhere in fixture_events.event_type — nothing
-// invented for it here; only real event types render.
+// No VAR event type exists anywhere in fixture_events.event_type for REAL
+// fixtures — nothing invented for it there; only real event types render.
+// var_review/injury below are the one deliberate, scoped exception: Phase
+// 8C's Demo Gameweek is synthetic, admin-generated data by explicit
+// request, and demo-gameweek-control writes these as real, permanent
+// fixture_events rows (not fake UI-only markers) — see
+// _shared/demo/gameweekControl.ts.
 const EVENT_ICON = {
   goal: '⚽',
   yellow_card: '🟨',
@@ -14,6 +19,8 @@ const EVENT_ICON = {
   sub_on: '↑',
   sub_off: '↓',
   missed_penalty: '❌',
+  var_review: '📺',
+  injury: '🩹',
 }
 
 function PlayerName({ player, onPlayerClick, className = '' }) {

@@ -21,6 +21,30 @@ export function useLiveScores(gameweekId, potId) {
         () => {
           qc.invalidateQueries({ queryKey: ['gameweek', gameweekId] })
           qc.invalidateQueries({ queryKey: ['pot-entries', potId, gameweekId] })
+          // Phase 8C — Match Centre's own derived-stat hooks (useMatchCentre.js)
+          // were never invalidated by this channel before, so they'd sit stale
+          // for up to their own staleTime during any live/demo gameweek. No
+          // specific IDs are known here, so these invalidate by key prefix
+          // (matches every instance), same pattern as ['entry'] below.
+          qc.invalidateQueries({ queryKey: ['league-standings'] })
+          qc.invalidateQueries({ queryKey: ['team-form'] })
+          qc.invalidateQueries({ queryKey: ['team-home-away-record'] })
+          qc.invalidateQueries({ queryKey: ['player-profile'] })
+          qc.invalidateQueries({ queryKey: ['team-next-fixtures'] })
+          qc.invalidateQueries({ queryKey: ['player-season-stats'] })
+          qc.invalidateQueries({ queryKey: ['player-recent-appearances'] })
+          qc.invalidateQueries({ queryKey: ['head-to-head'] })
+        }
+      )
+      .on('postgres_changes',
+        // Phase 8C — pot_standings_snapshots (what LmsEngine's/
+        // PredictorEngine's generateStandings() writes) was never in the
+        // realtime publication before this slice's migration added it, so
+        // an LMS elimination or Predictor leaderboard change — real or
+        // demo — never appeared live, only on next refetch/staleTime.
+        { event: '*', schema: 'public', table: 'pot_standings_snapshots' },
+        () => {
+          qc.invalidateQueries({ queryKey: ['leaderboard', potId] })
         }
       )
       .on('postgres_changes',
