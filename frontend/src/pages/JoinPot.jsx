@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import { Trophy, LogIn } from 'lucide-react'
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
+import { ArrowLeft, Trophy, LogIn } from 'lucide-react'
 import { useAuth } from '../hooks/useAuth'
 import { useRedeemInvite } from '../hooks/useMembership'
 import Button from '../components/ui/Button'
@@ -18,8 +18,19 @@ import Spinner from '../components/ui/Spinner'
 export default function JoinPot() {
   const { inviteCode: inviteCodeParam } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const { user, loading: authLoading } = useAuth()
   const redeemInvite = useRedeemInvite()
+
+  // Phase 12, Part 13 — this screen previously had no way back at all
+  // (confirmed live: no header, no link, browser back only). Prefers the
+  // actual page that linked here (Dashboard's Quick Actions passes
+  // `state={{ from: '/dashboard' }}`) over a guessed destination; falls
+  // back to Dashboard for a signed-in visitor or the landing page for a
+  // signed-out one arriving via a raw invite URL, since neither has a
+  // real "origin" to return to.
+  const backTo = location.state?.from || (user ? '/dashboard' : '/')
+  const backLabel = backTo === '/pots' ? 'Back to Pots' : backTo === '/dashboard' ? 'Back to Dashboard' : 'Back to home'
 
   const [code, setCode] = useState(inviteCodeParam || '')
   const [error, setError] = useState('')
@@ -55,7 +66,12 @@ export default function JoinPot() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-pitch-950 px-4">
-      <Card className="w-full max-w-md p-6">
+      <div className="w-full max-w-md">
+        <Link to={backTo} className="mb-3 inline-flex items-center gap-1.5 text-sm text-white/50 transition-colors hover:text-white">
+          <ArrowLeft size={14} />
+          {backLabel}
+        </Link>
+        <Card className="p-6">
         <div className="mb-4 flex items-center gap-2">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/10">
             <Trophy size={20} className="text-white" />
@@ -115,7 +131,8 @@ export default function JoinPot() {
             </Button>
           </form>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   )
 }

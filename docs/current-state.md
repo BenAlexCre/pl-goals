@@ -772,6 +772,56 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-54 — Dashboard showed "Make your pick" to an already-eliminated LMS entrant
+**Discovered and resolved 2026-08-18, Phase 12 (Dashboard 2.0 + Global
+Product UX Polish).** Found live testing a real (non-demo) account whose
+only entry in its own LMS pot was already `competitive_status =
+'eliminated'`. `getPotAction()`/the "Your next pick" summary card only
+ever checked `hasEntry`/`pickSubmitted`, neither of which knows the
+entrant is out — `LmsPotDetail.jsx`'s own `canPick` already excludes
+eliminated entrants from picking at all, but the Dashboard's own CTA
+logic had no equivalent check, so it prompted a player who business rules
+(`business-rules.md` § Last Man Standing, "Elimination") already forbid
+from picking again. **Fixed** by threading the viewer's own
+`game_entry_lms.competitive_status` through `useDashboardPotStatus()`
+(`lmsEliminated`) and checking it before offering a pick CTA — an
+eliminated entrant's competition card now reads "Eliminated" and they're
+never selected as the homepage's "next pick needed" pot. No business
+logic changed — this is a read-only Dashboard presentation fix.
+
+#### ISSUE-53 — `useDashboardPotStatus` read another pot member's entry/payment as the viewer's own
+**Discovered and resolved 2026-08-18, Phase 11 (Dashboard rebuild),
+formally logged Phase 12.** `entry_payments`/`game_entries` are
+intentionally readable pot-member-wide (the payment/pick-reveal features
+every pot's own page already relies on), but this hook's batched queries
+had no `user_id` filter at all — only `pot_id`. On any pot with more than
+one member, `.find()` could silently match a **different member's** row.
+Confirmed live: a 51-member demo pot the viewer had never personally
+entered still showed "Completed," sourced from another member's
+season-scoped entry. **Fixed** by scoping both queries to
+`user_id = <signed-in user>` — a missing filter, not an RLS gap (RLS
+already correctly permits the pot-wide read for the surfaces that
+legitimately need it). Re-verified live: the same account now correctly
+shows "Start playing" for that pot.
+
+#### ISSUE-52 — Dashboard's "next gameweek" query had no league filter, surfacing "FIFA World Cup" instead of Premier League
+**Discovered and resolved 2026-08-18, Phase 11 (Dashboard rebuild),
+formally logged Phase 12.** `leagues` is reference data that has
+accumulated a retired `api-football`-provider Premier League row, a
+genuinely unrelated "FIFA World Cup" row, two Demo Centre leagues, and the
+one real, currently-used Premier League row — confirmed live via direct
+query. `useNextGameweek()`'s "soonest non-completed deadline" query had no
+league filter whatsoever, and the World Cup's own (demo-seeded) gameweeks
+sort earlier (June 2026) than the real Premier League's (August 2026), so
+it always won. **Fixed** by scoping both `useCurrentGameweek()` and
+`useNextGameweek()` to `leagues.is_active = true` (already `false` on both
+the retired PL row and the World Cup row) and
+`leagues.provider_name != 'demo'` (the exact identifier
+`_shared/demo/teardown.ts` already uses to find demo reference data) —
+reusing existing reference-data semantics, never a hard-coded league name.
+Verified live directly against PostgREST: the query now returns
+`league_id=6, "Premier League"`.
+
 #### ISSUE-51 — `_shared/adminOrCronAuth.ts` rejected `super_admin`, accepting only the literal string `'app_admin'`
 **Discovered and resolved 2026-08-18, Phase 10B (LMS UX + Global Product
 Polish).** Found while deliberately narrowing Manual Jobs

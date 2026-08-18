@@ -13,6 +13,68 @@ from here.
 
 ---
 
+## 2026-08-18 (69) — Phase 12: Dashboard 2.0 + Global Product UX Polish
+
+**Goal:** a second product pass on Phase 11's Dashboard — it was too
+cramped (three-column fixture grid, abbreviated `short_name` team labels,
+tiny summary cards) and its leaderboard was one generic block regardless
+of how many game modes/pots the viewer played. Full detail — see
+[decisions.md § Phase 12](./decisions.md#phase-12--dashboard-20--global-product-ux-polish).
+
+**Shipped:** `utils/format.js`'s `formatTeamName()` (full names, "FC"
+suffix stripped) plus removing `FixtureCard.jsx`'s truncation in favour of
+wrapping — real Premier League names now render in full, confirmed live
+(including "Brighton & Hove Albion"); a two-column (not three) fixture
+grid; mode-aware sidebar leaderboards (`ModeLeaderboardBlock`,
+`RankedLeaderboardBody`/`LmsLeaderboardBody`) with a pot-switcher for
+users in more than one pot of the same mode; real per-pot progress lines
+on competition cards (`getPotProgress()`); a back link on `JoinPot.jsx`
+(previously a dead end — confirmed live, no header/link of any kind).
+
+**Bugs found and fixed:** an already-eliminated LMS entrant was still
+offered "Make your pick" on their own competition card and could be
+selected as the homepage's "next pick needed" pot (`ISSUE-54`). Two
+Phase 11 bugs that were fixed live in that session but never formally
+logged are now recorded: the FIFA World Cup root cause (`ISSUE-52`) and
+`useDashboardPotStatus`'s missing `user_id` scoping (`ISSUE-53`).
+
+**Verified live**: `npm run build` clean; Deno suite 347/347 unchanged;
+`benalexcre@gmail.com` (`super_admin`) and `bentest6@gmail.com` (plain pot
+admin) accounts — pot-switchers, the eliminated-entrant fix, admin/super
+admin nav visibility, Join Competition's back link with and without a
+real origin. Responsive 375/390/768/1024/1440px, zero overflow.
+
+---
+
+## 2026-08-18 (68) — Phase 11: Dashboard Rebuild
+
+**Goal:** the homepage regressed to "No active gameweek right now" plus a
+bare pot list whenever `is_current` was false (always, `ISSUE-39`) — not
+sufficient as the app's own front door. Full detail — see
+[decisions.md § Phase 11](./decisions.md#phase-11--dashboard-rebuild).
+
+**Shipped:** welcome header (real profile name, with a fallback for the
+5/57 accounts whose `display_name` defaults to their email or an
+auto-generated `user_xxxxxxxx` handle), four summary cards, a "Live now"
+section shown only when genuinely live, a gameweek-aware "Upcoming
+fixtures" section that never disappears for a locked/completed gameweek,
+real per-mode competition-card CTAs (`getPotAction()`), and
+`components/ui/TeamCrest.jsx` (real crest URLs already exist for every
+non-demo team; a consistent abbreviation badge is the only fallback,
+never fabricated).
+
+**Bugs found and fixed, formally logged this session (Phase 12):** the
+Dashboard's own "next gameweek" query had no league filter and could
+surface a decommissioned "FIFA World Cup" reference league over the real
+Premier League (`ISSUE-52`); `useDashboardPotStatus` had no `user_id`
+scoping and could read a different pot member's entry/payment as the
+viewer's own (`ISSUE-53`).
+
+**Verified live**: `npm run build` clean; Deno suite 347/347 unchanged;
+multiple real accounts; responsive 375/390/768/1440px.
+
+---
+
 ## 2026-08-18 (67) — Phase 10B: LMS UX + Global Product Polish
 
 **Goal:** LMS had never received the fixture-first UX pass Score Predictor

@@ -5649,3 +5649,106 @@ left uncommitted for review, including one incidental test pot
 against a real account) left in place rather than deleted, since removing
 another session's/account's data without being asked is a bigger risk than
 a harmless extra row.
+
+## Phase 11 — Dashboard Rebuild
+
+The homepage had regressed to "No active gameweek right now" plus a bare
+pot list whenever `is_current` was false (always, `ISSUE-39`) — not
+sufficient as the app's own front door. Rebuilt around real data already
+available: `useCurrentGameweek()`/`useNextGameweek()` for the headline
+gameweek, `usePots()`/`useDashboardPotStatus()` for per-pot state,
+`useLiveScores()`/`useLeaderboard()` unchanged, `FixtureCard.jsx` reused
+for every fixture shown (never a second fixture-card implementation).
+Added: a welcome header using the real signed-in profile, four summary
+cards, a "Live now" section shown only when genuinely something is live, a
+gameweek-aware "Upcoming fixtures" section that never disappears just
+because nothing is live (locked/completed gameweeks still render their
+fixtures), and a redesigned "Your competitions" grid with real per-mode
+CTAs (`getPotAction()` — "Make your pick"/"Make your prediction"/"Update
+picks"/"Start playing"/"Completed", never "Join competition" for an
+existing member).
+
+Two real, significant bugs were found and fixed while building this — see
+`ISSUE-52` (the Dashboard's own "next gameweek" query had no league
+filter, so a decommissioned "FIFA World Cup" reference league could win
+over the real Premier League) and `ISSUE-53` (`useDashboardPotStatus`
+had no `user_id` scoping, so on a multi-member pot it could read a
+different member's entry/payment as the viewer's own) in
+`current-state.md`. Also added `components/ui/TeamCrest.jsx` — real
+`crest_url` values already exist for every non-demo team
+(football-data.org, confirmed resolving live); the fallback is a
+consistent abbreviation badge, never a fabricated or broken image.
+
+## Phase 12 — Dashboard 2.0 + Global Product UX Polish
+
+A second product pass on the same Phase 11 Dashboard: real data sources
+unchanged, but the layout was too cramped (three-column fixture grid,
+`short_name` team labels, tiny summary cards) and the leaderboard was a
+single generic block regardless of how many game modes or pots the viewer
+actually played.
+
+**Full team names** (`utils/format.js`'s new `formatTeamName()`):
+`FixtureCard.jsx`'s `TeamRow` was rendering `short_name` ("Man United")
+even where full names would fit, and truncating (`text-overflow:
+ellipsis`) rather than wrapping. Fixed in two parts — prefer the real,
+already-synced full `name` (stripping only a redundant trailing " FC",
+e.g. "Arsenal FC" → "Arsenal"), and let a genuinely long name wrap to a
+second line (`leading-tight`, no `truncate`) instead of clipping. Combined
+with widening the Dashboard's fixture grid from three columns to two
+(`sm:grid-cols-2`, dropping the old `xl:grid-cols-3`), this was enough for
+every real Premier League name (including "Brighton & Hove Albion") to
+render in full, confirmed live — not just theoretically.
+
+**Mode-aware sidebar leaderboards**: replaced Phase 11's single
+`LeaderboardHighlight` (which only ever showed `pots[0]`, one mode, no
+awareness of the others) with one block per game mode the viewer actually
+plays (`ModeLeaderboardBlock`), each reading the *same* `useLeaderboard()`
+data but rendering it differently — `RankedLeaderboardBody` (Score
+Predictor/Pick 5: top 3 plus the viewer's own row if they're outside it)
+vs `LmsLeaderboardBody` (survival counts and the viewer's own alive/
+eliminated status first, per `business-rules.md`'s own "every alive
+entrant ties for first" rule — a numeric rank would be the wrong
+headline for this mode). Multiple pots of the same mode share one block
+with a native, keyboard-accessible `<select>` pot-switcher instead of one
+permanent block per pot — switching only changes that block's own local
+state, so the rest of the page never moves.
+
+**Real per-pot progress lines** (`getPotProgress()`, competition cards):
+"5 players remaining" (LMS, from a new pot-wide — deliberately not
+`user_id`-scoped, since it's a public aggregate every member can already
+see in full — `game_entries`/`game_entry_lms` count added to
+`useDashboardPotStatus()`), "Your prediction: made/pending" (Predictor),
+"5/5 picks selected" (Pick 5, from the same `pickSubmitted` boolean
+Phase 11 already computed). A real bug was found and fixed building this
+— see `ISSUE-54` in `current-state.md` — an already-eliminated LMS
+entrant was still being offered "Make your pick".
+
+**Join Competition had no way back** (`JoinPot.jsx`, `ISSUE-`-worthy but
+cosmetic/navigational rather than a data bug, not separately numbered):
+confirmed live, the page had no header, link, or breadcrumb of any kind —
+browser-back only. Added a `← Back to {origin}` link, preferring the
+actual referring page (`location.state?.from`, set by Dashboard's Quick
+Actions) over a guessed destination, falling back to Dashboard (signed
+in) or the landing page (signed out, e.g. a raw invite URL with no real
+in-app origin).
+
+Layout: summary cards widened (`p-4`→`p-5`, `grid-cols-2 lg:grid-cols-4`
+instead of `sm:grid-cols-4`, more breathing room at tablet widths) and the
+whole page capped at `max-w-[1400px]` with a wider sidebar (320→380px) so
+the desktop two-column layout has real room instead of feeling squeezed
+against the viewport edge.
+
+### Verification performed, live, this session
+
+`npm run build` clean throughout; Deno suite 347/347 unchanged (no
+backend touched). Real-account walkthrough via the established
+magic-link session-injection technique: `benalexcre@gmail.com`
+(`super_admin`, 5 mixed real/demo pots) — full names wrapping correctly
+on every fixture, LMS/Pick 5 pot-switchers tested (switching correctly
+re-fetches that block only, confirmed via a genuinely empty pot showing
+"No standings yet", no page jump); `bentest6@gmail.com` (plain pot admin,
+not `super_admin`) — Admin nav visible, Super Admin absent, the
+already-eliminated LMS entry correctly shows "Eliminated" not "Make your
+pick" (`ISSUE-54`'s own fix), Join Competition's back link tested both
+with and without a real Dashboard origin. Responsive: 375/390/768/1024/
+1440px, zero horizontal overflow at any of them.

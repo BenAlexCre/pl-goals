@@ -20,6 +20,35 @@ const FIXTURES_WITH_EVENTS_SELECT = `
   )
 `
 
+// Phase 11 — ISSUE-52 fix. `leagues` is reference data that accumulates
+// every league the app has ever synced or generated (a retired
+// api-football-provider "Premier League" row, a genuinely unrelated "FIFA
+// World Cup" row, two synthetic Demo Centre leagues, and the one real,
+// currently-used "Premier League" row) — confirmed live via direct query,
+// not assumed. Neither of these two hooks filtered on anything but
+// `gameweeks` itself, so the homepage's own "what's the current/next
+// gameweek" query was free to surface ANY of them, real or not. Reusing
+// two pieces of reference data that already exist and already mean
+// exactly this, rather than inventing a new "is this the real league"
+// flag or hard-coding the string "Premier League" anywhere:
+//   - `leagues.is_active` — false for both the decommissioned
+//     api-football Premier League row and the FIFA World Cup row here;
+//     true for the one real, current Premier League row.
+//   - `leagues.provider_name = 'demo'` — the exact identifier
+//     `_shared/demo/teardown.ts` already uses to find and delete every
+//     demo-generated reference row; reused here as a read-side filter
+//     instead of a second, invented "is this demo" signal.
+// `leagues!inner(...)` (not the default left-embed) is required for
+// PostgREST to accept `.eq('leagues.is_active', ...)`/
+// `.neq('leagues.provider_name', ...)` as embedded-resource filters.
+//
+// `.limit(1)` + take the first row, not `.single()` — found live while
+// verifying this fix: `.single()` sets PostgREST's singular-object Accept
+// header, which responds `406`/`PGRST116` for a genuinely expected empty
+// result (ISSUE-39 — no gameweek has `is_current = true` locally). The
+// code already treated that as a normal "nothing found" case, but the
+// underlying failed HTTP request still logged as a browser console error
+// on every single Dashboard load regardless. `.limit(1)` never 406s.
 export function useCurrentGameweek() {
   return useQuery({
     queryKey: ['gameweek', 'current'],
@@ -27,11 +56,13 @@ export function useCurrentGameweek() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('gameweeks')
-        .select(`*, leagues(name), fixtures(${FIXTURES_WITH_EVENTS_SELECT})`)
+        .select(`*, leagues!inner(name, is_active, provider_name), fixtures(${FIXTURES_WITH_EVENTS_SELECT})`)
         .eq('is_current', true)
-        .single()
-      if (error && error.code !== 'PGRST116') throw error
-      return data ?? null
+        .eq('leagues.is_active', true)
+        .neq('leagues.provider_name', 'demo')
+        .limit(1)
+      if (error) throw error
+      return data?.[0] ?? null
     },
   })
 }
@@ -41,11 +72,13 @@ export function useCurrentGameweek() {
 // ISSUE-39, not fixed this phase). This finds the soonest gameweek that
 // isn't already completed — real fixture data, same
 // FIXTURES_WITH_EVENTS_SELECT shape useCurrentGameweek()/useGameweek()
-// already use, no fabrication. Deliberately global (not scoped to any one
-// league), matching useCurrentGameweek()'s own cross-league scope — the
-// real, usable gameweek data today happens to live under a non-"current"
-// league (ISSUE-39's own finding), so scoping this to "the current
-// league" would just rediscover the same empty result.
+// already use, no fabrication. Scoped to the real, active, non-demo
+// league only (see the comment above useCurrentGameweek() — Phase 11,
+// ISSUE-52) — this is what actually caused "FIFA World Cup" to appear on
+// the homepage: that league's own gameweeks have earlier deadlines
+// (June 2026) than the real Premier League's (August 2026), so the
+// previous unscoped "soonest deadline across every league" query always
+// won with the wrong competition.
 export function useNextGameweek(enabled = true) {
   return useQuery({
     queryKey: ['gameweek', 'next'],
@@ -54,8 +87,10 @@ export function useNextGameweek(enabled = true) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('gameweeks')
-        .select(`*, leagues(name), fixtures(${FIXTURES_WITH_EVENTS_SELECT})`)
+        .select(`*, leagues!inner(name, is_active, provider_name), fixtures(${FIXTURES_WITH_EVENTS_SELECT})`)
         .neq('status', 'completed')
+        .eq('leagues.is_active', true)
+        .neq('leagues.provider_name', 'demo')
         .order('deadline_utc', { ascending: true, nullsFirst: false })
         .limit(1)
         .maybeSingle()

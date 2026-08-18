@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Shield } from 'lucide-react'
 import { useLeagueStandings, useTeamForm, fixtureDifficultyFromStanding } from '../../hooks/useMatchCentre'
 import TeamForm from './TeamForm'
 import MatchCentreDrawer from './MatchCentreDrawer'
+import TeamCrest from '../ui/TeamCrest'
 import { toLocalTimeShort } from '../../utils/time'
+import { formatTeamName } from '../../utils/format'
 
 const DIFFICULTY_STYLES = {
   easy: 'border-accent/30 bg-accent/10 text-accent',
@@ -16,18 +17,6 @@ const DIFFICULTY_STYLES = {
 // opponent-league-position heuristic, not an official PL rating.
 const DIFFICULTY_LABEL = { easy: 'Easier fixture', balanced: 'Balanced fixture', difficult: 'Tough fixture' }
 const DIFFICULTY_TITLE = 'Fixture difficulty — based on the opponent’s league position, not an official rating'
-
-function Crest({ url, alt }) {
-  return (
-    <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-surface-3">
-      {url ? (
-        <img src={url} alt="" className="h-6 w-6 object-contain" loading="lazy" />
-      ) : (
-        <Shield size={16} className="text-white/25" aria-label={alt} />
-      )}
-    </div>
-  )
-}
 
 // Phase 9 — Demo Gameweek verification found a real, pre-existing overflow
 // bug here: this flex item had no min-w-0/flex-1, so a flex child with no
@@ -43,9 +32,9 @@ function Crest({ url, alt }) {
 function TeamRow({ team, standing, form, align }) {
   return (
     <div className={`flex min-w-0 flex-1 items-center gap-2.5 ${align === 'right' ? 'flex-row-reverse text-right' : ''}`}>
-      <Crest url={team?.crest_url} alt={team?.name} />
+      <TeamCrest team={team} />
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-white">{team?.short_name || team?.name || 'TBD'}</p>
+        <p className="text-sm font-semibold leading-tight text-white">{formatTeamName(team)}</p>
         <div className={`mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden ${align === 'right' ? 'flex-row-reverse' : ''}`}>
           {standing ? (
             <span className="shrink-0 text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>

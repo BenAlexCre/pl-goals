@@ -14,6 +14,23 @@ export function formatSeasonName(season) {
   return season.name || '—'
 }
 
+// Phase 12, Part 3 — "Hull City vs Man United"-style truncation turned out
+// to be two separate problems: not enough card width (fixed in
+// Dashboard.jsx's grid) AND every fixture card rendering `short_name`
+// ("Man United") instead of the real, full `name` football-data.org
+// already synced ("Manchester United FC"). This prefers the full name,
+// stripping only a redundant trailing " FC" (a genuine, common naming
+// convention — "Arsenal FC" -> "Arsenal", "Manchester United FC" ->
+// "Manchester United") without touching names that don't have one
+// ("AFC Bournemouth" keeps its real leading "AFC"). Never fabricates a
+// name: falls back to short_name, then a plain placeholder, exactly like
+// every existing team-name read in this codebase already does.
+export function formatTeamName(team) {
+  const full = team?.name?.trim()
+  if (full) return full.replace(/\s+FC$/i, '')
+  return team?.short_name || 'TBD'
+}
+
 export function ordinal(n) {
   const s = ['th','st','nd','rd']
   const v = n % 100
