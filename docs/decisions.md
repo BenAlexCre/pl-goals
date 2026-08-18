@@ -4767,3 +4767,270 @@ state/the pre-fill effect are otherwise unchanged. Bundle size grew
 (`dist/assets/index-*.js` now ~690 kB) — pre-existing single-chunk
 warning, not a regression introduced this sprint, and out of scope for a
 UX-only sprint to address via code-splitting.
+
+## Phase 8C, Slice 1 — Demo Centre & Demo Gameweek
+
+Builds the Demo Centre (Part 5), the interactive Demo Gameweek engine
+(Part 6), and the demo data generator (Part 7) from the 10-part "Platform
+Administration, Identity & Demo Environment" brief — the user chose this
+slice first, given the brief's own scale (research showed it was ~4
+independent sub-sprints; see the approved plan for the full phasing
+rationale). Parts 1–4/8/9 (Identity, Verification, Super Admin, User
+Management, Platform Operations, Platform Analytics) are explicitly
+deferred, not started. No Game Engine/scoring/settlement code was
+modified — the demo gameweek drives the real `Pick5Engine`/`LmsEngine`/
+`PredictorEngine`/dispatcher through the same `calculateScore()`/
+`settle()` calls real fixtures use.
+
+**Decision — isolation needs almost no new schema**: a dedicated "Demo
+Premier League" league+season scopes all demo football data (teams/
+gameweeks already carry `league_id`/`season_id` directly; `players` has
+no such column, so demo players are identified by a unique
+`provider_name = 'demo'` instead); pots are scoped the same way via their
+own `league_id`. The only new column needed anywhere was
+`profiles.is_demo boolean`. Two new tables, `demo_sessions` and
+`demo_timeline_events`, hold pure admin-tooling state with no "own row"
+concept — both gated by a single `is_app_admin()` RLS policy per
+operation, matching the existing `sync_runs_select_admin` pattern.
+
+**Decision — `useIsAppAdmin()` extracted from the conflated
+`useIsAdmin()`**: the existing hook answers "app_admin OR any pot's
+admin," correct for the rest of `/admin` but wrong for Demo Centre, which
+the brief requires to be app_admin-only. A new `AppAdminRoute` guard in
+`App.jsx` uses the new hook; `AdminRoute` and every existing `/admin/*`
+page are unchanged.
+
+**Decision — the local Edge Runtime's hard per-invocation CPU-time budget
+forced `demo-generate-data` into a multi-step, batched design.** Confirmed
+live (not assumed): a single invocation covering league+users+picks+
+settlement reliably tripped "early termination has been triggered" in the
+container logs, even for as few as 10 users — and, separately, an
+UNMODIFIED pre-existing function (`compute-scores`) was independently
+observed failing the same way under heavy session load, confirming this
+is a real platform/environment constraint, not a defect in the new code.
+Restructured into three step types the frontend (`useGenerateDemoData`)
+drives in sequence: `league` (season/league/teams/players/gameweeks/
+fixtures/3 pots — fixed cost, independent of user count), `users` (one
+batch at a time, default batch size 4, membership+payments+picks per
+batch — `auth.admin.createUser()`'s bcrypt hashing is the dominant real
+cost), and `settle` (settles both history gameweeks once every batch is
+done). Each step is its own Edge Function invocation with its own fresh
+CPU budget.
+
+**A real bug caught live, not assumed**: `game_entries.user_id` is
+`RESTRICT`, not `CASCADE` (confirmed via the same `information_schema`
+introspection technique this session already established for the Phase
+8B temp-pot cleanup) — a partial `writeUserBatch` failure (e.g. Pick5
+picks written, LMS picks not yet) left that batch's synthetic users
+owning real `game_entries` rows; the original rollback tried to delete
+the *users* first, which fails with an FK violation. Fixed by deleting
+that batch's `game_entries` (scoped to the three demo pot ids + the
+batch's user ids) before `auth.admin.deleteUser()`. Similarly,
+`generateDemoUsers()` itself is now self-cleaning: if `auth.admin.
+createUser()` fails partway through a batch, every user *that same call*
+already created is deleted before re-throwing, so a caller never has to
+guess which partial ids exist — same "never leave residue" discipline
+this project already holds ad hoc test data to.
+
+**A second real bug caught live**: `demo_sessions` has plain (not
+`on delete cascade`) foreign keys to `league_id`/`season_id`/
+`gameweek_id`. The original teardown order deleted the season last,
+which failed — "violates foreign key constraint
+demo_sessions_season_id_fkey" — because the `demo_sessions` row itself
+still referenced it. Fixed by deleting `demo_sessions` immediately after
+`pots`/`game_entries`, before anything touches `seasons`/`leagues`.
+
+**A third, environmental issue found and deliberately not "fixed" by
+touching real data**: this dev database has one pre-existing, unrelated
+real `game_entry_lms` row (a real user, a real pot, hours older than this
+session's own work) whose `eliminated_gameweek_id` is a dangling
+reference to a long-gone gameweek id — Postgres's `bigserial` sequence
+later reallocated that same numeric id to one of this slice's own demo
+gameweeks during testing, so a full cascading season delete collided with
+it. `teardownDemoData` was made resilient to this class of collision:
+gameweeks are deleted individually and tolerantly (a single failure is
+logged and skipped, not thrown), and the season/league themselves are
+left in place alongside any gameweek that couldn't be removed, rather
+than aborting the rest of teardown. Deliberately did not null the real
+row's `eliminated_gameweek_id` — that field is paired with
+`competitive_status` under a check constraint, so "fixing" the dangling
+reference would mean flipping a real user's elimination status, which is
+not this teardown's call to make. One inert `leagues`/`gameweeks` row
+pair (`provider_name = 'demo'`, zero teams/players/pots/users attached)
+remains as a result — flagged here for the user's own judgement, not
+force-cleaned.
+
+**Verification performed**: `deno check` clean on all three new Edge
+Functions; `npm run build` clean; migration applied locally with RLS and
+the `pot_standings_snapshots` realtime-publication addition confirmed via
+direct SQL; the Demo Centre/Demo Gameweek UI pages render correctly and
+are correctly gated on true `app_admin` (verified both the "not
+authorised" rejection for a pot-admin-only session and access after
+granting `app_metadata.role = 'app_admin'` — this local dev database's
+only account had never had that claim set at all, a real instance of the
+documented "app_admin has no bootstrap path" gap). Partial live runs
+(before this session's Docker/edge-runtime environment degraded under the
+sheer number of restarts this debugging required) did successfully
+exercise and confirm: league/team/player/gameweek/fixture/pot generation,
+`demo-teardown`'s ordered delete and zero-residue behavior across
+multiple real attempts, and the two bugs above. **Not completed this
+session**: a full end-to-end run through every batch plus the interactive
+Demo Gameweek control panel (start/trigger/settle) — blocked by
+environment instability confirmed independent of this new code (a
+pre-existing, unmodified function failed identically under the same
+load). Recommended next step: re-verify end-to-end after a fresh Docker
+Desktop restart, before this slice is considered fully proven live.
+
+## Phase 8C, Slice 1 — Demo Environment Verification & Finalisation
+
+Closes out the previous session's own recommended next step: a fresh
+Docker Desktop restart, then a genuine, complete, live end-to-end run of
+demo-generate-data → the interactive Demo Gameweek panel → demo-teardown,
+against the real local Supabase stack, not assumed from the prior
+session's partial runs. Scope was explicitly verification/bugfix only —
+no Super Admin, identity, or UI/UX work, per the user's own boundary.
+
+**Five real bugs found live, all fixed, none assumed**:
+
+1. **`refresh_gameweek_deadlines` (ISSUE-24's own trigger) silently
+   defeated `generateDemoLeague()`'s deliberate near-future
+   `deadline_utc`.** The trigger fires on every `fixtures` insert/update/
+   delete and recomputes `deadline_utc = MIN(kickoff_utc) - 15min` for
+   *every* gameweek with fixtures — including the demo history/live
+   gameweeks this function had just set a future deadline on, moments
+   earlier, specifically so `validateEntry()` would still accept the
+   picks `writeUserBatch` was about to write. First live symptom: every
+   single demo pick write failed with "Gameweek N's deadline has passed."
+   Confirmed via direct trigger/function introspection
+   (`refresh_gameweek_deadlines`'s own `prosrc`), not guessed. Fixed by
+   re-patching `deadline_utc` back to the intended near-future value once,
+   after all of a league's fixtures are written (`generateLeague.ts`) —
+   not by touching the trigger itself, which is `ISSUE-24`'s own, separate,
+   still-open, real-fixture-sync concern.
+2. **Demo Pick 5 entries were never locked, so `Pick5Engine.calculateScore()`
+   /`settle()` silently no-op'd for Pick 5 specifically, every gameweek** —
+   both methods only touch `game_entries` with `status = 'locked'` (their
+   own long-standing, documented contract), and the demo generator's
+   `settleHistoryGameweeks()`/`gameweekControl.ts`'s `settleGameweek()`
+   both skipped straight from writing picks to scoring/settling, unlike
+   the real pipeline (`compute-deadlines` locks, *then*
+   `compute-scores`/`settle-gameweek` run). Silent, not a thrown error —
+   `pot_standings_snapshots` simply had zero Pick 5 rows for either
+   history gameweek. Fixed by calling `lockEntries()` for every registered
+   game type before `calculateScore()`, in both the history-gameweek path
+   (`generateHistory.ts`) and the live-gameweek path (`gameweekControl.ts`'s
+   `fireAllKickoffs()`, the demo's own real-world equivalent of "the
+   deadline has now passed").
+3. **The demo LMS pot was invisible to its own engine, permanently, not
+   just this run** — `createDemoPot()` never set `pots.start_gameweek_id`,
+   and `LmsEngine`'s own `getEligibleLmsPotIds()` filters
+   `start_gameweek_id <= gameweekId`; Postgres never evaluates that `true`
+   against `NULL`, so the pot silently never matched, for
+   `calculateScore()` *or* `settle()`. Zero LMS standings, zero
+   eliminations, no error — the same "quiet no-op" shape as bug 2, root
+   cause confirmed by reading `getEligibleLmsPotIds()` directly rather
+   than guessing from the symptom. Fixed by setting `start_gameweek_id` to
+   the demo league's own earliest 'history' gameweek at pot creation —
+   real organiser-created LMS pots always set this; the demo pot now
+   matches that real invariant instead of being a special case.
+4. **Every demo pot's payments were written `scope: 'season'`, but Pick 5's
+   real settlement model is per-gameweek (`scope: 'gameweek'`,
+   `docs/business-rules.md`)** — `Pick5Engine.settle()` reads payments
+   scoped `'gameweek'` for the exact gameweek being settled; a
+   season-scoped row never matches, so every demo Pick 5 entry read as
+   unpaid and got voided, every gameweek, silently turning the requested
+   "realistic mixed paid/unpaid" state into "100% void" for Pick 5 only.
+   Confirmed by grepping the real payment-recording code
+   (`admin-actions/recordPayment.ts`) for Pick 5's actual scope, not
+   assumed. Fixed by writing one `scope: 'gameweek'` row per (user,
+   gameweek) for Pick 5 specifically, keeping LMS/Predictor's real
+   one-time `scope: 'season'` model unchanged.
+5. **`useDemoTimeline()`'s `players(display_name)` embed was ambiguous** —
+   `demo_timeline_events` has two FKs into `players`
+   (`player_id`/`assist_player_id`), so PostgREST rejected the query
+   outright with `PGRST201` on every call. The Demo Gameweek control
+   panel's own UI silently showed "0 / 0 events played" and "No timeline
+   generated" despite the database holding a complete, correctly-fired
+   23-event timeline — confirmed live via the same query run directly
+   against PostgREST before touching any code. Fixed by disambiguating to
+   `players!demo_timeline_events_player_id_fkey`, exactly as PostgREST's
+   own error `hint` field named it, aliased back to `players` so
+   `DemoGameweek.jsx`'s existing `e.players.display_name` read needed no
+   change.
+
+Bugs 2–4 compounded: fixing only the lock-entries gap (2) without also
+fixing the payment scope (4) would have made every demo Pick 5 entry
+newly *lockable* but still 100% void once locked, since the payment
+lookup would still never match — both were required together for a
+correct live run, discovered by re-verifying standings after each
+individual fix rather than assuming one fix was sufficient.
+
+**Full live verification actually performed, this session, against the
+real local stack (not assumed, not reused from the prior session's
+partial runs)**:
+- Fresh `supabase start` after a Docker Desktop restart; migration `026`
+  confirmed applied via `supabase_migrations.schema_migrations` directly;
+  every new table/column/policy from it re-verified against the live
+  schema (`\d`, `pg_policies`, `pg_publication_tables`) rather than
+  trusting the migration file alone.
+- **Security, at the network boundary, not just code review**: real HTTP
+  calls against all three demo Edge Functions and direct PostgREST reads
+  of `demo_sessions` — anonymous → `401`; a real signed-in non-admin user
+  (via GoTrue's admin magic-link flow, not a password reset, so no real
+  test account's credentials were touched) → `403`/RLS-empty on every
+  path; the real `app_admin` test account → success. No forged claims,
+  no client-side-only checks found.
+- **A full demo generation run** (10 synthetic users, all three pots) end
+  to end through the real batched Edge Function sequence, confirmed via
+  direct SQL after every step: realistic paid/unpaid mixes, Pick 5
+  standings + jackpot rollover (no 5/5 winner either history week, correct
+  per the real "exact 5/5 only" rule), LMS eliminations down to the real
+  wipeout/season-settlement outcome, Predictor standings and voided/unpaid
+  entries — all through the unmodified `Pick5Engine`/`LmsEngine`/
+  `PredictorEngine`, not a parallel demo scorer.
+- **A full live Demo Gameweek run**: start (kickoffs fire, entries lock) →
+  `advance_timeline` in two batches (23 events total: kickoffs, goals with
+  real assists, a penalty, a red/yellow card, substitutions, injuries, a
+  VAR review, full-time) → automatic settlement once every fixture hit
+  'finished' → standings/prizes correctly written. Confirmed via direct
+  SQL at every stage, not inferred from the API's own `success: true`.
+- **Real browser verification** (Playwright, against the running dev
+  server + the same local stack): Demo Centre and Demo Gameweek pages
+  render the true state (event log, per-event minute/player, live
+  fixture scores); the fixed Pick 5/LMS/Predictor pots show correctly
+  under `/pots` alongside real, pre-existing pots, clearly distinguished;
+  a settled demo gameweek's Match Centre drawer renders real goals/
+  assists/penalties/injuries/substitutions exactly like a real fixture
+  would; a pre-existing **real** Pick 5 pot (real Premier League
+  fixtures) loaded with zero console errors, confirming no regression.
+- **Teardown, twice** (once on an intermediate buggy generation, once on
+  the fully-exercised final run): zero demo residue in every table this
+  session touched, confirmed by direct count, both times. One real,
+  momentarily alarming signal investigated to ground truth rather than
+  reported as a false teardown bug: a raw, unscoped `entry_payments`
+  count dropped from 53 to 3 after teardown — traced to `user_id`'s own
+  `on delete cascade` correctly removing this session's *own* 50 demo
+  payment rows once `auth.admin.deleteUser()` ran for each synthetic
+  user, not any bug in teardown's logic; the 3 rows left were
+  independently confirmed to belong to the two real, pre-existing pots
+  ("Ben Test", "Pick 5"), by name and by real user id.
+- `deno check` clean on all three demo Edge Functions and every
+  `_shared/demo/*.ts` file; full Deno suite 347/347 (unchanged — no test
+  was added or modified this session, since every fix was to
+  demo-generation logic, not to anything with existing test coverage);
+  `npm run build` clean (the pre-existing >500kB single-chunk warning is
+  unchanged from prior sessions, not a regression).
+
+**Not touched, deliberately, per the user's own explicit boundary**: the
+distinct Super Admin role, identity/display-name signup, and email/phone
+verification remain exactly as deferred as the prior session left them —
+nothing in this session started any of that work. `useIsAppAdmin()`/
+`app_metadata.role === 'app_admin'` is still the only authorization
+primitive Demo Centre has; it is not a new platform-wide role.
+
+**Genuinely remaining, not fixed, out of this sprint's own scope**: the
+one inert leftover `leagues`/`gameweeks` row pair from a session before
+this one (`provider_name = 'demo'`, zero teams/players/pots/users
+attached, first flagged in the prior session's own entry above) is still
+present — harmless, and still not this teardown's call to force-clean
+per that same entry's own reasoning.

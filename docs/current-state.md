@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed: 2026-08-10.
+Last reviewed: 2026-08-18.
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,

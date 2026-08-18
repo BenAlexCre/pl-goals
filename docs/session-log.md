@@ -13,6 +13,42 @@ from here.
 
 ---
 
+## 2026-08-18 (63) — Phase 8C, Slice 1: Demo Environment Verification & Finalisation
+
+**Goal:** recover from an overnight restart (previous session's Demo Centre/Demo
+Gameweek/demo-data-generator work was complete but uncommitted, and its own live
+end-to-end verification was never finished), then finish that verification —
+explicitly not Super Admin, identity, or any UI/UX work.
+
+**Method:** restarted Docker Desktop, `supabase start` fresh, then drove the real
+Demo Centre flow end to end against the live local stack — generation, the
+interactive Demo Gameweek panel, teardown — via direct Edge Function calls, direct
+SQL verification after every step, network-level auth checks (anon/non-admin/admin),
+and real browser verification (Playwright) of the Demo Centre/Demo Gameweek/pot
+pages, not assumed from the prior session's partial runs.
+
+**Five real bugs found live and fixed** — see
+[decisions.md](./decisions.md#phase-8c-slice-1--demo-environment-verification--finalisation)
+for full detail: (1) a pre-existing trigger (`ISSUE-24`) silently overwrote the demo
+generator's own deliberate near-future gameweek deadline; (2) demo Pick 5 entries
+were never locked, so scoring/settlement silently no-op'd; (3) the demo LMS pot never
+had `start_gameweek_id` set, making it invisible to its own engine; (4) demo payments
+were all season-scoped, but Pick 5's real model is per-gameweek, so every demo Pick 5
+entry read as unpaid; (5) an ambiguous PostgREST embed in `useDemoTimeline()` made
+the Demo Gameweek panel silently show an empty timeline.
+
+**Verified, not assumed**: a full 10-user/3-pot demo generation and a complete live
+Demo Gameweek run (23 timeline events, automatic settlement) through the real,
+unmodified Game Engine; teardown run twice with zero residue and real data confirmed
+untouched both times; `deno check` clean, full suite 347/347 unchanged, `npm run
+build` clean. Docker Desktop and the frontend dev server were left running for the
+user's own continued use.
+
+**Not started**, per the user's explicit boundary: Super Admin as a distinct role,
+identity/display-name signup, email/phone verification.
+
+---
+
 ## 2026-08-10 (62) — Production Readiness Sprint: Staging & Deployment Audit
 
 **Goal:** confirm this project can be deployed to a fresh Supabase project
