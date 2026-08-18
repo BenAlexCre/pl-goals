@@ -13,6 +13,44 @@ from here.
 
 ---
 
+## 2026-08-18 (71) — Phase 14: Score Predictor UI Overhaul + Global UX Polish
+
+**Goal:** full information-hierarchy redesign of the Score Predictor
+prediction screen (not CSS tweaks — the previous "blank generic row
+requiring expansion" problem, fixed in Phase 9, had to remain solved),
+plus an evidence-based fix for a reported Dashboard alignment problem.
+Full detail — see
+[decisions.md § Phase 14](./decisions.md#phase-14--score-predictor-ui-overhaul--global-ux-polish).
+
+**Shipped:** `PredictorFixtureCard.jsx` rewritten — collapsed state now
+shows full team names, standing/form, difficulty, and a STATUS line with
+an unambiguous Change/Predict CTA (never a blank row); expanded state
+adds a `ScoreStepper` (`[−] N [+]`, still keyboard-typeable, same
+`MAX_SCORE` ceiling) and a goalscorer picker grouped by HOME TEAM/AWAY
+TEAM then position. Per-fixture local-state architecture from Phase 9's
+state-leak fix preserved unchanged. `PredictorPotDetail.jsx` header
+consolidated from three redundant blocks into one stat bar; "Manage" now
+routes to `/pot/:potId/manage`; inline `InviteCard`/`MemberList` removed
+(matches Pick 5/LMS's own pattern).
+
+**Bugs found and fixed:** `ISSUE-56` (Dashboard misaligned against
+TopNav — root cause: `AppShell.jsx`'s shared container was `max-w-6xl`
+vs. TopNav's own `max-w-7xl`, plus a dead `max-w-[1400px]` override on
+Dashboard itself left over from Phase 12) and `ISSUE-57` (a non-`pending`,
+e.g. `void`, Predictor entry disabled every score input with zero
+explanation — the disabling logic itself was correct and untouched; only
+the missing explanation was a real gap).
+
+**Verified live**: `npm run build` clean; Deno suite 347/347 unchanged.
+Full Predictor flow tested on a real `pending` entry (score steppers,
+keyboard entry, goalscorer selection, Save/persist, one-prediction-per-
+gameweek behaviour across two fixtures with no state leakage). Dashboard
+alignment confirmed fixed via direct pixel-bound comparison at 1440px.
+Responsive 375/390/768/1024/1440px across Predictor and Dashboard — zero
+overflow. Sign-out → landing page confirmed.
+
+---
+
 ## 2026-08-18 (70) — Phase 13: Authentication Reliability + Global Product UX Polish
 
 **Goal:** the real `super_admin` account (`benalexcre@gmail.com`) could

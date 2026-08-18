@@ -5839,3 +5839,94 @@ disabled-reason messaging confirmed live (unsaved local selection only,
 nothing written to the pot). Responsive: 375/390/768/1024/1440px across
 Dashboard, Sign In, Pick 5, Join Competition, and LMS — zero horizontal
 overflow anywhere.
+
+## Phase 14 — Score Predictor UI Overhaul + Global UX Polish
+
+Two explicit deliverables: a full information-hierarchy redesign of the
+Score Predictor prediction screen (not a CSS pass — the brief was
+explicit that the previous "blank generic row requiring expansion to
+understand state" problem must remain solved), and a real, evidence-based
+fix for a reported Dashboard alignment problem.
+
+### Score Predictor redesign
+
+`PredictorFixtureCard.jsx` — complete rewrite on top of the same
+per-fixture-local-state architecture fixed in Phase 9 (deliberately
+unchanged: `homeScore`/`awayScore`/`goalscorerId`/`localError` still live
+in this component's own instance, still re-sync only from `savedPick.id`
+and that fixture's own score/goalscorer fields, never another fixture's).
+Collapsed state now shows meta (competition, difficulty, kickoff/live),
+full team names via `TeamCrest`, standing + recent form, and a STATUS
+line ("✓ Your prediction · Saved" + goalscorer, or "Not predicted") with
+an unambiguous "Change"/"Predict this fixture" CTA — never a blank row.
+Expanded state adds a `ScoreStepper` (`[−] N [+]`, still a real, directly
+typeable `<input type="number">` between the buttons — keyboard entry and
+the existing `MAX_SCORE = 20` validation ceiling both preserved) and a
+goalscorer picker grouped first by `HOME TEAM`/`AWAY TEAM` super-labels,
+then by position (Forwards → Midfielders → Defenders → Goalkeepers) within
+each — the two teams' players are never mixed in one list.
+
+`PredictorPotDetail.jsx`: consolidated three separate, partially
+redundant header blocks (title/subtitle, progress bar, status paragraph)
+into one stat bar (predicted-count · your-prediction-state · deadline
+countdown). "Manage" now points at `/pot/:potId/manage` instead of
+straight to `/admin/payments`, and the page's own inline
+`InviteCard`/`MemberList` section was removed (consistent with Pick 5/LMS's
+own established pattern of hosting membership management on the Manage
+page, not duplicated on the main page). Join/entry CTA copy is
+admin-aware ("Start playing" vs. "Join competition"). `ISSUE-57`'s
+void-entry explanatory notice (below) was added here.
+
+### Dashboard alignment fix — `ISSUE-56`
+
+Root cause, fix, and live verification are recorded in full under
+`ISSUE-56` in `current-state.md`. In short: `AppShell.jsx`'s one shared
+page-content container (`max-w-6xl`) didn't match `TopNav.jsx`'s own
+inner container (`max-w-7xl`), a 128px discrepancy confirmed by direct
+comparison of the two files rather than guessed; `Dashboard.jsx` also
+carried its own now-dead `max-w-[1400px]` override left over from Phase
+12, which CSS box-model reasoning confirmed never actually widened
+anything (a child's `max-width` can't exceed an already-narrower
+parent). Fixed by widening `AppShell.jsx` to match `TopNav.jsx`'s
+existing `max-w-7xl` — one shared boundary, not a third competing number
+— and removing Dashboard's dead override so it fills that boundary like
+every other page. `UnverifiedBanner.jsx` (same visual column) updated to
+match in the same change.
+
+### Real gap found live — `ISSUE-57`
+
+While live-testing the redesigned Predictor with a test account,
+every score input was disabled with no explanation anywhere on the page.
+Investigated the account's `game_entries` row directly rather than
+assuming a UI bug: `status = 'void'`, a real, correct, pre-existing
+business state — not a regression in the redesign, and the `canPick`
+gate itself was correct and untouched. The genuine gap was the missing
+explanation, fixed with a narrowly-scoped notice in
+`PredictorPotDetail.jsx` (full detail under `ISSUE-57` above) — no change
+to payment logic, entry status, or any business rule.
+
+### Explicitly not changed this phase
+
+Score Predictor's one-prediction-per-gameweek rule, goalscorer
+optionality, scoring/settlement logic, LMS/Pick 5 business rules, payment
+logic, and authentication/authorization — all re-verified live, unchanged
+(see Verification below).
+
+### Verification performed, live, this session
+
+`npm run build` clean; Deno suite 347/347 unchanged (no backend files
+touched this phase). Live-tested the full Predictor flow on a real
+`pending` entry via the established magic-link session-injection
+technique: score stepper +/− clicks, direct keyboard entry into the score
+input, goalscorer selection (visual "selected" state confirmed via
+`aria-pressed`), Save → confirmed persistence and correct collapse to the
+new saved state, then predicting a second fixture in the same gameweek
+and confirming the first fixture correctly reverted to "Not predicted"
+with no state leaking between the two fixtures' own local state — the
+one-prediction-per-gameweek rule and the original Phase 9 state-leak fix
+both hold. Confirmed sign-out returns to the public landing page.
+Responsive: 375/390/768/1024/1440px on both the Predictor page (including
+the expanded score/goalscorer section) and Dashboard — zero horizontal
+overflow at any breakpoint. Confirmed, at 1440px, that `TopNav`'s and
+Dashboard's content containers now share identical left/right pixel
+bounds.

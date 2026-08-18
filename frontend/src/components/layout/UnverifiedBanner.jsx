@@ -14,7 +14,7 @@ export default function UnverifiedBanner() {
 
   return (
     <div className="border-b border-amber-500/20 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-200">
-      <div className="mx-auto flex max-w-6xl items-center gap-2">
+      <div className="mx-auto flex max-w-7xl items-center gap-2">
         <MailWarning size={16} className="shrink-0" />
         <span>
           Verify your email to create or join pots and submit picks.{' '}

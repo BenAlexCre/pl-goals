@@ -363,8 +363,16 @@ export default function Dashboard() {
   const loadingHero = gwLoading || (nextGwLoading && !currentGw)
   const statusMeta = gwState ? GAMEWEEK_STATUS_META[gwState.status] : null
 
+  // Phase 14, Part 12 — this root used to also carry `max-w-[1400px]
+  // mx-auto`, which was dead code: AppShell's own shared container (then
+  // max-w-6xl, 1152px) was always narrower, so the constraint never
+  // actually bound and `mx-auto` had zero extra space to center into.
+  // Removed now that AppShell itself provides the one real shared width
+  // (matched to TopNav's, see AppShell.jsx's own comment) — Dashboard
+  // just fills it like every other page, rather than layering a second,
+  // silently inert container on top.
   return (
-    <div className="mx-auto max-w-[1400px] space-y-8 lg:grid lg:grid-cols-[1fr_380px] lg:items-start lg:gap-8 lg:space-y-0">
+    <div className="space-y-8 lg:grid lg:grid-cols-[1fr_380px] lg:items-start lg:gap-8 lg:space-y-0">
       <div className="space-y-8 min-w-0">
         {/* A. Welcome header */}
         <section>

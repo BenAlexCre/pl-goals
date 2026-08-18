@@ -9,8 +9,6 @@ import EmptyState from '../ui/EmptyState'
 import CountdownTimer from '../ui/CountdownTimer'
 import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
-import InviteCard from './InviteCard'
-import MemberList from './MemberList'
 import PredictorFixtureCard from './predictor/PredictorFixtureCard'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import {
@@ -153,9 +151,15 @@ export default function PredictorPotDetail({ pot, potId }) {
                 <span className="text-sm font-semibold text-white tabular">{totalPoints} pts</span>
               </div>
             ) : null}
+            {/* Phase 14, Part 1/17 — retargeted to the same per-pot Manage
+                page Pick 5/LMS already use (Phase 10B/12), instead of
+                jumping straight to the cross-pot /admin/payments tool.
+                InviteCard/MemberList moved off this page in the same
+                change, for the same reason they already moved off
+                Pick 5/LMS's own main pages. */}
             {isPotAdmin ? (
               <Link
-                to="/admin/payments"
+                to={`/pot/${potId}/manage`}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
               >
                 <Settings size={13} />
@@ -168,7 +172,11 @@ export default function PredictorPotDetail({ pot, potId }) {
         {!entry ? (
           <div className="mt-6">
             <Button onClick={handleJoin} loading={getOrCreateEntry.isPending} disabled={getOrCreateEntry.isPending}>
-              Join competition
+              {/* Phase 14, Part 1 — same reasoning as LMS's own
+                  Phase 10B fix: the pot's own admin is already a member,
+                  never presented with a "join" CTA for their own
+                  competition. Same underlying getOrCreateEntry call. */}
+              {isPotAdmin ? 'Start playing' : 'Join competition'}
             </Button>
           </div>
         ) : null}
@@ -177,15 +185,19 @@ export default function PredictorPotDetail({ pot, potId }) {
       {entry ? (
         <section>
           <Card className="p-5">
-            {/* Prediction status header — Parts 1/5/6/12. Gameweek, pot-wide
-                progress, the viewer's own status, and the deadline, all
-                answered before the user has to scan a single fixture. */}
+            {/* Phase 14, Part 10 — one gameweek header instead of three
+                separate bars that partly repeated each other (a status
+                header, then a progress bar, then a whole separate
+                "you've predicted"/"you haven't predicted" paragraph
+                immediately below it saying almost the same thing again).
+                Gameweek, pot-wide progress, the viewer's own status, and
+                the deadline now all live in the one stat bar. */}
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <h2 className="text-lg font-semibold text-white">Your prediction</h2>
-                <p className="mt-0.5 text-sm text-white/45">
-                  {selectedGameweek ? `Gameweek ${selectedGameweek.number}` : 'Select a gameweek'} — make your prediction before the deadline.
-                </p>
+                <h2 className="text-lg font-semibold text-white">
+                  {selectedGameweek ? `Gameweek ${selectedGameweek.number}` : 'Select a gameweek'}
+                </h2>
+                <p className="mt-0.5 text-sm text-white/45">Choose one fixture to predict.</p>
               </div>
 
               {gameweeks.length > 0 ? (
@@ -203,44 +215,54 @@ export default function PredictorPotDetail({ pot, potId }) {
               ) : null}
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/10 px-4 py-3 text-sm">
-              <div className="flex items-center gap-2">
-                {progress ? (
-                  <>
-                    <span className="font-semibold text-white tabular">{progress.predictedCount} / {progress.totalMembers}</span>
-                    <span className="text-white/45">predicted this gameweek</span>
-                  </>
-                ) : (
-                  <span className="text-white/30">Loading progress…</span>
-                )}
-              </div>
+            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-white/8 bg-black/10 px-4 py-3 text-sm">
+              {progress ? (
+                <span>
+                  <span className="font-semibold text-white tabular">{progress.predictedCount} / {progress.totalMembers}</span>
+                  <span className="ml-1.5 text-white/45">predicted this gameweek</span>
+                </span>
+              ) : (
+                <span className="text-white/30">Loading progress…</span>
+              )}
+
+              <span className="text-white/15">&middot;</span>
+
+              {currentPick ? (
+                <span className="flex items-center gap-1.5 font-medium text-accent">
+                  <Check size={13} />
+                  Your prediction saved
+                </span>
+              ) : deadlinePassed ? (
+                <span className="text-white/40">No prediction was made</span>
+              ) : (
+                <span className="text-white/45">Not predicted yet</span>
+              )}
 
               {selectedGameweek?.deadline_utc && !deadlinePassed ? (
-                <div className="flex items-center gap-1.5 text-white/60">
+                <div className="ml-auto flex items-center gap-1.5 text-white/60">
                   <Clock size={13} className="text-white/35" />
-                  <span>Predictions close in</span>
+                  <span>Closes in</span>
                   <CountdownTimer deadlineUtc={selectedGameweek.deadline_utc} showSeconds={false} />
                 </div>
               ) : deadlinePassed ? (
-                <span className="flex items-center gap-1.5 text-white/40">
+                <span className="ml-auto flex items-center gap-1.5 text-white/40">
                   <Lock size={13} />
                   Predictions closed
                 </span>
               ) : null}
             </div>
 
-            <div className="mt-3">
-              {currentPick ? (
-                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-accent">
-                  <Check size={14} />
-                  You&apos;ve predicted this gameweek
-                </span>
-              ) : deadlinePassed ? (
-                <span className="text-sm text-white/45">The deadline passed — no prediction was made.</span>
-              ) : (
-                <span className="text-sm text-white/45">You haven&apos;t predicted this gameweek yet — choose a fixture below.</span>
-              )}
-            </div>
+            {/* Phase 14, Part 21 — real gap found live: an entry whose
+                `status` isn't 'pending' (confirmed live — a `void` entry,
+                the real state a non-payment or an admin action leaves it
+                in) silently disabled every score input below with no
+                explanation anywhere on the page. "If something is
+                disabled, explain why." */}
+            {entry && entry.status !== 'pending' && !deadlinePassed ? (
+              <p className="mt-3 text-sm text-amber">
+                Your entry is currently {entry.status} — predictions are disabled until this is resolved. Contact the pot organiser about your payment status.
+              </p>
+            ) : null}
 
             <div className="mt-5">
               {deadlinePassed || currentPick?.locked_at ? (
@@ -319,20 +341,6 @@ export default function PredictorPotDetail({ pot, potId }) {
           ) : null}
         </div>
         <LeaderboardTable rows={standings} gameType="score_predictor" />
-      </section>
-
-      {/* Part 13 — moved below the prediction workflow and standings, so
-          invite/membership admin no longer competes visually with "what do
-          I need to do right now." Functionality unchanged. */}
-      <section className="space-y-6">
-        {isPotAdmin ? (
-          <InviteCard
-            potId={potId}
-            inviteCode={potWithMembers?.invite_code}
-            existingMemberIds={new Set(members.map((m) => m.user_id))}
-          />
-        ) : null}
-        <MemberList potId={potId} members={members} isAdmin={isPotAdmin} />
       </section>
 
       {message ? <Toast message={message} type="success" /> : null}

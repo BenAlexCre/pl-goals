@@ -772,6 +772,66 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-57 — Predictor entries with a non-`pending` status (e.g. `void`) disabled every score input with no explanation
+**Discovered and resolved 2026-08-18, Phase 14 (Score Predictor UI Overhaul
++ Global UX Polish).** Found live while testing the redesigned Score
+Predictor with a real test account: the score steppers and goalscorer
+picker were greyed out with zero text anywhere on the page saying why.
+Investigated the account's actual DB row before assuming a UI bug —
+`game_entries.status = 'void'`, a real, legitimate business state (set by
+a non-payment or an admin action), not a bug. `canPick = entry &&
+entry.status === 'pending' && !deadlinePassed` in
+`PredictorPotDetail.jsx` was already correct and unchanged. The gap was
+purely explanatory: nothing told the viewer their entry was void or what
+to do about it.
+
+**Fixed**: `PredictorPotDetail.jsx` now shows "Your entry is currently
+{status} — predictions are disabled until this is resolved. Contact the
+pot organiser about your payment status." whenever `entry.status !==
+'pending'` and the deadline hasn't passed. No change to payment logic,
+entry status transitions, or the `canPick` gate itself — purely an
+explanatory UI addition, matching the project's own established
+"if something is disabled, explain why" precedent (`PlayerCard.jsx`'s
+`disabledReason`, `LmsFixtureSelector.jsx`'s disabled-reason copy from
+Phase 13).
+
+**Verified live**: confirmed via direct SQL query that the test
+account's entry was genuinely `void`, then confirmed the new notice
+renders correctly for that account and does not render for a `pending`
+entry.
+
+---
+
+#### ISSUE-56 — Dashboard read as visually misaligned against the top nav at wide viewports
+**Discovered and resolved 2026-08-18, Phase 14 (Score Predictor UI
+Overhaul + Global UX Polish).** Reported as "the Dashboard currently
+appears visually misaligned" — investigated the actual layout rather than
+guessing at one page's `max-width`. `AppShell.jsx`'s shared `<main>`
+container (the one real content boundary every authenticated page renders
+inside) was `max-w-6xl` (1152px), while `TopNav.jsx`'s own inner
+container — directly above it, in the same visual column — has always
+been `max-w-7xl` (1280px), a 128px mismatch. Confirmed via
+`grep -rn "max-w-\[" src/pages/*.jsx src/components/pot/*.jsx` that
+`Dashboard.jsx` additionally carried its own `max-w-[1400px] mx-auto`
+override, and confirmed via CSS box-model reasoning that this override
+was dead code: a child's `max-width` can never widen it past an
+already-narrower parent, so it never actually bound anything.
+
+**Fixed**: widened `AppShell.jsx`'s shared container from `max-w-6xl` to
+`max-w-7xl` to match `TopNav.jsx`'s existing width (one shared boundary,
+not a third competing number), updated `UnverifiedBanner.jsx` in the same
+column to match, and removed `Dashboard.jsx`'s now-redundant dead
+`max-w-[1400px]` override so it simply fills the shared container like
+every other page.
+
+**Verified live**: at 1440px, `TopNav`'s inner container and
+`Dashboard`'s content container now share identical left/right pixel
+bounds (measured via `getBoundingClientRect()`), confirmed zero
+`scrollWidth`/`clientWidth` overflow at 375/390/768/1024/1440px across
+both Dashboard and the Predictor page.
+
+---
+
 #### ISSUE-55 — Sign-in/sign-up/password-reset could hang silently on a network-level failure, with no error shown
 **Discovered and resolved 2026-08-18, Phase 13 (Authentication
 Reliability).** Reported live: `benalexcre@gmail.com` (a genuine
