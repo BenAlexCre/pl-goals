@@ -19,7 +19,8 @@ export function usePredictorEntry(potId) {
           predictor_fixture_picks(
             id, gameweek_id, fixture_id, predicted_home_score, predicted_away_score,
             goalscorer_player_id, points_awarded, is_exact_score, scorer_bonus_awarded, locked_at,
-            fixtures(id, home_team:teams!home_team_id(id,name,short_name,crest_url), away_team:teams!away_team_id(id,name,short_name,crest_url), home_goals, away_goals, status)
+            fixtures(id, home_team:teams!home_team_id(id,name,short_name,crest_url), away_team:teams!away_team_id(id,name,short_name,crest_url), home_goals, away_goals, status),
+            goalscorer:players(id, display_name)
           )
         `)
         .eq('pot_id', potId)

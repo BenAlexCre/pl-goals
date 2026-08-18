@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Shield, Lock, History, Trophy } from 'lucide-react'
+import { Shield, Lock, History, Trophy, Settings } from 'lucide-react'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -11,8 +11,7 @@ import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
 import InviteCard from './InviteCard'
 import MemberList from './MemberList'
-import FixtureCard from '../matchcentre/FixtureCard'
-import TeamCard from '../matchcentre/TeamCard'
+import LmsFixtureSelector from './lms/LmsFixtureSelector'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import { useLmsEntry, useGetOrCreateLmsEntry, useSubmitLmsPick } from '../../hooks/useLmsEntry'
 import { useFixturesForGameweek } from '../../hooks/usePredictorEntry'
@@ -130,9 +129,22 @@ export default function LmsPotDetail({ pot, potId }) {
             </p>
           </div>
 
-          {entry ? (
-            <Badge status={eliminated ? 'eliminated' : 'alive'} />
-          ) : null}
+          <div className="flex items-center gap-2">
+            {entry ? <Badge status={eliminated ? 'eliminated' : 'alive'} /> : null}
+            {/* Phase 9E, Part 11 — a contextual link into the existing
+                /admin/payments page (unchanged, no new admin surface),
+                shown only to this pot's own admin, not a generic
+                platform-wide Admin button. */}
+            {isPotAdmin ? (
+              <Link
+                to="/admin/payments"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
+              >
+                <Settings size={13} />
+                Manage
+              </Link>
+            ) : null}
+          </div>
         </div>
 
         {!entry ? (
@@ -195,6 +207,7 @@ export default function LmsPotDetail({ pot, potId }) {
               <EmptyState icon={Shield} title="No fixtures" description="This gameweek has no fixtures yet." />
             ) : (
               <div className="space-y-4">
+                <p className="text-sm text-white/45">Choose the team you think will win.</p>
                 <div className="space-y-3">
                   {fixtures.map((fixture) => {
                     const homeDisabled = usedTeamIds.has(fixture.home_team?.id)
@@ -202,36 +215,20 @@ export default function LmsPotDetail({ pot, potId }) {
                     const homeSelected = String(selectedTeamId) === String(fixture.home_team?.id) || (!selectedTeamId && currentPick?.team_id === fixture.home_team?.id)
                     const awaySelected = String(selectedTeamId) === String(fixture.away_team?.id) || (!selectedTeamId && currentPick?.team_id === fixture.away_team?.id)
                     return (
-                      <div key={fixture.id} className="space-y-2">
-                        <FixtureCard
-                          fixture={fixture}
-                          leagueId={pot.league_id}
-                          seasonId={pot.season_id}
-                          competitionName={pot.leagues?.name}
-                        />
-                        <div className="grid grid-cols-2 gap-2">
-                          <TeamCard
-                            team={fixture.home_team}
-                            leagueId={pot.league_id}
-                            seasonId={pot.season_id}
-                            venue="home"
-                            selected={homeSelected}
-                            disabled={homeDisabled}
-                            disabledReason="Already used this competition"
-                            onSelect={() => setSelectedTeamId(String(fixture.home_team.id))}
-                          />
-                          <TeamCard
-                            team={fixture.away_team}
-                            leagueId={pot.league_id}
-                            seasonId={pot.season_id}
-                            venue="away"
-                            selected={awaySelected}
-                            disabled={awayDisabled}
-                            disabledReason="Already used this competition"
-                            onSelect={() => setSelectedTeamId(String(fixture.away_team.id))}
-                          />
-                        </div>
-                      </div>
+                      <LmsFixtureSelector
+                        key={fixture.id}
+                        fixture={fixture}
+                        leagueId={pot.league_id}
+                        seasonId={pot.season_id}
+                        competitionName={pot.leagues?.name}
+                        homeSelected={homeSelected}
+                        awaySelected={awaySelected}
+                        homeDisabled={homeDisabled}
+                        awayDisabled={awayDisabled}
+                        disabledReason="Already used this competition"
+                        onSelectHome={() => setSelectedTeamId(String(fixture.home_team.id))}
+                        onSelectAway={() => setSelectedTeamId(String(fixture.away_team.id))}
+                      />
                     )
                   })}
                 </div>

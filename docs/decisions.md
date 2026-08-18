@@ -5272,3 +5272,221 @@ the auth gate passed, not a stub). Demo Gameweek functionality itself
 Homepage/LMS/Score Predictor picker UX, Match Centre features, payment
 redesign, Game Engine redesign — none of Parts 1–21 asked for any of
 these, and none were touched.
+
+## Phase 9 — PL Predictor Core UX & Competition Experience
+
+Frontend-only UX pass across the homepage and the three picker surfaces,
+worked and verified sequentially (9A → 9E) per the user's explicit
+instruction, with zero Game Engine/scoring/settlement/payment/rollover/
+auth/RLS changes — every data source reused was already-existing
+infrastructure (`useCurrentGameweek()`, `useLiveScores()`, the Match Centre
+component library, `useMatchCentre.js`'s hooks), not a new query or a new
+realtime channel.
+
+**9A — Dashboard.** Rewritten around a live-football hero (current
+gameweek headline + its fixtures via the unmodified `FixtureCard`) with
+pot cards demoted to a secondary "Your competitions" section, each now
+also showing Picked/Joined/Not entered and Paid/Unpaid — one new batched
+hook, `useDashboardPotStatus()` (`hooks/usePots.js`), reading
+`entry_payments`/`game_entries` once per page load scoped to
+`pot_id IN (...)`, not once per pot. A pot-independent gameweek concept
+(`useCurrentGameweek()`) legitimately returns `null` today (`ISSUE-39`,
+still open) — handled as a deliberate `EmptyState`, verified against both
+that real empty state and, separately, the happy path via a temporary,
+fully-reverted `is_current = true` toggle on one real gameweek.
+
+**9B — LMS.** New `components/pot/lms/LmsFixtureSelector.jsx` replaces the
+old `FixtureCard` + two separate `TeamCard` buttons (two competing
+selection surfaces for one decision) with a single fixture-is-the-selection
+surface: home team / stats-icon opening the existing `MatchCentreDrawer`
+unmodified / away team. Selection state, `usedTeamIds` disabling, and the
+Save/Update call are untouched — only the presentation changed. Live-
+verified end to end against the real `LMS` pot (temporarily flipped one
+member's `void`/`eliminated` entry to `pending`/`alive` for visual
+verification, then reverted to the exact prior row, including deleting the
+one real pick the test itself saved) — team selection, the "PICKED" badge,
+drawer open/close preserving the selection (Part 15's explicit
+requirement), and used-team disabling with the correct `aria-label`/
+`disabled` state all confirmed live, not assumed.
+
+**9C — Score Predictor.** Two changes inside `PredictorPotDetail.jsx`
+only: the per-fixture collapse toggle, when that fixture already holds the
+saved prediction, now shows the live prediction ("Hull City 2–5 Man
+United" / "Goalscorer: X" or "No goalscorer selected") while collapsed,
+instead of the generic "Predict this fixture" text — required a small,
+additive change to `usePredictorEntry.js`'s existing select
+(`goalscorer:players(id, display_name)`, single unambiguous FK, no new
+query). The goalscorer picker groups `eligiblePlayersWithTeam` by team
+then by position (Forwards → Midfielders → Defenders → Goalkeepers,
+mapped from the real `Offence`/`Midfield`/`Defence`/`Goalkeeper`
+vocabulary; the one stray `Coach` row sorts last, never filtered out) —
+`PlayerCard` itself is reused completely unmodified. Live-verified against
+the real `Score Predictor` pot's own already-existing saved prediction
+(no test data needed) — both team groups render all four position
+sections in the correct order.
+
+**9D — Pick 5.** Reviewed `Pick5FixturePicker.jsx`/`PicksSummaryPanel.jsx`/
+`JackpotCard.jsx`/`EntryStatusBar.jsx`/`MemberCard.jsx` against the
+brief's own checklist (fixture-first flow, persistent summary, Match
+Centre access, no partial-match-win copy) — confirmed already correct,
+no redesign needed, matching the plan's own expectation. **Found and fixed
+one real bug in the process** (not hypothesized — reproduced live): see
+`ISSUE-46` in `current-state.md`, a dead `setShowPicker(false)` reference
+in `PotDetail.jsx`'s `handleSaveEntry()` that threw after every successful
+save, masking the real success toast with a confusing error. One-line
+fix; live-verified with a real 5-player save producing zero console
+errors; the test entry (`game_entries` row + 5 `pick5_picks` rows) removed
+by exact ID afterward, the pot's pre-existing `entry_payments` row left
+untouched.
+
+**9E — Shared polish.** `BottomNav.jsx` gained the same
+`useIsSuperAdmin()`-gated link `TopNav.jsx` already had — a real,
+confirmed gap (grid now `grid-cols-4` when both Admin and Super Admin are
+visible; verified live via a real super-admin session, no overflow at
+375/390px). Each of the three pot-detail headers
+(`PotDetail.jsx`/`LmsPotDetail.jsx`/`PredictorPotDetail.jsx`) gained a
+small, contextual "Manage" link to the existing `/admin/payments` page,
+shown only to that pot's own admin (`isPotAdmin`, already computed in
+each file) — no new admin page, no route-guard change. New markup
+(`LmsFixtureSelector`'s `TeamOption`, the Predictor grouping) already
+carried `aria-pressed`/`aria-label`/`disabled` state matching
+`TeamCard`/`PlayerCard`'s existing pattern; a full `aria-label` spot-check
+on the LMS selector confirmed correct selected/unavailable phrasing live.
+
+### Verification performed, live, this session
+
+- `npm run build` clean after every slice; full Deno suite **347/347**
+  unchanged (no backend logic touched).
+- Every picker surface tested end to end against real pots/real accounts
+  (`LMS`, `Score Predictor`, a real Pick 5 pot), not synthetic fixtures —
+  including two temporary, fully-reverted database toggles (one LMS
+  member's eliminated status, one gameweek's `is_current` flag) whose
+  exact prior state was captured before the change and confirmed restored
+  after, plus one real Pick 5 save/delete round-trip cleaned up by exact
+  row ID.
+- `document.documentElement.scrollWidth`/`clientWidth` compared at
+  375/390/768/1440px on every touched page (Dashboard, LMS, Score
+  Predictor, Pick 5, the three pot headers, `BottomNav`) — zero overflow
+  at any size on any of them.
+
+### Not started, deliberately, per the user's own scope boundary
+
+Payments redesign, new competition types, Game Engine changes, deployment,
+SMTP — none of Phase 9's 32 parts asked for any of these, and none were
+touched.
+
+## Phase 9 — Demo Gameweek / Match Centre UX Enhancement
+
+Made the Demo Gameweek feel like a miniature version of the real product
+for beta demos, rather than "an event generator for admins." Confirmed
+before writing any code: `demo-generate-data`/`generateHistory.ts` already
+created exactly three real pots (Demo Pick 5/LMS/Score Predictor) and wrote
+every pick through the real Game Engine
+(`resolveEngine(gameType).validateEntry/calculateScore/settle`) — this
+phase is overwhelmingly a frontend presentation layer on top of data that
+was already real, not a data-generation rebuild. No Game Engine, scoring,
+settlement, payment, or RLS logic was touched.
+
+**New surfaces**: `hooks/useDemoInsights.js` — `useDemoPotSummaries()`
+(jackpot/entries/alive-count/round/your-position, one batched query per
+mode, same idiom as Phase 9A's `useDashboardPotStatus()`) and
+`useDemoPickInsights()` (per-fixture/per-goalscorer pick counts and
+success state, read straight off `pick5_picks.result`/
+`game_entry_lms.competitive_status`/`predictor_fixture_picks` — nothing
+computed that the engine hadn't already written). `components/admin/
+DemoPotSummaryCard.jsx` and `DemoFixtureInsight.jsx` render them.
+`DemoGameweek.jsx` restructured: header (status/progress) → three real pot
+cards → Fixtures & Results (existing `FixtureCard`, now with an opt-in
+`showGoalscorers` prop, plus the new insight strip) → a compact event feed
+(restyled from the existing `useDemoTimeline()` data, no new query) →
+admin controls demoted into a clearly-labelled, visually secondary "Demo
+controls" card, with Reset now behind a confirmation `Modal`.
+`useDemoGameweekFixtures` (a second, demo-only 5s-polling query that never
+even fetched `fixture_events`) was retired in favor of `useGameweek()` +
+`useLiveScores()` — the exact pair every real gameweek page already uses —
+which is also the only way goalscorer data could reach a fixture card
+without a second query. `useLiveScores.js` gained two more keys
+(`demo-pot-summaries`/`demo-pick-insights`) in its existing broad
+by-key-prefix invalidation on `fixture_events` changes, the same treatment
+its own Match Centre derived-stat keys already get — a no-op on every
+non-demo page.
+
+**`MatchCentreDrawer.jsx`** restructured from one long scrolling column
+into a fixed score/metadata header (always visible, per "goals and match
+state should be visually prominent") with Overview/Stats/Lineups/Events
+tabs underneath — same data, same hooks, same props, same 3+ non-demo call
+sites (`FixtureCard`, `LmsFixtureSelector`), reorganised, nothing
+fabricated. The "Difficulty" pill (`FixtureCard.jsx` and
+`MatchCentreDrawer.jsx`, previously identical bare "Easy"/"Difficult")
+was relabelled to "Easier/Balanced/Tough fixture" plus a tooltip
+explaining it's `fixtureDifficultyFromStanding()`'s own league-position
+heuristic — the user's own explicit choice between three presented
+options, not a redesign of the underlying calculation. `SlideDrawer.jsx`
+(the shared panel primitive behind both Match Centre and Player drawers)
+gained a minimal focus trap — focuses the panel on open, wraps Tab/
+Shift+Tab within it, restores focus to the trigger on close — the one
+accessibility gap Part 25 asked to verify that turned out to be missing.
+
+### Three real bugs found live during verification, fixed, unrelated to any single new feature but surfaced by this phase's own work touching the same surfaces
+
+1. **Every synthetic demo LMS user picked the identical team every
+   gameweek** (`generateHistory.ts`'s `writeLmsPicksBatch()` — always took
+   the *first* unused team in a fixed, shared order instead of choosing
+   randomly among the unused candidates). Fixed; re-verified live with a
+   real, varied per-user distribution. See `ISSUE-47`.
+2. **Two demo teams could share the identical `short_name`**
+   (`names.ts`'s `randomClubName()` deduped on the full name only, not the
+   `place` that becomes `shortName`) — a real, visible "Kingswell vs
+   Kingswell" bug in the actual fixture UI, not cosmetic. Fixed by
+   deduping on `place` itself. See `ISSUE-48`.
+3. **`FixtureCard.jsx`'s `TeamRow` had no width constraint** — a classic
+   flexbox `min-width: auto` trap, invisible with short names and little
+   form history, a real confirmed overflow with the demo league's longer
+   names and a full form row. Fixed with `min-w-0`/`flex-1`/
+   `overflow-hidden`, re-verified overflow-free at all four breakpoints.
+   See `ISSUE-49`.
+
+A fourth issue was found and confirmed but is **out of scope, not fixed**:
+`TopNav.jsx`'s "Sign out" button overflows at 768px specifically for a
+`super_admin` account (five nav links visible, one more than any other
+role sees) — `TopNav.jsx` itself was never touched this phase. See
+`ISSUE-50`.
+
+### Verification performed, live, this session
+
+- `npm run build` clean after every slice; full Deno suite **347/347**
+  unchanged throughout (no Game Engine/scoring/settlement logic touched).
+- Full real-browser walkthrough of the exact 24-step sequence in the
+  user's own brief: reset → generate → confirmed exactly 3 pots with real,
+  varied entries/picks/payments → started the live gameweek → advanced
+  through real events → confirmed scores, goalscorers, pick-insight
+  numbers (including live "✓ N successful" appearing the moment a pick's
+  `result` flips to `winning`/`won`), LMS eliminations, Predictor points,
+  and standings all updated live, with zero console errors throughout →
+  opened Match Centre on both a demo fixture and a real, non-demo fixture
+  (confirming the shared-component restructure regressed nothing) →
+  verified all four tabs, the relabelled difficulty pill, squads, the
+  event timeline, and the Player Drawer stacking correctly on top →
+  completed the gameweek → confirmed final standings/jackpot via direct
+  SQL → reset, then fully deleted the demo data → confirmed zero demo
+  residue (0 demo pots/sessions/players; one small, pre-existing,
+  already-documented `teardown.ts` edge-case gameweek-ID collision left
+  behind, not new, not touched) → confirmed real, non-demo pots/users/
+  entries/payments exactly match the pre-session baseline snapshot, byte
+  for byte on every count.
+- Responsive: 375/390/768/1440px, measured via `scrollWidth`/`clientWidth`
+  (the technique that has now caught real overflow bugs in every phase of
+  this project) — found and fixed `ISSUE-49` in the process, found but
+  correctly did not fix the out-of-scope `ISSUE-50`.
+- Accessibility: keyboard-only pass confirmed the Match Centre tabs are
+  reachable and operable, the Reset confirmation modal opens/closes
+  correctly via Escape, and `SlideDrawer`'s new focus trap correctly
+  wraps focus (Close button ↔ last tab, confirmed via
+  `document.activeElement`) instead of leaking focus to the page behind
+  the backdrop.
+
+### Not started, deliberately, per the user's own scope boundary
+
+Any change to Game Engine/scoring/settlement/payment/LMS/Predictor rules,
+eligibility, or deadlines — the entire phase worked on top of data the
+existing engine already produces correctly.

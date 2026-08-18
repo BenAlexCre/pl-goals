@@ -25,6 +25,55 @@ export function usePots() {
   })
 }
 
+// Phase 9A — Dashboard "your competitions" section. One batched query per
+// fact (not one per pot): entry_payments/game_entries are both already
+// readable under each pot's existing RLS (entry_payments_select_member/
+// pot member policies) — nothing new on the backend, this just reads them
+// scoped to `user_id` + `pot_id IN (...)` in a single round trip regardless
+// of how many pots the user is in, matching Part 27's "no unnecessary
+// queries." Pick 5 payments/entries are gameweek-scoped (picked the row
+// matching the current gameweek, if any); LMS/Predictor are season-scoped
+// (gameweek_id IS NULL) — a season-scoped "has an entry" is reported as
+// "Joined", not overclaimed as "picked this week", since confirming a
+// specific week's pick for those two modes would need a further
+// mode-specific query per pot, not a fair trade for a secondary,
+// deliberately concise dashboard section.
+export function useDashboardPotStatus(potIds, currentGameweekId) {
+  return useQuery({
+    queryKey: ['dashboard-pot-status', potIds, currentGameweekId],
+    enabled: potIds.length > 0,
+    queryFn: async () => {
+      const { data: payments, error: paymentsError } = await supabase
+        .from('entry_payments')
+        .select('pot_id, gameweek_id, is_paid')
+        .in('pot_id', potIds)
+      if (paymentsError) throw paymentsError
+
+      const { data: entries, error: entriesError } = await supabase
+        .from('game_entries')
+        .select('pot_id, gameweek_id, status')
+        .in('pot_id', potIds)
+      if (entriesError) throw entriesError
+
+      const statusByPot = new Map()
+      for (const potId of potIds) {
+        const payment = (payments ?? []).find(
+          (p) => p.pot_id === potId && (p.gameweek_id === null || p.gameweek_id === currentGameweekId)
+        )
+        const entry = (entries ?? []).find(
+          (e) => e.pot_id === potId && (e.gameweek_id === null || e.gameweek_id === currentGameweekId)
+        )
+        statusByPot.set(potId, {
+          isPaid: payment?.is_paid ?? null,
+          hasEntry: !!entry,
+          entryScoped: entry ? entry.gameweek_id !== null : null,
+        })
+      }
+      return statusByPot
+    },
+  })
+}
+
 export function usePot(potId) {
   const { user } = useAuthStore()
   return useQuery({

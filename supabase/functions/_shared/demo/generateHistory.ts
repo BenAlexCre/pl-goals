@@ -252,10 +252,21 @@ async function writeLmsPicksBatch(
     for (const gw of gws) {
       if (gw.role === 'live' && rng() >= LIVE_GAMEWEEK_SUBMIT_RATE) continue
 
+      // Real bug caught live (Phase 9 — Demo Gameweek verification): this
+      // used to be `teamsInPlay.find((t) => !usedTeamIds.has(t))` — the
+      // FIRST unused team in a fixed, identical order every user shares
+      // (the same `league.fixturesByGameweek` object) — so every synthetic
+      // LMS user picked the exact same team every gameweek (confirmed
+      // live: 10/10 users on team A in GW1, then the same 10 on team B in
+      // GW2), directly the "every user choosing the same team" failure
+      // this generator is supposed to avoid. Picking uniformly at random
+      // among the still-unused candidates (same seeded `rng`, so still
+      // fully reproducible for a given seed) is the fix.
       const fixtures = league.fixturesByGameweek.get(gw.id) ?? []
       const teamsInPlay = fixtures.flatMap((f) => [f.homeTeamId, f.awayTeamId])
-      const choice = teamsInPlay.find((t) => !usedTeamIds.has(t))
-      if (choice === undefined) continue // ran out of unused teams for this synthetic user — skip, not fatal
+      const availableTeams = teamsInPlay.filter((t) => !usedTeamIds.has(t))
+      if (availableTeams.length === 0) continue // ran out of unused teams for this synthetic user — skip, not fatal
+      const choice = availableTeams[Math.floor(rng() * availableTeams.length)]
       usedTeamIds.add(choice)
 
       const gameEntry: GameEntry = {

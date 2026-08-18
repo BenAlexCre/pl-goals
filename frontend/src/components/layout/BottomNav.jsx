@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
-import { Home, User, Settings } from 'lucide-react'
-import { useIsAdmin } from '../../hooks/useAdmin'
+import { Home, User, Settings, ShieldCheck } from 'lucide-react'
+import { useIsAdmin, useIsSuperAdmin } from '../../hooks/useAdmin'
 
 export default function BottomNav() {
   // Launch Readiness Sprint 1A — hiding the link is a small, additional
@@ -8,16 +8,20 @@ export default function BottomNav() {
   // substitute for it — the route itself blocks a non-admin regardless of
   // whether this link is visible.
   const { isAdmin } = useIsAdmin()
+  // Phase 9E — the same Super Admin link TopNav.jsx already has (Phase 8D,
+  // Part 13), just missing here on mobile until now.
+  const isSuperAdmin = useIsSuperAdmin()
 
   const links = [
     { to: '/dashboard', label: 'Home', icon: Home },
     { to: '/profile', label: 'Profile', icon: User },
     ...(isAdmin ? [{ to: '/admin', label: 'Admin', icon: Settings }] : []),
+    ...(isSuperAdmin ? [{ to: '/super-admin', label: 'Super Admin', icon: ShieldCheck }] : []),
   ]
 
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 glass border-t border-white/5 safe-area-pb">
-      <div className={`grid ${links.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
+      <div className={`grid ${links.length === 4 ? 'grid-cols-4' : links.length === 3 ? 'grid-cols-3' : 'grid-cols-2'}`}>
         {links.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}

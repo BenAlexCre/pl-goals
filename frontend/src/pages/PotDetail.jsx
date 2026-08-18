@@ -8,6 +8,7 @@ import {
   Eye,
   EyeOff,
   Radio,
+  Settings,
 } from 'lucide-react'
 import { supabase, extractFunctionError } from '../lib/supabase'
 import Card from '../components/ui/Card'
@@ -786,7 +787,6 @@ export default function PotDetailPage() {
       ])
 
       setMessage('Picks saved successfully')
-      setShowPicker(false)
     } catch (err) {
       setErrorMessage(err.message || 'Failed to save entry')
     } finally {
@@ -832,16 +832,31 @@ export default function PotDetailPage() {
           member count and entry fee replace it as facts an organiser or
           player actually cares about. */}
       <section className="overflow-hidden rounded-3xl border border-white/8 bg-gradient-to-br from-surface-1 via-surface-2 to-pitch-900 p-4 sm:p-7">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-            {pot.leagues?.name || 'Tournament'}
-          </span>
-          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
-            {pot.seasons?.name || 'Season'}
-          </span>
-          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60 capitalize">
-            {pot.status}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+              {pot.leagues?.name || 'Tournament'}
+            </span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60">
+              {pot.seasons?.name || 'Season'}
+            </span>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/60 capitalize">
+              {pot.status}
+            </span>
+          </div>
+
+          {/* Phase 9E, Part 11 — same contextual /admin/payments link as
+              LmsPotDetail.jsx/PredictorPotDetail.jsx, shown only to this
+              pot's own admin. */}
+          {isPotAdmin ? (
+            <Link
+              to="/admin/payments"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
+            >
+              <Settings size={13} />
+              Manage
+            </Link>
+          ) : null}
         </div>
 
         <h1 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">{pot.name}</h1>

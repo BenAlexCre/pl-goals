@@ -10,7 +10,12 @@ const DIFFICULTY_STYLES = {
   balanced: 'border-amber/30 bg-amber/10 text-amber',
   difficult: 'border-red-goal/30 bg-red-goal/10 text-red-goal',
 }
-const DIFFICULTY_LABEL = { easy: 'Easy', balanced: 'Balanced', difficult: 'Difficult' }
+// Deliberately not a bare "Easy"/"Difficult" — reads as a statement about
+// the fixture's own quality otherwise. "fixture" in every label plus a
+// tooltip makes clear this is fixtureDifficultyFromStanding()'s own
+// opponent-league-position heuristic, not an official PL rating.
+const DIFFICULTY_LABEL = { easy: 'Easier fixture', balanced: 'Balanced fixture', difficult: 'Tough fixture' }
+const DIFFICULTY_TITLE = 'Fixture difficulty — based on the opponent’s league position, not an official rating'
 
 function Crest({ url, alt }) {
   return (
@@ -24,15 +29,26 @@ function Crest({ url, alt }) {
   )
 }
 
+// Phase 9 — Demo Gameweek verification found a real, pre-existing overflow
+// bug here: this flex item had no min-w-0/flex-1, so a flex child with no
+// explicit width defaults to min-width:auto (its content's natural width)
+// — harmless with short club names and 0-2 form results (what every prior
+// manual check happened to use), but a genuine, confirmed overflow with
+// the demo league's longer generated names and a full 3-5-result form row
+// (both real once a demo gameweek's history has actually played out).
+// min-w-0/flex-1 on the row plus min-w-0/overflow-hidden on the form row
+// let the browser shrink/clip gracefully instead of forcing the whole
+// card (and page) wider — same fix shape as AppShell.jsx/TopNav.jsx's own
+// Phase 8D overflow fixes.
 function TeamRow({ team, standing, form, align }) {
   return (
-    <div className={`flex items-center gap-2.5 ${align === 'right' ? 'flex-row-reverse text-right' : ''}`}>
+    <div className={`flex min-w-0 flex-1 items-center gap-2.5 ${align === 'right' ? 'flex-row-reverse text-right' : ''}`}>
       <Crest url={team?.crest_url} alt={team?.name} />
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-white">{team?.short_name || team?.name || 'TBD'}</p>
-        <div className={`mt-1 flex items-center gap-1.5 ${align === 'right' ? 'flex-row-reverse' : ''}`}>
+        <div className={`mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden ${align === 'right' ? 'flex-row-reverse' : ''}`}>
           {standing ? (
-            <span className="text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>
+            <span className="shrink-0 text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>
           ) : null}
           <TeamForm results={form} />
         </div>
@@ -53,12 +69,35 @@ function ordinalSuffix(n) {
   }
 }
 
+// Phase 9 — Demo Gameweek enhancement (Part 8). Opt-in only: every
+// existing consumer (Dashboard, GameweekPage, Pick5/Predictor pickers)
+// keeps its current pixel-identical output unless it explicitly passes
+// showGoalscorers, so this never turns every fixture card into a match
+// report the way the brief itself warns against. Reads fixture.fixture_events
+// already embedded by useGameweek()/useCurrentGameweek() — no new query.
+function GoalscorerLine({ events = [] }) {
+  const goals = events
+    .filter((e) => e.event_type === 'goal')
+    .sort((a, b) => a.minute - b.minute || (a.extra_minute ?? 0) - (b.extra_minute ?? 0))
+  if (goals.length === 0) return null
+  return (
+    <div className="mt-2.5 space-y-1 border-t border-white/6 pt-2.5">
+      {goals.map((g) => (
+        <p key={g.id} className="truncate text-xs text-white/45">
+          &#9917; {g.player?.display_name ?? 'Unknown'} {g.minute}{g.extra_minute ? `+${g.extra_minute}` : ''}&apos;
+          {g.is_own_goal ? ' (OG)' : ''}
+        </p>
+      ))}
+    </div>
+  )
+}
+
 // The shared fixture card every game mode's picker will eventually
 // consume (Phase 8a builds this + wires it into GameweekPage only; the
 // three picker redesigns that reuse it are a later phase). Opens
 // MatchCentreDrawer on click — one implementation, no per-mode
 // duplication.
-export default function FixtureCard({ fixture, leagueId, seasonId, competitionName }) {
+export default function FixtureCard({ fixture, leagueId, seasonId, competitionName, showGoalscorers = false }) {
   const [drawerOpen, setDrawerOpen] = useState(false)
 
   const { data: standings = [] } = useLeagueStandings(leagueId, seasonId)
@@ -93,7 +132,10 @@ export default function FixtureCard({ fixture, leagueId, seasonId, competitionNa
           <span>{competitionName}</span>
           <span className="flex items-center gap-2">
             {difficulty && (
-              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${DIFFICULTY_STYLES[difficulty]}`}>
+              <span
+                title={DIFFICULTY_TITLE}
+                className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${DIFFICULTY_STYLES[difficulty]}`}
+              >
                 {DIFFICULTY_LABEL[difficulty]}
               </span>
             )}
@@ -119,6 +161,8 @@ export default function FixtureCard({ fixture, leagueId, seasonId, competitionNa
           )}
           <TeamRow team={fixture.away_team} standing={awayStanding} form={awayForm?.results} align="right" />
         </div>
+
+        {showGoalscorers && <GoalscorerLine events={fixture.fixture_events} />}
       </button>
 
       <MatchCentreDrawer

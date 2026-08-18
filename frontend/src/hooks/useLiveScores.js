@@ -34,6 +34,14 @@ export function useLiveScores(gameweekId, potId) {
           qc.invalidateQueries({ queryKey: ['player-season-stats'] })
           qc.invalidateQueries({ queryKey: ['player-recent-appearances'] })
           qc.invalidateQueries({ queryKey: ['head-to-head'] })
+          // Phase 9 — Demo Gameweek enhancement. Same "invalidate by key
+          // prefix, no specific ID known here" pattern as the Match Centre
+          // hooks above — a goal-affecting event is exactly when a demo
+          // pot's pick-insight numbers (successful/failed picks) need to
+          // reflect it. A no-op on every non-demo page, since these keys
+          // are only ever populated while a demo session exists.
+          qc.invalidateQueries({ queryKey: ['demo-pot-summaries'] })
+          qc.invalidateQueries({ queryKey: ['demo-pick-insights'] })
         }
       )
       .on('postgres_changes',

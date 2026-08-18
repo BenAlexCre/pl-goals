@@ -14,6 +14,8 @@ export default function SlideDrawer({ open, onClose, title, children, widthClass
   const [mounted, setMounted] = useState(false)
   const [visible, setVisible] = useState(false)
   const closeTimeout = useRef(null)
+  const panelRef = useRef(null)
+  const triggerRef = useRef(null)
 
   useEffect(() => {
     if (open) {
@@ -42,6 +44,45 @@ export default function SlideDrawer({ open, onClose, title, children, widthClass
     }
   }, [open, onClose])
 
+  // Phase 9 — Part 25's own gap: Escape/backdrop/scroll-lock already
+  // existed, but Tab could previously move focus out to the (invisible,
+  // behind-the-backdrop) page underneath. Focuses the panel on open, traps
+  // Tab/Shift+Tab within its own focusable elements, and restores focus to
+  // whatever triggered the drawer on close — the same pattern Modal.jsx
+  // would need if it didn't already rely on the browser's native <dialog>
+  // semantics (SlideDrawer is a plain positioned div, not <dialog>, so this
+  // has to be done by hand here).
+  useEffect(() => {
+    if (!open) return
+    triggerRef.current = document.activeElement
+    const focusableSelector = 'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+    const raf = requestAnimationFrame(() => {
+      const first = panelRef.current?.querySelector(focusableSelector)
+      first?.focus()
+    })
+
+    function handleTab(e) {
+      if (e.key !== 'Tab' || !panelRef.current) return
+      const focusable = Array.from(panelRef.current.querySelectorAll(focusableSelector))
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleTab)
+    return () => {
+      cancelAnimationFrame(raf)
+      document.removeEventListener('keydown', handleTab)
+      triggerRef.current?.focus?.()
+    }
+  }, [open])
+
   if (!mounted) return null
 
   return (
@@ -56,6 +97,7 @@ export default function SlideDrawer({ open, onClose, title, children, widthClass
         onClick={onClose}
       />
       <div
+        ref={panelRef}
         className={`
           absolute right-0 top-0 h-full w-full ${widthClass}
           glass border-l border-white/8 shadow-card

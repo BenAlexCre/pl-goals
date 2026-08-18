@@ -57,21 +57,33 @@ export function randomPersonName(rng: () => number): { first: string; last: stri
   return { first: pick(FIRST_NAMES, rng), last: pick(LAST_NAMES, rng) }
 }
 
-export function randomClubName(rng: () => number, usedNames: Set<string>): { name: string; shortName: string } {
+// Real bug caught live (Phase 9 — Demo Gameweek verification): this used
+// to dedupe on the full `${place} ${noun}` name only, but shortName is
+// just `place` alone — two teams could (and, confirmed live, did: "Ashford
+// Villa"/"Ashford Town" both got shortName "Ashford") land the same
+// shortName while having distinct full names, since only the full-name
+// combination was checked for uniqueness. Every place in fixture/pick
+// UI — FixtureCard, standings, LMS/Predictor pickers — renders shortName,
+// so this was a real, visible "two different teams both display as
+// 'Kingswell'" bug, not a cosmetic one. Deduping on the place itself
+// (CLUB_PLACES has 10 entries, TEAM_COUNT is 8 — always enough headroom)
+// guarantees shortName uniqueness, which also guarantees full-name
+// uniqueness as a side effect.
+export function randomClubName(rng: () => number, usedPlaces: Set<string>): { name: string; shortName: string } {
   for (let attempt = 0; attempt < 50; attempt++) {
     const place = pick(CLUB_PLACES, rng)
-    const noun = pick(CLUB_NOUNS, rng)
-    const name = `${place} ${noun}`
-    if (!usedNames.has(name)) {
-      usedNames.add(name)
-      return { name, shortName: place }
+    if (!usedPlaces.has(place)) {
+      usedPlaces.add(place)
+      const noun = pick(CLUB_NOUNS, rng)
+      return { name: `${place} ${noun}`, shortName: place }
     }
   }
-  // Pool exhausted (shouldn't happen at demo scale) — fall back to a
-  // numbered name rather than looping forever.
-  const name = `Demo Town FC ${usedNames.size + 1}`
-  usedNames.add(name)
-  return { name, shortName: name }
+  // Pool exhausted (shouldn't happen at demo scale — CLUB_PLACES has 10
+  // entries) — fall back to a numbered place rather than looping forever,
+  // still guaranteed unique.
+  const place = `Demo Town ${usedPlaces.size + 1}`
+  usedPlaces.add(place)
+  return { name: `${place} FC`, shortName: place }
 }
 
 export function usernameFromName(first: string, last: string, suffix: number): string {

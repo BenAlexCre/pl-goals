@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed: 2026-08-18 (Phase 8D — Authentication, Identity & Super Admin).
+Last reviewed: 2026-08-18 (Phase 9 — Demo Gameweek / Match Centre UX Enhancement).
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,
@@ -533,6 +533,15 @@ this audit's "do NOT add new features" boundary; this is a confirmed gap
 for a future slice to design and build, not a bug this audit's own rules
 permit fixing. **Status: confirmed, open.**
 
+**Phase 9 update (2026-08-18):** `Dashboard.jsx`'s redesign added a
+Paid/Unpaid badge to each pot card (batched `entry_payments` read, see
+`useDashboardPotStatus()` in `hooks/usePots.js`) — a player can now see
+their own payment status for every pot at a glance from the homepage. This
+narrows the gap but doesn't close it: `LmsPotDetail.jsx`/
+`PredictorPotDetail.jsx`'s own headers still show nothing (Pick 5's
+`PotDetail.jsx` already had `EntryStatusBar` from an earlier slice) — out
+of Phase 9's scope, which touched picker UX, not payment surfaces.
+
 #### ISSUE-39 — No gameweek anywhere in the seed data has `is_current = true`; the "current" season's Premier League has zero gameweeks
 **Discovered 2026-08-09**, while live-verifying `ISSUE-34`'s pot-creation form
 fix through the real browser UI. `select count(*) from gameweeks where
@@ -567,7 +576,39 @@ season actually being used for verification, reseed the "current" season
 with real gameweek data, or accept local dev's seed data is simply stale)
 rather than a silent fix.
 
+**Phase 9 update (2026-08-18):** the redesigned `Dashboard.jsx` hero now
+handles this state deliberately — a "No active gameweek right now"
+`EmptyState`, not a fabricated GW1 or a silent blank — confirmed live at
+today's actual `is_current = false`-everywhere state, then separately
+verified against the happy path via a temporary, fully-reverted
+`is_current = true` toggle on one real gameweek (not a data fix, not left
+in place). The underlying data gap itself is still open.
+
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
+
+#### ISSUE-50 — `TopNav.jsx`'s "Sign out" button overflows the viewport at 768px for a `super_admin` account
+**Discovered 2026-08-18, Phase 9 (Demo Gameweek verification)**, while running
+the standard 375/390/768/1440px responsive sweep — confirmed live via direct
+`getBoundingClientRect()` measurement, not eyeballed: at exactly 768px,
+signed in as the real `super_admin` account (five nav links visible —
+Dashboard/Pots/Profile/Admin/Super Admin, one more than a plain `app_admin`
+or pot admin ever sees), the "Sign out" button's right edge sits at 793px
+against a 768px viewport (`document.documentElement.scrollWidth` 793 vs
+`clientWidth` 763) — a real ~25px horizontal overflow, reproduced twice,
+confirmed absent for the same account/breakpoint once fewer nav links are
+present. Initially misattributed to the Demo Gameweek page's own new pot
+cards (that page was open when first found) — re-verified on the plain
+`/dashboard` page with zero demo content once the actual cause was
+narrowed down via `getBoundingClientRect()`, confirming this is a
+`TopNav.jsx` layout issue, not anything in this phase's own new code.
+Distinct from Phase 8D's own `TopNav.jsx` fix (the profile-info block's
+`min-w-0`/`truncate`) — that fix's own verification pass evidently never
+happened to test 768px with all five super_admin-only nav links visible at
+once. **Status: confirmed, not fixed** — `TopNav.jsx` itself is out of
+this phase's scope (Demo Gameweek/Match Centre UX only); needs its own
+small follow-up (likely the same `min-w-0`/`flex-shrink` treatment already
+proven on this file, extended to the nav link row or the whole header
+flex container).
 
 #### ISSUE-27 — `PotDetail.jsx`'s data-loading effects have no stale-response guard
 **Discovered 2026-08-05**, during the production hardening sprint audit.
@@ -754,6 +795,88 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-49 — `FixtureCard.jsx`'s team row had no width constraint, overflowing with longer names or a full form history
+**Discovered and resolved 2026-08-18, Phase 9 (Demo Gameweek verification).**
+Found via the standard 375px `scrollWidth`/`clientWidth` check on the new
+Demo Gameweek page — `TeamRow`'s root `<div>` (inside `FixtureCard.jsx`,
+shared across Dashboard/GameweekPage/every picker) had `flex items-center
+gap-2.5` with no `min-w-0`/`flex-1`, so as a flex item it defaulted to
+`min-width: auto` (its content's natural width) and refused to shrink —
+harmless with the short real club names and 0-2 completed-fixture form
+rows every prior manual check happened to use, but a real, confirmed
+overflow once a team has a full 3-5-result form row (`TeamForm.jsx` shows
+up to 5 W/D/L badges) and a longer generated demo club name. Confirmed
+live: 397px content in a 370px viewport. **Fixed** by adding
+`min-w-0 flex-1` to `TeamRow`'s root and `min-w-0 overflow-hidden` to its
+form-badge row, so the browser truncates the team name and clips the form
+row gracefully instead of forcing the whole page wider — same fix shape
+as `AppShell.jsx`/`TopNav.jsx`'s own Phase 8D overflow fixes. Re-verified
+at 375/390/768/1440px afterward: zero overflow, team names truncate with
+an ellipsis when genuinely too long, form badges clip cleanly.
+
+#### ISSUE-48 — Demo league team generation could give two different teams the identical `short_name`
+**Discovered and resolved 2026-08-18, Phase 9 (Demo Gameweek verification).**
+`randomClubName()` (`supabase/functions/_shared/demo/names.ts`) deduped
+candidate teams on the *full* `"${place} ${noun}"` name only (e.g. "Ashford
+Villa" vs "Ashford Town" are distinct full names) — but `shortName` was
+just `place` alone, never separately checked for uniqueness. Confirmed
+live: a real demo league generated both "Ashford Villa" and "Ashford Town"
+with identical `short_name: "Ashford"`; every consumer that renders
+`short_name` (`FixtureCard`, `MatchCentreDrawer`, standings, every picker)
+would show two visually identical, indistinguishable teams — "Kingswell
+vs Kingswell" was the literal fixture-card text seen live. Also produced a
+React duplicate-key warning in this phase's own new `DemoFixtureInsight.jsx`
+(a symptom, not the root cause). **Fixed** by deduping on the `place`
+itself (`CLUB_PLACES` has 10 entries, `TEAM_COUNT` is 8 — always enough
+headroom), which guarantees both `shortName` uniqueness and full-name
+uniqueness as a side effect. Re-verified live: a fresh demo league's 8
+teams all have distinct `short_name` values, confirmed via direct query.
+
+#### ISSUE-47 — Every synthetic demo LMS user picked the identical team every gameweek
+**Discovered and resolved 2026-08-18, Phase 9 (Demo Gameweek verification).**
+`writeLmsPicksBatch()` (`supabase/functions/_shared/demo/generateHistory.ts`)
+chose each synthetic user's team via
+`teamsInPlay.find((t) => !usedTeamIds.has(t))` — the *first* unused team in
+a fixed order every user in the batch shares (the same
+`league.fixturesByGameweek` object), so with an empty `usedTeamIds` set at
+the start of every user's loop, all of them landed on the same first team
+in gameweek 1, the same second team in gameweek 2, and so on. Confirmed
+live: 10/10 demo LMS users on one team in GW1, the same 10 on a second
+team in GW2 — the exact "every user choosing the same team" failure this
+generator's own Part 20 requirement explicitly warns against. **Fixed**
+by picking uniformly at random among the still-unused candidate teams
+(`availableTeams[Math.floor(rng() * availableTeams.length)]`, the same
+already-seeded `rng`, so still fully reproducible for a given seed) instead
+of always taking the first one. Re-verified live: a fresh demo league
+shows a real, varied per-gameweek team distribution across users (e.g. one
+gameweek split 1/1/3/3/1/1 across six different teams, not 10/0/0/0/0/0).
+Surfaced a related, real product characteristic (not a bug — see the
+Phase 9 session-log entry): with only 10 demo users and 2 history rounds
+already settled by the time the live gameweek is reached, LMS survival to
+that point is genuinely down to chance and can reach zero survivors,
+leaving nothing for a live walkthrough to demonstrate — generating with
+25+ users markedly reduces this risk.
+
+#### ISSUE-46 — Pick 5 entry save threw a dead-reference error after every successful save
+**Discovered and resolved 2026-08-18, Phase 9D (Pick 5 review pass).** Found
+while reading `PotDetail.jsx`'s `handleSaveEntry()` during 9D's light-touch
+review, not by reproducing a user report first — `setShowPicker(false)` was
+called right after a successful `submit-pick5-picks` call, but no
+`showPicker`/`setShowPicker` state was ever declared anywhere in the file
+(confirmed via a full-file grep). Every successful save threw a
+`ReferenceError`, caught by the surrounding `try`/`catch`, which then
+overwrote the just-shown "Picks saved successfully" toast with a second,
+confusing "setShowPicker is not defined" error toast — the picks themselves
+still saved correctly (the write had already completed before the
+dead reference was reached), only the UI feedback was wrong. **Fix:** deleted
+the dead call — no `showPicker` UI element exists anywhere in this file, so
+there was nothing to actually toggle. Live-verified: signed in as a real
+pot admin (`bentest6@gmail.com`), selected 5 players in a real Pick 5 pot,
+saved, confirmed zero console errors and the "Picks submitted" status chip
+updating correctly with no stray error toast. Test entry removed by exact
+ID afterward (`game_entries` row + its 5 `pick5_picks` rows); the pot's
+pre-existing `entry_payments` row was left untouched.
 
 #### ISSUE-45 — `.env.example` documented the wrong variable names for the football API integration and omitted `SUPABASE_ANON_KEY`
 **Discovered and resolved 2026-08-10, Production Readiness Sprint (Staging &

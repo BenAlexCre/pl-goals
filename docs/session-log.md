@@ -13,6 +13,85 @@ from here.
 
 ---
 
+## 2026-08-18 (66) — Phase 9: Demo Gameweek / Match Centre UX Enhancement
+
+**Goal:** make the Demo Gameweek feel like a live miniature version of the
+real product for beta demos — three real pot summary cards, goalscorers
+and real pick-insight numbers on fixtures, a tabbed Match Centre, admin
+controls demoted to a clearly-labelled secondary section. Hard boundary:
+no Game Engine/scoring/settlement/payment/RLS changes. Confirmed before
+writing code that the demo generator already used the real Game Engine
+throughout — this was a frontend presentation phase on real data, not a
+generator rebuild.
+
+**Shipped:** new `useDemoInsights.js` (batched pot-summary/pick-insight
+hooks), new `DemoPotSummaryCard.jsx`/`DemoFixtureInsight.jsx`,
+`DemoGameweek.jsx` fully restructured onto `useGameweek()`/`useLiveScores()`
+(replacing a demo-only 5s poll), `MatchCentreDrawer.jsx` restructured into
+Overview/Stats/Lineups/Events tabs, the "Difficulty" pill relabelled
+app-wide, `SlideDrawer.jsx` gained a focus trap. Full detail — see
+[decisions.md § Phase 9 — Demo Gameweek / Match Centre UX Enhancement](./decisions.md#phase-9--demo-gameweek--match-centre-ux-enhancement).
+
+**Bugs found and fixed, live, unrelated to the UI work but surfaced by
+it:** every synthetic demo LMS user picked the identical team every
+gameweek (`ISSUE-47`); two demo teams could share an identical
+`short_name` — a real "Kingswell vs Kingswell" bug (`ISSUE-48`);
+`FixtureCard.jsx`'s team row had no width constraint, overflowing with
+longer names/full form history (`ISSUE-49`). One more bug found and
+correctly left unfixed as out of scope: `TopNav.jsx`'s Sign-out button
+overflows at 768px for a `super_admin` account specifically (`ISSUE-50`).
+
+**Verified live**: the full 24-step walkthrough from the brief — reset,
+generate, confirmed 3 real pots with varied picks, ran the live gameweek
+through real events with scores/goalscorers/pick-insights/LMS
+eliminations/Predictor points/standings all updating live and zero
+console errors, Match Centre tabs/squads/timeline/Player Drawer all
+verified on both a demo and a real fixture, full teardown confirmed zero
+demo residue with real users/pots/entries/payments matching the
+pre-session baseline exactly. `npm run build` clean throughout; full Deno
+suite 347/347 unchanged. Nothing committed — per the user's explicit
+instruction to stop after this phase for review.
+
+---
+
+## 2026-08-18 (65) — Phase 9: PL Predictor Core UX & Competition Experience
+
+**Goal:** frontend UX polish across the homepage and the three competition
+pickers (LMS, Score Predictor, Pick 5) — no Game Engine/scoring/
+settlement/payment/rollover/auth/RLS work. Explicit instruction: work and
+verify each of five slices (9A–9E) in order, stopping to report rather
+than improvising past any genuine architectural problem found.
+
+**Shipped:** `Dashboard.jsx` rebuilt around a live-football hero (current
+gameweek's fixtures via the unmodified `FixtureCard`) with pot cards
+demoted below it, gaining a batched Picked/Joined/Paid/Unpaid status
+(`useDashboardPotStatus()`); new `LmsFixtureSelector.jsx` replacing LMS's
+old redundant `FixtureCard` + two-`TeamCard` picker with one
+fixture-is-the-selection surface; `PredictorPotDetail.jsx`'s collapsed
+prediction toggle now shows the actual saved score/goalscorer instead of
+generic text, and its goalscorer picker groups by team then position
+(Forwards→Midfielders→Defenders→Goalkeepers); a Pick 5 review pass found
+and fixed one real bug (`ISSUE-46` — a dead `setShowPicker()` reference
+throwing after every successful save); `BottomNav.jsx` gained the Super
+Admin link `TopNav.jsx` already had; all three pot-detail headers gained a
+contextual "Manage" link to the existing `/admin/payments` page for that
+pot's own admin. Full detail — see
+[decisions.md § Phase 9](./decisions.md#phase-9--pl-predictor-core-ux--competition-experience).
+
+**Verified live:** every picker tested end to end against real pots/real
+accounts (`LMS`, `Score Predictor`, a real Pick 5 pot) — team/prediction
+selection, save/update, used-team disabling, the Match Centre drawer
+preserving selection state, goalscorer grouping for both teams. Two
+temporary database toggles (one LMS member's eliminated status, one
+gameweek's `is_current` flag) captured exactly and reverted exactly; one
+real Pick 5 test entry removed by exact row ID afterward. Responsive
+verified (375/390/768/1440px, measured) on every touched page — zero
+overflow anywhere. `npm run build` clean after each slice; full Deno suite
+347/347 unchanged (no backend logic touched). Nothing committed — per the
+user's explicit instruction to stop after this phase for review.
+
+---
+
 ## 2026-08-18 (64) — Phase 8D: Authentication, Identity & Super Admin
 
 **Goal:** production-ready auth/identity (unified Sign In/Sign Up design,

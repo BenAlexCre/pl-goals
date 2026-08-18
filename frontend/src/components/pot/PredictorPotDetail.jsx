@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Target, Lock, Trophy, Star, ChevronDown } from 'lucide-react'
+import { Target, Lock, Trophy, Star, ChevronDown, Settings } from 'lucide-react'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -25,6 +25,36 @@ import { useLeaderboard } from '../../hooks/useLeaderboard'
 import { usePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
+
+// Required goalscorer-grouping order (Forwards -> Midfielders -> Defenders
+// -> Goalkeepers), mapped onto the real `players.position` vocabulary
+// (confirmed live: Goalkeeper/Defence/Midfield/Offence, plus one stray
+// Coach row that isn't a playing position — never filtered out here, just
+// sorted after the four real positions so nothing eligible disappears).
+const POSITION_ORDER = ['Offence', 'Midfield', 'Defence', 'Goalkeeper']
+const POSITION_LABELS = { Offence: 'Forwards', Midfield: 'Midfielders', Defence: 'Defenders', Goalkeeper: 'Goalkeepers' }
+
+// Phase 9C — Part 19: goalscorer candidates grouped by team, then by
+// position within each team, instead of one flat alphabetical-ish grid.
+function groupPlayersByTeamAndPosition(players, homeTeam, awayTeam) {
+  return [homeTeam, awayTeam]
+    .filter(Boolean)
+    .map((team) => {
+      const teamPlayers = players.filter((p) => p.team_id === team.id)
+      const byPosition = new Map()
+      for (const p of teamPlayers) {
+        const key = p.position || 'Other'
+        if (!byPosition.has(key)) byPosition.set(key, [])
+        byPosition.get(key).push(p)
+      }
+      const orderedPositions = [
+        ...POSITION_ORDER.filter((pos) => byPosition.has(pos)),
+        ...[...byPosition.keys()].filter((pos) => !POSITION_ORDER.includes(pos)),
+      ]
+      return { team, groups: orderedPositions.map((position) => ({ position, players: byPosition.get(position) })) }
+    })
+    .filter(({ groups }) => groups.length > 0)
+}
 
 // Score Predictor "pot home" — the Predictor sibling of LmsPotDetail.jsx,
 // same reasoning for staying its own component rather than a branch inside
@@ -92,6 +122,11 @@ export default function PredictorPotDetail({ pot, potId }) {
     const team = p.team_id === selectedFixture?.home_team?.id ? selectedFixture?.home_team : selectedFixture?.away_team
     return { ...p, player_id: p.id, team_name: team?.name, team_short_name: team?.short_name, crest_url: team?.crest_url }
   })
+  const goalscorerGroups = useMemo(
+    () => groupPlayersByTeamAndPosition(eligiblePlayersWithTeam, selectedFixture?.home_team, selectedFixture?.away_team),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [eligiblePlayers, selectedFixture?.id]
+  )
 
   if (gameweeksLoading || entryLoading) {
     return (
@@ -162,12 +197,25 @@ export default function PredictorPotDetail({ pot, potId }) {
             </p>
           </div>
 
-          {entry ? (
-            <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-surface-2 px-4 py-2">
-              <Star size={14} className="text-accent" />
-              <span className="text-sm font-semibold text-white tabular">{totalPoints} pts</span>
-            </div>
-          ) : null}
+          <div className="flex items-center gap-2">
+            {entry ? (
+              <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-surface-2 px-4 py-2">
+                <Star size={14} className="text-accent" />
+                <span className="text-sm font-semibold text-white tabular">{totalPoints} pts</span>
+              </div>
+            ) : null}
+            {/* Phase 9E, Part 11 — same contextual /admin/payments link as
+                LmsPotDetail.jsx, shown only to this pot's own admin. */}
+            {isPotAdmin ? (
+              <Link
+                to="/admin/payments"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
+              >
+                <Settings size={13} />
+                Manage
+              </Link>
+            ) : null}
+          </div>
         </div>
 
         {!entry ? (
@@ -245,6 +293,7 @@ export default function PredictorPotDetail({ pot, potId }) {
                     <select>. */}
                 {fixtures.map((fixture) => {
                   const isSelected = String(fixture.id) === selectedFixtureId
+                  const isCurrentPickFixture = currentPick && String(currentPick.fixture_id) === String(fixture.id)
                   return (
                     <div key={fixture.id} className="space-y-2">
                       <FixtureCard
@@ -264,8 +313,26 @@ export default function PredictorPotDetail({ pot, potId }) {
                           isSelected ? 'border-accent/40 bg-accent/10 text-accent' : 'border-white/10 bg-surface-2 text-white/60 hover:text-white'
                         }`}
                       >
-                        {isSelected ? 'Predicting this fixture' : 'Predict this fixture'}
-                        <ChevronDown size={14} className={`transition-transform ${isSelected ? 'rotate-180' : ''}`} />
+                        {isSelected ? (
+                          <>
+                            Predicting this fixture
+                            <ChevronDown size={14} className="rotate-180 transition-transform" />
+                          </>
+                        ) : isCurrentPickFixture ? (
+                          <span className="flex flex-1 flex-col items-center gap-0.5 py-0.5">
+                            <span className="font-semibold">
+                              {fixture.home_team?.short_name || fixture.home_team?.name} {currentPick.predicted_home_score}&ndash;{currentPick.predicted_away_score} {fixture.away_team?.short_name || fixture.away_team?.name}
+                            </span>
+                            <span className="text-xs font-normal text-white/45">
+                              {currentPick.goalscorer?.display_name ? `Goalscorer: ${currentPick.goalscorer.display_name}` : 'No goalscorer selected'}
+                            </span>
+                          </span>
+                        ) : (
+                          <>
+                            Predict this fixture
+                            <ChevronDown size={14} className="transition-transform" />
+                          </>
+                        )}
                       </button>
 
                       {isSelected && selectedFixture ? (
@@ -301,16 +368,30 @@ export default function PredictorPotDetail({ pot, potId }) {
                                 valid) — deliberately not labeled
                                 "optional" anywhere here, per the brief. */}
                             <p className="mb-2 text-sm text-white/70">Goalscorer</p>
-                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                              {eligiblePlayersWithTeam.map((p) => (
-                                <PlayerCard
-                                  key={p.id}
-                                  player={p}
-                                  seasonId={pot.season_id}
-                                  size="sm"
-                                  selectedCount={String(p.id) === goalscorerId ? 1 : 0}
-                                  onSelect={() => setGoalscorerId((current) => (current === String(p.id) ? '' : String(p.id)))}
-                                />
+                            <div className="space-y-4">
+                              {goalscorerGroups.map(({ team, groups }) => (
+                                <div key={team.id}>
+                                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/35">{team.short_name || team.name}</p>
+                                  <div className="space-y-3">
+                                    {groups.map(({ position, players }) => (
+                                      <div key={position}>
+                                        <p className="mb-1.5 text-[11px] text-white/30">{POSITION_LABELS[position] || position}</p>
+                                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                                          {players.map((p) => (
+                                            <PlayerCard
+                                              key={p.id}
+                                              player={p}
+                                              seasonId={pot.season_id}
+                                              size="sm"
+                                              selectedCount={String(p.id) === goalscorerId ? 1 : 0}
+                                              onSelect={() => setGoalscorerId((current) => (current === String(p.id) ? '' : String(p.id)))}
+                                            />
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
                               ))}
                             </div>
                           </div>

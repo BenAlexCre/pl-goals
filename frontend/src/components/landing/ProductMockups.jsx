@@ -126,7 +126,7 @@ export function NotificationMock({ className = '' }) {
         <Trophy size={16} />
       </span>
       <div className="min-w-0">
-        <p className="text-sm font-medium text-white">You won €84.00 in Friday Night Pool</p>
+        <p className="text-sm font-medium text-white">You won €840.00 in Friday Night Pool</p>
         <p className="mt-0.5 text-xs text-white/40">Gameweek 12 · settled just now</p>
       </div>
       <Bell size={14} className="ml-auto mt-1 shrink-0 text-white/25" />

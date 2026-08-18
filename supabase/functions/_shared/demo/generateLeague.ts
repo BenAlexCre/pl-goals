@@ -105,9 +105,9 @@ export async function generateDemoLeague(
     .single()
   if (leagueError) throw new Error(`Failed to create demo league: ${leagueError.message}`)
 
-  const usedClubNames = new Set<string>()
+  const usedClubPlaces = new Set<string>()
   const teamRows = Array.from({ length: TEAM_COUNT }, (_, i) => {
-    const { name, shortName } = randomClubName(rng, usedClubNames)
+    const { name, shortName } = randomClubName(rng, usedClubPlaces)
     return {
       name,
       short_name: shortName,

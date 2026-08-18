@@ -131,23 +131,8 @@ export function useDemoTimeline(demoSessionId) {
   })
 }
 
-export function useDemoGameweekFixtures(gameweekId) {
-  return useQuery({
-    queryKey: ['demo-gameweek-fixtures', gameweekId],
-    enabled: !!gameweekId,
-    refetchInterval: 5_000,
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('fixtures')
-        .select(`
-          id, kickoff_utc, status, minute, home_goals, away_goals,
-          home_team:teams!fixtures_home_team_id_fkey(id, name, short_name, crest_url),
-          away_team:teams!fixtures_away_team_id_fkey(id, name, short_name, crest_url)
-        `)
-        .eq('gameweek_id', gameweekId)
-        .order('id')
-      if (error) throw error
-      return data ?? []
-    },
-  })
-}
+// Phase 9 — retired in favor of useGameweek(gameweekId) + useLiveScores()
+// (hooks/useGameweek.js / useLiveScores.js), the same pair every real
+// gameweek page already uses: one query that includes fixture_events (this
+// one never did — no goalscorer data), kept fresh by the real realtime
+// subscription instead of a second, demo-only 5s poll. See DemoGameweek.jsx.
