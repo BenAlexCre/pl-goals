@@ -1,12 +1,27 @@
 import { chromium } from 'playwright';
 import { createClient } from '@supabase/supabase-js';
+import * as http from 'node:http';
 import * as dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 const SUPABASE_URL    = process.env.VITE_SUPABASE_URL    ?? process.env.SUPABASE_URL;
 const SERVICE_KEY     = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const POLL_INTERVAL_MS = 60 * 1000; // 3 minutes
+const POLL_INTERVAL_MS = 60 * 1000; // 1 minute
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const MAX_SCRAPE_RETRIES = 2; // Phase 22 — one retry beyond the first attempt, per fixture, per cycle
+const RETRY_DELAY_MS = 5000;
+// Phase 22 — headless:false is a deliberate anti-Cloudflare-detection choice
+// this script always made (see the persistent .chrome-profile/ context below,
+// same reasoning) — headless Chromium has a different, more easily
+// fingerprinted profile. Switching it unconditionally to save on needing a
+// display would trade a known-working evasion posture for an unverified one.
+// A worker host with no physical display should run this under a virtual
+// framebuffer (`xvfb-run -a node ws-live-events.js`) instead — see
+// docs/DEPLOYMENT.md — rather than this script silently changing its own
+// fingerprint. Set WS_HEADLESS=true only if you have specific evidence
+// headless is acceptable for your deployment.
+const HEADLESS = process.env.WS_HEADLESS === 'true';
+const HEALTH_PORT = Number(process.env.WS_HEALTH_PORT ?? 8787);
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
   console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
@@ -15,6 +30,41 @@ if (!SUPABASE_URL || !SERVICE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
+// ─── Phase 22: health state + minimal HTTP health endpoint ───────────────────
+// Not a monitoring platform — the simplest thing that answers "is the worker
+// alive, is the browser alive, what is it doing, when did it last succeed."
+// No new dependency: Node's built-in http module.
+
+const health = {
+  startedAt: new Date().toISOString(),
+  browserAlive: false,
+  activeFixtureCount: 0,
+  lastPollAt: null,
+  lastSuccessfulScrapeAt: null,
+  lastDbWriteAt: null,
+  lastError: null,
+  pollCount: 0,
+};
+
+function startHealthServer() {
+  const server = http.createServer((req, res) => {
+    if (req.url !== '/health') {
+      res.writeHead(404).end();
+      return;
+    }
+    const body = JSON.stringify({
+      status: health.browserAlive ? 'ok' : 'degraded',
+      uptimeSeconds: Math.floor((Date.now() - new Date(health.startedAt).getTime()) / 1000),
+      ...health,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(body);
+  });
+  server.listen(HEALTH_PORT, () => {
+    console.log(`[health] Listening on :${HEALTH_PORT}/health`);
+  });
+  return server;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -22,21 +72,37 @@ function randomDelay(min = 1500, max = 3500) {
   return sleep(Math.floor(Math.random() * (max - min) + min));
 }
 
-// Map WhoScored incident type/satisfier → eventtype text value
+// Map WhoScored incident type/satisfier → event_type text value.
+//
+// Phase 22 fix — CRITICAL, previously-undiscovered bug: this returned
+// SCREAMING_SNAKE_CASE ('GOAL', 'YELLOW_CARD', ...), but every real
+// consumer of fixture_events.event_type uses lowercase snake_case —
+// business-rules.md's own documented rule ("event_type in ('goal',
+// 'penalty')"), the Match Centre views in
+// supabase/migrations/025_match_centre_views.sql ("fe.event_type =
+// 'goal'", "in ('yellow_card', 'red_card', 'second_yellow')"), the demo
+// pipeline's own CHECK constraint (migration 026), and
+// FixtureEventsTimeline.jsx's EVENT_ICON lookup table all agree on
+// lowercase — this script alone disagreed. The practical impact: Pick 5
+// scoring reads player_fixture_goals, a materialized view filtered on
+// `fe.event_type in ('goal', 'penalty') and not fe.is_own_goal` — an
+// uppercase 'GOAL' row would never match that filter, so even a fully
+// working, unblocked, correctly-deduplicated scrape would have silently
+// scored zero goals for every player, forever, with no error anywhere.
 function mapEventType(type, satisfier) {
   if (type === 'Goal') {
-    if (satisfier === 'goalOwn')       return 'GOAL';
-    if (satisfier === 'penaltyScored') return 'GOAL';
-    return 'GOAL';
+    if (satisfier === 'goalOwn')       return 'goal';
+    if (satisfier === 'penaltyScored') return 'goal';
+    return 'goal';
   }
   if (type === 'Card') {
-    if (satisfier === 'yellowCard')  return 'YELLOW_CARD';
-    if (satisfier === 'secondYellow') return 'SECOND_YELLOW_CARD';
-    if (satisfier === 'redCard')     return 'RED_CARD';
+    if (satisfier === 'yellowCard')  return 'yellow_card';
+    if (satisfier === 'secondYellow') return 'second_yellow';
+    if (satisfier === 'redCard')     return 'red_card';
   }
-  if (type === 'SubstitutionOn')  return 'SUB_ON';
-  if (type === 'SubstitutionOff') return 'SUB_OFF';
-  return type.toUpperCase();
+  if (type === 'SubstitutionOn')  return 'sub_on';
+  if (type === 'SubstitutionOff') return 'sub_off';
+  return type.toLowerCase();
 }
 
 // ─── Step 1: Fetch live/in-progress fixtures that have a whoscored_fixture_id ──
@@ -138,7 +204,7 @@ async function scrapeMatchCentreData(page, wsFixtureId) {
 function parseEvents(matchData, dbFixtureId, playerMap, teamMap) {
   // incidentEvents: object keyed by minute string, values are arrays
   const incidents = matchData?.incidentEvents ?? {};
-  const tracked = new Set(['GOAL', 'YELLOW_CARD', 'SECOND_YELLOW_CARD', 'RED_CARD', 'SUB_ON', 'SUB_OFF']);
+  const tracked = new Set(['goal', 'yellow_card', 'second_yellow', 'red_card', 'sub_on', 'sub_off']);
   const events = [];
 
   for (const [minuteStr, minuteEvents] of Object.entries(incidents)) {
@@ -189,16 +255,17 @@ function parseEvents(matchData, dbFixtureId, playerMap, teamMap) {
   return events;
 }
 
-// ─── Step 5: Upsert events — safe to re-run every 3 mins ─────────────────────
+// ─── Step 5: Upsert events — safe to re-run every 1 min ─────────────────────
 
 async function upsertEvents(events) {
   if (!events.length) return 0;
 
-  // Upsert on the natural uniqueness of a fixture event.
-  // Requires a unique constraint in Supabase:
-  //   ALTER TABLE fixtureevents
-  //     ADD CONSTRAINT fixtureevents_uniq
-  //     UNIQUE (fixtureid, eventtype, minute, teamid, playerid);
+  // Upsert on the natural uniqueness of a fixture event. The required
+  // unique constraint (`fixtureevents_uniq`) previously existed only
+  // out-of-band on this project's own local database — formalized in
+  // `supabase/migrations/031_fixture_events_uniqueness.sql` (Phase 22),
+  // so a fresh deployment now actually gets it too, matching what this
+  // upsert has always assumed.
   const { error } = await supabase
     .from('fixture_events')
     .upsert(events, {
@@ -213,10 +280,33 @@ async function upsertEvents(events) {
   return events.length;
 }
 
+// ─── Step 3b: scrape with one retry — a single failed page load/network blip
+// shouldn't cost this fixture an entire 1-minute cycle ────────────────────────
+
+async function scrapeWithRetry(page, wsFixtureId) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_SCRAPE_RETRIES; attempt++) {
+    try {
+      return await scrapeMatchCentreData(page, wsFixtureId);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < MAX_SCRAPE_RETRIES) {
+        console.warn(`    Attempt ${attempt} failed (${err.message}) — retrying in ${RETRY_DELAY_MS}ms`);
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ─── Poll once across all live fixtures ──────────────────────────────────────
 
 async function runOnce(page, playerMap, teamMap) {
+  health.lastPollAt = new Date().toISOString();
+  health.pollCount++;
+
   const liveFixtures = await getLiveFixtures();
+  health.activeFixtureCount = liveFixtures.length;
 
   if (!liveFixtures.length) {
     console.log(`[${new Date().toISOString()}] No live fixtures in window.`);
@@ -230,21 +320,24 @@ async function runOnce(page, playerMap, teamMap) {
     console.log(`  → DB:${dbId}  WS:${wsId}  status:${status}`);
 
     try {
-      const matchData = await scrapeMatchCentreData(page, wsId);
+      const matchData = await scrapeWithRetry(page, wsId);
       if (!matchData) {
         console.log('    No matchCentreData found — skipping.');
         continue;
       }
+      health.lastSuccessfulScrapeAt = new Date().toISOString();
 
       const events = parseEvents(matchData, dbId, playerMap, teamMap);
       console.log(`    Parsed ${events.length} trackable events`);
 
       const upserted = await upsertEvents(events);
       console.log(`    Upserted ${upserted} rows into fixture_events`);
+      if (upserted > 0) health.lastDbWriteAt = new Date().toISOString();
 
       await randomDelay(2000, 4000);
     } catch (err) {
-      console.error(`    ERROR scraping WS ${wsId}: ${err.message}`);
+      health.lastError = { message: err.message, at: new Date().toISOString(), wsFixtureId: wsId };
+      console.error(`    ERROR scraping WS ${wsId} after ${MAX_SCRAPE_RETRIES} attempts: ${err.message}`);
     }
   }
 }
@@ -253,17 +346,20 @@ async function runOnce(page, playerMap, teamMap) {
 
 async function main() {
   console.log('='.repeat(60));
-  console.log('WhoScored Live Events Poller — polls every 3 minutes');
+  console.log(`WhoScored Live Events Poller — polls every ${POLL_INTERVAL_MS / 1000}s, headless=${HEADLESS}`);
   console.log('='.repeat(60));
 
+  const healthServer = startHealthServer();
+
   const context = await chromium.launchPersistentContext('.chrome-profile', {
-    headless: false,
+    headless: HEADLESS,
     channel:  'chrome',
     userAgent: USER_AGENT,
   });
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
+  health.browserAlive = true;
 
   const page = await context.newPage();
 
@@ -273,8 +369,22 @@ async function main() {
   let lastRefresh = Date.now();
   console.log(`Player map: ${playerMap.size} entries | Team map: ${teamMap.size} entries`);
 
+  let stopping = false;
+  let shutdownResolve;
+  const shutdownSignal = new Promise((resolve) => { shutdownResolve = resolve; });
+
+  async function shutdown(signal) {
+    if (stopping) return;
+    stopping = true;
+    console.log(`\n[shutdown] Received ${signal} — closing browser context and health server...`);
+    health.browserAlive = false;
+    shutdownResolve();
+  }
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
   try {
-    while (true) {
+    while (!stopping) {
       // Refresh maps every 30 minutes in case new players/teams were synced
       if (Date.now() - lastRefresh > 30 * 60 * 1000) {
         playerMap   = await buildPlayerMap();
@@ -283,12 +393,26 @@ async function main() {
         console.log(`[refresh] Maps rebuilt — players:${playerMap.size} teams:${teamMap.size}`);
       }
 
-      await runOnce(page, playerMap, teamMap);
-      console.log(`[wait] Next poll in ${POLL_INTERVAL_MS}/60000 minute${POLL_INTERVAL_MS !== 1 ? 's' : ''}`);
-      await sleep(POLL_INTERVAL_MS);
+      try {
+        await runOnce(page, playerMap, teamMap);
+      } catch (err) {
+        // A failure inside runOnce's own per-fixture try/catch already
+        // isolates one bad fixture from the rest of that cycle — this
+        // outer catch is for anything unexpected escaping runOnce itself
+        // (e.g. a DB error in getLiveFixtures), so one bad cycle doesn't
+        // kill the whole process the way an uncaught main() rejection did
+        // before.
+        health.lastError = { message: err.message, at: new Date().toISOString() };
+        console.error(`[cycle] Unexpected error, continuing to next poll: ${err.message}`);
+      }
+
+      console.log(`[wait] Next poll in ${POLL_INTERVAL_MS / 1000}s`);
+      await Promise.race([sleep(POLL_INTERVAL_MS), shutdownSignal]);
     }
   } finally {
     await context.close();
+    healthServer.close();
+    console.log('[shutdown] Clean exit.');
   }
 }
 

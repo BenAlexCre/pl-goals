@@ -35,6 +35,26 @@ are now documented decisions**, not open questions — manual rollover
 (exact procedure in `decisions.md`), `is_current` intentionally
 unused. See § 0 and § 4 below for the updated picture.
 
+**Update, 2026-08-19 (Phase 22, Production Live-Match Event Pipeline)
+— closes the single biggest remaining gap: live in-match data.** Full
+detail in `decisions.md` § Phase 22. Found and fixed a critical,
+previously-undiscovered gap — **nothing updated live scores at all**
+(neither provider wrote `fixtures.status`/`home_goals`/`away_goals`
+during a match) — via a new `sync-live-scores` Edge Function. Found and
+fixed the single most severe bug of any phase so far: `ws-live-events.js`
+wrote `fixture_events.event_type` in the wrong case, which would have
+silently scored **zero Pick 5 goals ever**, with no error anywhere.
+Formalized two pieces of out-of-band schema drift (a missing unique
+constraint the worker already depended on; the entire
+`whoscored_fixture_id`/stats-column set) into new migrations — a fresh
+hosted project would previously have been missing them entirely.
+Hardened the worker (retry, graceful shutdown, health endpoint,
+configurable headless mode). Recommends **Railway** for hosting the
+persistent worker (Fly.io alternative, VPS fallback) — see § 6d.
+**The live-match system is now code-complete but still requires a
+persistent worker host to actually run** — see § 6d and § 15 for
+exactly what remains.
+
 ---
 
 ## 0. Beta deployment runbook — READY vs. BLOCKED vs. PRODUCT DECISION
@@ -110,6 +130,31 @@ framework's own unmodified scaffold with no platform adapter).
       was deleted outright, and the built bundle was re-grepped clean
       afterward. `.env.example` rewritten into an explicit PUBLIC
       FRONTEND / SERVER-SECRET split.
+- [x] **Live score/status now has a real, working writer** (Phase 22,
+      `ISSUE-68`) — previously nothing updated `fixtures.status`/
+      `home_goals`/`away_goals` during a match at all. New
+      `sync-live-scores` Edge Function, football-data.org-sourced, live-
+      verified end to end. See § 6c/§ 6d.
+- [x] **The single most severe bug found in any phase so far, fixed**
+      (Phase 22, `ISSUE-69`) — `ws-live-events.js` wrote
+      `fixture_events.event_type` in the wrong case, which would have
+      silently produced zero Pick 5 goals ever, forever, with no error.
+      Fixed; every other consumer already used the correct casing.
+- [x] **Two pieces of out-of-band schema drift formalized into
+      migrations** (Phase 22, `ISSUE-70`/`ISSUE-71`) — the real
+      `fixture_events` unique constraint the worker's upsert already
+      depended on, and the entire `whoscored_fixture_id`/
+      `whoscoredteamid`/`whoscoredplayerid`/`stats_*` column set the
+      WhoScored pipeline needs, both existed only on this project's own
+      local database, never in any migration. A fresh hosted project
+      would have been missing them entirely. Fixed via migrations
+      031/032, applied and re-verified locally.
+- [x] **Live-event worker hardened for production** (Phase 22,
+      `ISSUE-72`) — retry-with-backoff, per-cycle error isolation (a
+      bad cycle no longer kills the whole process), real graceful
+      shutdown, a new `/health` endpoint, configurable headless mode.
+      See § 6d for what still needs a human decision (which host) and
+      manual action (actually deploying it there).
 
 ### DECIDED, DOCUMENTED — not a beta blocker, no code needed
 
@@ -151,12 +196,18 @@ framework's own unmodified scaffold with no platform adapter).
    data fresh on the hosted project; the key used for this phase's
    local live verification does not automatically carry over to a
    hosted deployment.
-6. **A decision on where the WhoScored live-events pipeline runs**
-   (§ 4, new) — it needs a persistent, always-on Node.js/Playwright
-   host outside the Vercel+Supabase serverless stack (a small VPS,
-   Fly.io/Render background worker, or similar). Not required for
-   fixtures/kickoffs/results to work correctly for beta — only for
-   live in-match events and goalscorers.
+6. **Where to actually host the persistent WhoScored live-events
+   worker** (§ 6d, new Phase 22) — recommendation made (**Railway**,
+   Fly.io alternative, VPS fallback), nothing created or deployed. It
+   needs a persistent, always-on Node.js/Playwright host outside the
+   Vercel+Supabase serverless stack — this is the one piece of this
+   phase's work that genuinely cannot proceed further without you
+   picking a host and creating an account there. **Narrower than it
+   was before this phase**: live *scores*/*status* now work without
+   this worker at all (`sync-live-scores`, Phase 22, is a normal Edge
+   Function + cron, no separate host needed) — only live in-match
+   *events* (goals/cards/subs) and goalscorer detail depend on this
+   worker actually running somewhere.
 
 **Once these are supplied**, § 1–§ 9 below can execute in order: run
 migrations against the hosted project, deploy Edge Functions, set
@@ -305,10 +356,8 @@ Studio use before migrations are applied), see § 8 below.
 
 Every directory under `supabase/functions/` except `_shared/` (a module
 imported by the others, never deployed on its own) is a real, deployed
-function. Current inventory, **15 functions** (re-counted Phase 16 — the
-prior "11" undercounted; the 4 missing were `demo-generate-data`,
-`demo-gameweek-control`, `demo-teardown`, `super-admin-actions`, present
-in the repo the whole time but never previously listed in this table):
+function. Current inventory, **16 functions** (Phase 22 adds
+`sync-live-scores` — previously "15 functions," re-counted Phase 16):
 
 | Function | Purpose | Auth model | Classification |
 |---|---|---|---|
@@ -317,6 +366,7 @@ in the repo the whole time but never previously listed in this table):
 | `compute-scores` | Refreshes `player_fixture_goals`, then scores every mode | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** |
 | `settle-gameweek` | Finalizes a gameweek: settle → standings → winner → prize → notify, per mode | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** |
 | `sync-fixtures` | Pulls fixtures/teams/gameweeks from football-data.org, upserts (Phase 21 rewrite — `ISSUE-64`) | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** — live-verified working, see § 6c for the full cron matrix |
+| `sync-live-scores` | **New, Phase 22 (`ISSUE-68`)**. Updates `fixtures.status`/`home_goals`/`away_goals`/`minute` from football-data.org during a live match — the field `sync-fixtures`' once-daily cadence is too slow for. Free/no-op unless a fixture is actually in its live window. | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** — live-verified working, see § 6c |
 | `get-or-create-pick5-entry` | Pick 5 entry creation (idempotent) | Signed-in user | **PRODUCTION REQUIRED** |
 | `get-or-create-lms-entry` | LMS entry creation, enforces entry window | Signed-in user | **PRODUCTION REQUIRED** |
 | `get-or-create-predictor-entry` | Predictor entry creation | Signed-in user | **PRODUCTION REQUIRED** |
@@ -484,7 +534,8 @@ Registered by `003_cron_jobs.sql` + `006_fix_cron_job_headers.sql`:
 | `compute-deadlines-hourly` | `0 * * * *` | `compute-deadlines` | Locks entries past deadline | same | Yes |
 | `compute-scores-every-3-min` | `*/3 * * * *` | `compute-scores` | Live/final scoring, all modes | same | Yes |
 | `settle-gameweek-every-30-min` | `*/30 * * * *` | `settle-gameweek` | Settlement, standings, prizes, notifications | same | Yes |
-| `sync-live-events-every-2-min` | `*/2 * * * *` | `sync-live-events` — **expected `404`, function doesn't exist (`ISSUE-4`)** | Would sync live match events | same | No — function doesn't exist; expected 404, not a deployment failure |
+| `sync-live-scores-every-minute` | `* * * * *` | `sync-live-scores` (Phase 22, `ISSUE-68`) | Live `fixtures.status`/`home_goals`/`away_goals`/`minute` during a match | same | Yes — runs every minute continuously but is a free, local-only no-op unless a fixture is actually in its live window; see § 6c |
+| `sync-live-events-every-2-min` | `*/2 * * * *` | `sync-live-events` — **expected `404`, function doesn't exist (`ISSUE-4`)** | Formally superseded, Phase 22 — see `current-state.md` `ISSUE-4` | same | No — function doesn't exist and never should; expected 404, not a deployment failure. The real replacement is the persistent worker, § 6d |
 
 **Not created by any migration** — `supabase_admin`-owned, created out-of-band
 on this project's own environment, present locally but **not guaranteed to
@@ -585,21 +636,152 @@ for live in-match data.
 | Function | Source | Purpose | Frequency | Time / window | Required secret | Failure impact |
 |---|---|---|---|---|---|---|
 | `sync-fixtures` (cron: `sync-fixtures-daily`) | football-data.org `/v4/competitions/{code}/{teams,matches}` | Fixtures, teams, gameweeks, kickoff times, status (scheduled/tbd/live/finished/postponed/cancelled), final scores | Once daily | `0 5 * * *` (05:00 UTC — outside any real Premier League kickoff window, so a mid-sync read never races a live match update) | `FOOTBALL_DATA_KEY` | A missed tick is not urgent — fixture data changes slowly day to day (schedule confirmations, postponements); the next day's tick self-corrects. A confirmed kickoff time that changes intraday (rare) would lag up to 24h until the next tick — acceptable for beta, revisit if a real postponement needs same-day visibility |
+| `sync-live-scores` (cron: `sync-live-scores-every-minute`, **Phase 22**, `ISSUE-68`) | football-data.org `/v4/competitions/{code}/matches?dateFrom&dateTo=today`, same provider as `sync-fixtures` | `fixtures.status`/`home_goals`/`away_goals`/`minute` **during** a match — the field `sync-fixtures`' daily cadence cannot serve. Also performs same-call reconciliation (a finished match's final score is in the same response) | Every minute, continuously | Free/local-only DB check every tick; only calls the external API when a fixture is within -10min/+130min of kickoff and not yet finished | `FOOTBALL_DATA_KEY` (same secret as `sync-fixtures`) | A missed tick delays the live score/status update by another minute — self-corrects on the next tick, no manual intervention. Before Phase 22, **there was no writer of these fields at all during a match** — this is a newly-closed gap, not a frequency tuned from an existing baseline |
 | `frontend/scripts/fullSyncInsert.js` (manual, standalone) | football-data.org, identical logic to `sync-fixtures` | Season rollover (new season's teams/gameweeks/fixtures) or ad hoc backfill | Manual only — once per season, or on demand | N/A | `FOOTBALL_DATA_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (as script env vars) | None — not part of the automated pipeline. See `decisions.md § Phase 21 — Season rollover` for the exact manual procedure this script is step 1 of |
 | `frontend/scripts/fullSyncPlayers.js` (manual, standalone) | football-data.org `/v4/teams/{id}` (squads) | Player/squad reference data | Manual — after fixtures exist for a season, or when squads change | N/A, rate-limited to ~6.5s between requests (free-tier constraint, ~2+ min for 20 teams) | Same as above | None — not part of the automated pipeline. **Has a known, separate bug** (`ISSUE-65`, stale hardcoded `SEASON_ID`) that must be checked before running against a new season |
-| WhoScored live-events pipeline (`ws-live-events.js` + 3 mapping scripts) | WhoScored.com (Playwright browser automation, not an official API) | Live in-match goal/card/substitution events and goalscorers — the one thing neither football-data.org nor api-football's implementation in this codebase covers | `ws-live-events.js` polls every 60s while actively running; mapping scripts run once per season / as squads change | During live matches only | None (no API key — scraping) | **Not yet deployed anywhere** — requires a persistent, always-on Node.js/Playwright host outside the Vercel+Supabase serverless stack (cannot run as an Edge Function — Deno has no Chromium; cannot run via `pg_cron` — not an HTTP API). Without this, the app has correct fixtures/kickoffs/final scores but no live in-play events or goalscorers during a match. This is a real, open infrastructure decision for hosting, not solved this phase |
+| WhoScored live-events pipeline (`ws-live-events.js` + 3 mapping scripts, **hardened Phase 22**, `ISSUE-72`) | WhoScored.com (Playwright browser automation, not an official API) | Live in-match goal/card/substitution events and goalscorers — the one thing neither football-data.org nor api-football's implementation in this codebase covers | Polls every 60s while actively running; only fixtures within -10min/+130min of kickoff (same window as `sync-live-scores`); mapping scripts run once per season / as squads change | During live matches only | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (script env vars, never an Edge Function secret — see § 6d) | **Not yet deployed anywhere persistent** — see § 6d for the hosting recommendation and exactly what remains manual. Without this running somewhere, the app now has correct fixtures/kickoffs/live scores/final results (Phase 22's `sync-live-scores` fix) but no live in-play events or goalscorers during a match |
 
 **Why daily, not hourly or more frequent, for `sync-fixtures`**:
 football-data.org's free tier is the binding constraint (the same
 tier `fullSyncPlayers.js`'s ~6.5s inter-request delay exists to
 respect) — fixture schedule data doesn't change intraday under normal
 circumstances, so a daily sync is the correct match for how often the
-underlying data actually changes, not an arbitrary choice. Live
-scores/status *within* a match day are not this function's job at all
-— that's `compute-scores` (§ 6, every 3 minutes, reading
-`fixtures.status`/goals already present from the last daily sync) and,
-for events/goalscorers specifically, the not-yet-deployed WhoScored
-pipeline above.
+underlying data actually changes, not an arbitrary choice. **Phase 21's
+version of this document assumed `compute-scores` or the daily sync
+already kept live status/scores fresh within a match day — that
+assumption was wrong, and Phase 22 found and fixed the actual gap**
+(`sync-live-scores`, above) — corrected here rather than left standing.
+
+---
+
+## 6d. Persistent live-event worker — hosting, deployment plan, health, secrets (Phase 22)
+
+`ws-live-events.js` needs a real, always-on Node.js process with a
+Chromium browser (via Playwright) that Deno's Edge Runtime cannot
+provide and `pg_cron` cannot invoke (not an HTTP API). This is a
+genuinely separate piece of infrastructure from Vercel (frontend) and
+Supabase (backend) — nothing in this section has been created or
+deployed; it is a plan, not an action taken.
+
+### Hosting recommendation: Railway (primary)
+
+**Railway**, Fly.io as the strongest alternative, a self-managed VPS as
+a cost-minimizing fallback if comfortable with manual ops. Not Render
+as the primary pick — its Background Worker service type is fully
+viable, but doesn't get a free tier the way Railway's low-usage tier
+effectively does, and Railway's deploy story (closest to this
+project's own "git push, near-zero config" Vercel choice) is simpler
+for this specific workload. Full comparison table and reasoning:
+`decisions.md § Phase 22 — Production worker hosting recommendation`.
+**No account created on any of these — this is a recommendation, not
+an action.**
+
+### What the worker needs, wherever it runs
+
+- **A persistent process**, not a serverless/on-demand function — the
+  script runs an infinite loop with its own internal 60s poll timer,
+  not something that starts fresh per-request.
+- **Chromium via Playwright**, and — since this phase deliberately kept
+  `headless:false` as the default (see `decisions.md` for why switching
+  wasn't safe to assume) — **a virtual display**. Standard, well-known
+  pattern, not project-specific: `apt-get install -y xvfb` in the
+  worker's Dockerfile, start command `xvfb-run -a node
+  scripts/ws-live-events.js` instead of a bare `node` invocation. Set
+  `WS_HEADLESS=true` only with specific evidence that headless Chromium
+  doesn't increase Cloudflare blocking for this deployment — not by
+  default.
+- **The persistent Chrome profile directory** (`.chrome-profile/`,
+  currently local-only, git-ignored) should be copied to the worker
+  host once (out of band, not via git — it may contain session
+  cookies) so the worker starts with the same carried-forward session
+  state that's made WhoScored access work reliably in this phase's own
+  tests, rather than starting from a cold profile.
+
+### Build/start commands (no Dockerfile created this phase — this is what it would contain)
+
+```
+# Dockerfile (not created — documented only)
+FROM mcr.microsoft.com/playwright:v1.61.0-jammy
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm ci --omit=dev
+COPY frontend/scripts ./scripts
+COPY frontend/.chrome-profile ./.chrome-profile   # copied out of band, not committed
+CMD ["xvfb-run", "-a", "node", "scripts/ws-live-events.js"]
+```
+
+`frontend/package.json` has no `engines` field — worth pinning (e.g.
+`"engines": {"node": ">=20"}`) once an actual host is chosen, so a
+platform's auto-detected Node version doesn't silently drift; not
+changed this phase since it has no effect locally and the real target
+version depends on the chosen host's available base images.
+
+### Environment variables / secrets (worker-only — never frontend, never committed)
+
+| Variable | Required | Notes |
+|---|---|---|
+| `SUPABASE_URL` | Yes | Same value as the Edge Functions' own `SUPABASE_URL` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Full-privilege — **must never reach the frontend bundle or be committed**. Set only via the worker host's own secrets mechanism (Railway/Fly/Render all have one; a VPS uses a root-only-readable `.env` file, matching this project's own established local pattern for `supabase/functions/.env`) |
+| `WS_HEADLESS` | No, defaults `false` | Only set `true` with specific evidence it's safe for that deployment — see above |
+| `WS_HEALTH_PORT` | No, defaults `8787` | Health check port — point the host's health-check config at `GET /health` on this port |
+
+No football-data.org key is needed by this worker — it only ever talks
+to WhoScored and Supabase, never football-data.org (that's
+`sync-live-scores`/`sync-fixtures`'s job, and they're already Edge
+Functions with their own, separate secret).
+
+### Health check / restart policy
+
+- **Health check**: `GET http://<worker-host>:8787/health` — returns
+  `{"status": "ok"|"degraded", "uptimeSeconds", "browserAlive",
+  "activeFixtureCount", "lastPollAt", "lastSuccessfulScrapeAt",
+  "lastDbWriteAt", "lastError", "pollCount"}`. Point Railway's/Fly's/
+  Render's own built-in HTTP health-check config at this path; a VPS
+  needs a small external check (a cron-based `curl` + alert, or a free
+  uptime-monitoring service hitting the same URL) since there's no
+  platform to do it automatically.
+- **Restart policy**: rely on the host's own automatic-restart-on-crash
+  (Railway/Render/Fly.io all do this natively; a VPS needs a `systemd`
+  unit with `Restart=always`, or `pm2`). Deliberately not built
+  in-process (no self-respawning browser logic) — matches this phase's
+  own "keep it simple, don't over-engineer" instruction; a process-level
+  restart is simple, well-understood, and sufficient at this scale.
+
+### Beta acceptance test (Phase 22, § 20 of the brief)
+
+A concrete, steppable proof a beta launch actually works, covering
+sign-up through settlement. Steps 1-7 and 14-20 were already exercised
+in earlier phases (auth, pot creation/join, pick submission, deadline
+lock) and are not re-verified in full here — this phase's own live
+testing focused on steps 7-13 (the live-match steps this phase's work
+targets), since no real Premier League match exists to test against
+yet (season starts 2026-08-21).
+
+| # | Step | Verified this phase? | Evidence |
+|---|---|---|---|
+| 1-6 | Sign up → verify email → sign in → create/join pot → make a pick | Previously verified (Phase 21's UX pass) | Not re-run this phase — no relevant code changed |
+| 7 | Fixture locks exactly 15 min before kickoff | Previously verified (Phase 19) | Unchanged this phase |
+| 8 | Live score appears | **Yes, code path verified** | `sync-live-scores` live-tested via reversible fixture-window perturbation — real API call, real (correct, zero) update, real skip-path confirmation. **Not verified against an actual live match** — none exists yet |
+| 9 | Goal appears | **Partially — extraction mechanism proven, not an actual goal** | Real `/Matches/{id}/Live` page loaded, `matchCentreData` confirmed present for a real, correctly-mapped fixture. No real goal has occurred to scrape (pre-season) |
+| 10 | Goalscorer appears | Same as #9 | `player_id` resolution logic reviewed and unchanged from before this phase (already correct); not exercised against a real goal |
+| 11 | Assist appears if supplied | Same as #9 | Confirmed already correctly modeled as `assist_player_id` on the goal row — not a bug, not exercised live |
+| 12 | Cards/substitutions appear | Same as #9 | Same extraction mechanism as goals; not exercised against a real card/sub |
+| 13 | Match Centre updates without refresh | **Not re-verified this phase** | Realtime plumbing (`useLiveScores.js`) unchanged since Phase 20/21 verification; no code in this phase touched it |
+| 14-16 | Match finishes, final state settles, standings/prizes correct | **Not re-verified this phase** | `compute-scores`/`settle-gameweek` unchanged this phase; Pick 5's own scoring path is now correct for the first time (`ISSUE-69` fix) but not exercised against a real finished match |
+| 17 | User can return later and see the completed result | Not re-verified this phase | Unchanged |
+| 18 | No duplicate events exist | **Yes, schema-level guarantee re-verified** | `fixtureevents_uniq` constraint confirmed live and now migration-tracked (`ISSUE-70`) |
+| 19 | No demo data appears | **Yes** | Confirmed `ws-live-events.js`'s `getLiveFixtures()` filters `.not('whoscored_fixture_id', 'is', null)`, and demo fixture generation (`_shared/demo/generateLeague.ts`) never sets that column — grepped, zero matches. Demo fixtures structurally cannot be picked up by the real worker |
+| 20 | Normal users cannot access admin/super-admin functionality | Previously verified (Phase 20/21) | Unchanged this phase |
+
+**Honest summary**: steps 8, 18, 19 have real, live evidence behind
+them this phase. Steps 9-13 have the *mechanism* proven (page loads,
+data extraction works, correct casing, correct dedup) but not an
+actual live goal/card/substitution, because none has happened yet —
+the season hasn't started. **The full acceptance test cannot be
+completed until the first real Premier League match kicks off** —
+recommend re-running steps 8-16 against that first real match as the
+true, final proof, using the new `/health` endpoint plus a direct
+`fixture_events` query to confirm.
 
 ---
 
@@ -776,10 +958,15 @@ value a migration should never hard-code.
 
 1. Provision the Supabase project (hosted) or run `supabase start` (local).
 2. Verify required extensions (§ 2).
-3. Apply migrations 001 → 028 in order (§ 3) — includes 028's Realtime
-   publication fix (§ 3a); confirm afterward via `select tablename from
-   pg_publication_tables where pubname='supabase_realtime'` — expect
-   `fixtures`, `fixture_events`, `pick5_picks`, `pot_standings_snapshots`.
+3. Apply migrations 001 → 033 in order (§ 3) — includes 028's Realtime
+   publication fix (§ 3a), 029/030's deadline consolidation (§ 3b), and
+   031/032's Phase 22 fixes (the `fixture_events` uniqueness constraint
+   and the `whoscored_fixture_id`/`whoscoredteamid`/`whoscoredplayerid`/
+   `stats_*` columns — both previously out-of-band, now migration-
+   tracked; a fresh project would be missing them without these).
+   Confirm afterward via `select tablename from pg_publication_tables
+   where pubname='supabase_realtime'` — expect `fixtures`,
+   `fixture_events`, `pick5_picks`, `pot_standings_snapshots`.
 4. Complete every item in § 8 (GUCs, secrets, frontend env vars, `config.toml`
    auth URLs, SMTP, at least one Super Admin, RLS/ownership check).
 5. **Load real Premier League reference data** — run
@@ -794,7 +981,9 @@ value a migration should never hard-code.
    row from local** — confirmed none exist locally as of Phase 15, but
    re-verify with `select count(*) from leagues where provider_name='demo'`
    before going live regardless.
-6. Deploy every Edge Function listed in § 4.
+6. Deploy every Edge Function listed in § 4, including the new
+   `sync-live-scores` (Phase 22) — uses the same `FOOTBALL_DATA_KEY`
+   secret as `sync-fixtures`, no new secret to provision.
 7. Build and deploy the frontend, pointed at the correct `VITE_SUPABASE_URL`/
    `VITE_SUPABASE_ANON_KEY` for this environment.
 8. Run the full smoke-test checklist: [SMOKE-TESTS.md](./SMOKE-TESTS.md).
@@ -802,6 +991,11 @@ value a migration should never hard-code.
    buttons) one real tick of each cron job; confirm `net._http_response`
    shows `200` for each (not just `cron.job_run_details` showing
    `succeeded` — see § 6/§ 7 for why that alone is insufficient).
+10. **Separately** (not part of the Supabase/Vercel sequence above):
+    deploy the persistent WhoScored worker per § 6d, once a hosting
+    decision is made. Not required for steps 1-9 to work correctly —
+    fixtures, kickoffs, live scores, and final results all work without
+    it (Phase 22); only live in-match events/goalscorers depend on it.
 
 ---
 
@@ -873,14 +1067,50 @@ value a migration should never hard-code.
   (out of the fixture-ingestion scope this phase prioritized); must be
   checked/patched before the next season rollover's player-sync step
   (`decisions.md § Phase 21 — Season rollover`, step 4).
-- **WhoScored live-events pipeline has no hosting home** — needs a
-  persistent Node.js/Playwright process, incompatible with both Edge
-  Functions and `pg_cron`. Documented in § 6c as a real, open
-  infrastructure decision, not solved this phase — beta can launch
-  without it (fixtures/kickoffs/results are correct either way; only
-  live in-match events/goalscorers are affected).
+- **WhoScored live-events pipeline has no hosting home** — **Phase 22
+  update: hardened and a hosting recommendation made (Railway), but
+  still not actually deployed anywhere** — see § 6d. Beta can launch
+  without it (fixtures/kickoffs/live scores/final results are now all
+  correct without this worker, per Phase 22's `sync-live-scores` fix;
+  only live in-match events/goalscorers are affected).
 - **`ISSUE-12`'s three-script overlap** (`fullSyncInsert.js`/
   `fullSyncPlayers.js`/`syncFootballData.js`) — `fullSyncInsert.js` is
   no longer purely dead (it's the season-rollover tool and the source
   `sync-fixtures` was ported from), but the underlying duplication
   across all three scripts was not consolidated this phase.
+
+## 15. Known, not fixed Phase 22 (flagged, out of this phase's scope)
+
+- **The persistent worker is not deployed anywhere** — hardened and a
+  hosting recommendation made, but actually creating an account and
+  deploying it is explicitly a manual action for the project owner
+  (§ 0, § 6d) — not something this phase does unilaterally.
+- **Event corrections beyond a non-key field update are not
+  reconciled** — a WhoScored card upgrade (yellow → second yellow →
+  red) changes `event_type`, which is part of the upsert's natural
+  key, so it inserts a new row rather than correcting the old one. A
+  full reconciliation pass was deliberately not built — real,
+  non-trivial complexity this phase's own brief warns against
+  over-engineering for a beta this size. See `decisions.md § Phase 22
+  — Event corrections`.
+- **VAR and injuries are not implemented as distinct event types for
+  real fixtures** — no verified evidence WhoScored's `incidentEvents`
+  feed exposes either in a way this script could reliably extract;
+  not fabricated. `FixtureEventsTimeline.jsx` already documents this
+  distinction (`var_review`/`injury` render only for the Demo Centre's
+  synthetic data).
+- **Half-time doesn't get a reduced polling cadence** — the worker
+  polls every 60s uniformly from -10min to +130min of kickoff,
+  including during half-time when nothing changes. A minor, known
+  inefficiency, not fixed — would only save a handful of cheap polls
+  per match and this phase's own instruction is to keep the lifecycle
+  simple.
+- **Full infrastructure sizing (memory/CPU under real concurrent-fixture
+  load) could not be measured** — no live Premier League match exists
+  yet to measure against. Recommend validating against the worker's
+  own new `/health` endpoint during the season's first live matchday.
+- **Graceful-shutdown signal delivery could not be live-verified** on
+  the Windows development machine used this session — Windows itself
+  refused a non-forced process termination. Code-reviewed as correct,
+  standard Node.js practice; should be re-verified once running on the
+  actual Linux production host.

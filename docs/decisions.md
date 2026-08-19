@@ -6594,3 +6594,367 @@ all sane, no silent failures, no exposed stack traces. `ErrorBoundary`
 re-confirmed: catches render errors only, doesn't swallow auth
 promise-rejections (already handled locally in each auth page), no
 secret/stack-trace leakage in its fallback UI.
+
+---
+
+## Phase 22 — Production Live-Match Event Pipeline
+
+Makes the existing WhoScored live-event pipeline production-capable and
+decides where it should run. Explicitly did NOT replace WhoScored — no
+evidence surfaced that the existing pipeline can't be made reliable;
+every real problem found was a bug in *this project's own code*
+(casing, a missing migration, no live-score writer), not a WhoScored
+limitation. New issues in `current-state.md`: `ISSUE-68` through
+`ISSUE-72` (all resolved this phase except where noted).
+
+### The most important finding: nothing updated live scores at all
+
+Tracing `fixtures.status`/`home_goals`/`away_goals` (read directly by
+`FixtureCard.jsx` and by the LMS/Predictor Game Engine — confirmed via
+`_shared/game-engine/{lms,predictor}/engine.ts:371,403`, neither reads
+`fixture_events`) found **no writer of these fields during a live
+match at all**. `sync-fixtures` (Phase 21) runs once daily — correct
+for its own job, far too slow for a live score. `ws-live-events.js`
+(the WhoScored worker) has never had any code path touching the
+`fixtures` table — confirmed by reading its full source — only
+`fixture_events`. This meant "a live score appears" (this phase's own
+acceptance-test step 8) and LMS's "currently winning" / Predictor's
+live scoreline could not have worked under the pre-existing
+architecture, independent of anything WhoScored-related.
+
+**Fixed — `ISSUE-68`**: new Edge Function `sync-live-scores`
+(`supabase/functions/sync-live-scores/index.ts`). football-data.org
+remains the sole owner of `fixtures.status`/`home_goals`/`away_goals`/
+`minute` (per this phase's own target architecture — WhoScored owns
+`fixture_events` only) — this is a second, much-tighter-cadence read of
+the *same* provider `sync-fixtures` already uses, not a new data
+source. It does a free, local-only DB check first (is any fixture
+within the -10min/+130min kickoff-relative window `ws-live-events.js`
+already uses, and not yet finished?) and only calls football-data.org
+when that's true, so it's safe to schedule every minute continuously
+(migration 033, `sync-live-scores-every-minute`) without wasting API
+quota on the many hours/days nothing is live. A single day-scoped
+`/matches?dateFrom&dateTo` call naturally captures the live→finished
+transition too (today's finished matches are still returned), serving
+as the reconciliation step without a separate code path.
+
+**Live-verified** (see also decisions.md's own "no live PL match exists
+yet" constraint, honestly documented below): temporarily set one real
+GW1 fixture's `kickoff_utc` to `now()` (reversible — reverted to the
+exact original value immediately after, `refresh_gameweek_deadlines()`
+re-confirmed to have produced the identical `deadline_utc` before and
+after), called the function locally with a real `FOOTBALL_DATA_KEY` —
+correctly detected the fixture as relevant, made a real call to
+football-data.org, returned `{"success":true,"skipped":false,"updated":0}`
+(0 is correct — today, 2026-08-19, has no real scheduled matches; the
+season starts 2026-08-21). A second call after reverting correctly
+returned `{"skipped":true,"reason":"no fixture in live window"}` with
+zero external calls. An unauthenticated call correctly returned
+`{"error":"Unauthorized"}`.
+
+### Critical bug found and fixed — `ISSUE-69`: event_type casing mismatch
+
+While auditing idempotency (below), found that `ws-live-events.js`'s
+`mapEventType()` returned SCREAMING_SNAKE_CASE (`'GOAL'`,
+`'YELLOW_CARD'`, ...), but **every real consumer of
+`fixture_events.event_type` uses lowercase snake_case** —
+`business-rules.md`'s own documented rule, the Match Centre views
+(`025_match_centre_views.sql:108,119,126-127`,
+`fe.event_type = 'goal'` / `in ('yellow_card', 'red_card',
+'second_yellow')`), the demo pipeline's own CHECK constraint (migration
+026), and `FixtureEventsTimeline.jsx`'s `EVENT_ICON` lookup all agree
+on lowercase — this script alone disagreed, and had disagreed since it
+was written. **Impact, precisely traced, not assumed**: Pick 5 scoring
+reads `player_fixture_goals`, a materialized view filtered on
+`fe.event_type in ('goal', 'penalty') and not fe.is_own_goal` — an
+uppercase `'GOAL'` row would never match. Even a fully working,
+Cloudflare-unblocked, correctly-deduplicated scrape would have silently
+scored **zero goals for every player, forever**, with no error anywhere
+— this bug alone would have made Pick 5 non-functional the moment the
+worker ran for real, regardless of every other fix in this phase.
+LMS/Predictor were unaffected (they read `fixtures.home_goals`/
+`away_goals` directly, not `fixture_events`). **Fixed**: `mapEventType()`
+now returns `'goal'`/`'yellow_card'`/`'red_card'`/`'second_yellow'`/
+`'sub_on'`/`'sub_off'`, matching the schema-wide convention exactly;
+`parseEvents()`'s `tracked` Set updated to match.
+
+### Event idempotency — `ISSUE-70`: the real constraint existed, but only out-of-band
+
+Verified against the **live database directly**, not just the
+migrations (this project's own established discipline, per `ISSUE-21`/
+`ISSUE-24`/migration 028's precedent) — `fixture_events` already has a
+real, working unique constraint, `fixtureevents_uniq UNIQUE
+(fixture_id, event_type, minute, team_id, player_id)`, and
+`ws-live-events.js`'s upsert (`onConflict:
+'fixture_id,event_type,minute,team_id,player_id'`) already targets it
+correctly. **But no migration anywhere created it** —
+`001_initial_schema.sql` as currently written instead declares `unique
+(fixture_id, provider_id)`, which is not present on the live database
+at all. Same class of gap as the realtime-publication drift migration
+028 fixed: a fresh hosted project built purely from tracked migrations
+would be missing this constraint entirely, and the WhoScored worker's
+every upsert call would fail outright (no matching constraint for the
+given `onConflict` target) — an error the code already catches and
+logs, so it would appear to run while silently writing zero events.
+**Fixed**, not by changing the application code (which was already
+correct against live reality) but by formalizing what it already
+depends on: `031_fixture_events_uniqueness.sql`, guarded to replay
+safely whether a target database has the stale `provider_id`-based
+constraint from 001 or already has the correct one. Applied locally,
+re-verified via `pg_constraint` — exact expected state, no data loss
+(0 rows in `fixture_events`, as before).
+
+`event_type + minute + team_id + player_id` per fixture is a
+reasonable natural key for a match incident, not a workaround —
+WhoScored's own feed provides no independent stable per-event ID
+(confirmed by reading the event-parsing code; `provider_id` is
+hardcoded to the literal string `'whoscored'` on every row, a
+provider tag, not an event identifier).
+
+### A second, larger piece of out-of-band schema drift — `ISSUE-71`
+
+While tracing `ISSUE-70`, found the drift was bigger than one
+constraint: `fixtures.whoscored_fixture_id`, `teams.whoscoredteamid`,
+`players.whoscoredplayerid`, and `fixtures.stats_status`/
+`stats_last_synced_at`/`stats_next_sync_at`/`stats_finalized_at`/
+`finished_at` all exist live, all indexed live, and **none exist in
+any tracked migration**. `001_initial_schema.sql`'s `fixtures`/
+`teams`/`players` tables genuinely have none of these columns. A fresh
+hosted project built purely from migrations 001-031 would be missing
+the very columns the entire WhoScored pipeline (mapping scripts +
+`ws-live-events.js`) reads and writes — every one of those scripts
+would fail immediately with "column does not exist." The `stats_*`
+columns read as scaffolding for a stats-sync lifecycle nothing
+currently reads or writes (confirmed by grep across the whole repo) —
+kept as-is, not touched or given new behavior, since dropping a column
+is destructive and there's no evidence of what it was originally for.
+**Fixed**: `032_whoscored_and_stats_columns.sql`, purely additive,
+`IF NOT EXISTS` throughout, applied locally — no-ops against this
+project's own already-drifted database, real column adds on a
+genuinely fresh one.
+
+### Field ownership — SOURCE/OWNER → FIELD → FREQUENCY → NOTES
+
+| Field | Owner | Update source | Frequency | Notes |
+|---|---|---|---|---|
+| `fixtures.kickoff_utc` | football-data.org | `sync-fixtures` | Daily | Unchanged from Phase 21 |
+| `fixtures.status` (scheduled/tbd/live/finished/postponed/cancelled) | football-data.org | `sync-fixtures` (daily) + `sync-live-scores` (new, live) | Daily + every 1 min during live window | `sync-live-scores` is the only live writer |
+| `fixtures.home_goals`/`away_goals` | football-data.org | Same as above | Same | WhoScored **never** writes these — confirmed by reading its full source |
+| `fixtures.minute` (current match minute, for live display) | football-data.org | `sync-live-scores` | Every 1 min during live window | Distinct from `fixture_events.minute` below — do not confuse the two |
+| `fixture_events` (goals, cards, substitutions) | WhoScored | `ws-live-events.js` | Every 1 min during live window | Sole source — neither football-data.org's free tier nor api-football's implementation in this codebase provide event-level data |
+| Assists | WhoScored | `ws-live-events.js` (`assist_player_id` FK **on the goal event row**) | Same | Not a separate event type — already correctly modeled as a field on `goal` rows, matching `025_match_centre_views.sql`'s own read pattern. No bug here |
+| Injuries | **Not implemented** | — | — | No evidence WhoScored's `incidentEvents` feed exposes a distinct, reliably-typed injury incident — not fabricated. Flagged, not silently assumed working |
+| VAR | **Not implemented for real fixtures** | — | — | `FixtureEventsTimeline.jsx`'s own existing comment already documents this precisely: `var_review` exists only for the Demo Centre's synthetic timeline, never for real `fixture_events`. Not changed this phase — no verified WhoScored incident type to map it from |
+| Penalties (scored) | WhoScored | `ws-live-events.js` (mapped to `event_type='goal'`, `is_penalty=true`) | Live | Missed penalties: unverified whether WhoScored's feed exposes these as a distinct incident at all — not fabricated |
+| Player reference data | football-data.org (`fullSyncPlayers.js`) + WhoScored (mapping only, `whoscoredplayerid`) | Manual | Manual/rollover | WhoScored never creates player rows, only maps existing ones |
+| Team reference data | football-data.org (`sync-fixtures`) + WhoScored (mapping only, `whoscoredteamid`) | Daily + manual mapping | — | Same pattern as players |
+
+No ambiguous field found — every important field has exactly one
+owner. `sync-live-scores` and `ws-live-events.js` write disjoint
+columns (`fixtures.*` vs. `fixture_events`), so there is no overwrite
+risk between the two live pipelines, matching the same "one source of
+truth per field" principle Phase 21 established for the daily sync.
+
+### Event corrections — real, honest limitation, not silently claimed solved
+
+WhoScored can and does correct events after they first appear (card
+upgrades, e.g. yellow → second yellow → red, are the most common real
+case). The current upsert natural key includes `event_type`, so a
+correction that changes `event_type` (a card upgrade) **inserts a new
+row rather than correcting the old one** — the original, now-incorrect
+row is not automatically removed. A correction that only changes a
+non-key field on an existing row (e.g. `assist_player_id`,
+`extra_minute`) is handled correctly today (`ignoreDuplicates: false`
+means the upsert updates the existing row in place). **Not fixed this
+phase** — a full reconciliation pass (e.g., detecting and retracting a
+superseded card event) is real, non-trivial complexity for a beta this
+size, and this phase's own brief explicitly warns against
+over-engineering. Documented as a known, accepted limitation for beta,
+not silently assumed solved.
+
+### Live fixture lifecycle
+
+`SCHEDULED → PRE-MATCH → LIVE → HALF-TIME → LIVE → FINISHED → POST-MATCH`,
+mapped onto the existing, already-reasonable windowing both live
+workers now share: polling begins 10 minutes before kickoff, runs
+every 1 minute uniformly through kick-off/half-time/second-half (no
+separate half-time cadence — a real, minor gap, not fixed this phase,
+since it would only save a handful of otherwise-cheap polls and this
+phase's own instruction is to keep this simple, not over-engineer it),
+and stops 130 minutes after kickoff (covers 90 + stoppage + extra
+time). `sync-live-scores`'s single day-scoped API call naturally
+performs "final reconciliation" — a finished match's final score/status
+is included in the same response as in-play matches, no separate step.
+
+### Failure recovery
+
+- **Page-load/scrape failure**: `scrapeWithRetry()` (new) retries once,
+  5s apart, before giving up on that fixture for the current cycle —
+  the next cycle (60s later) tries again from scratch. Per-fixture
+  isolation (already existed, unchanged): one fixture's exhausted
+  retries don't affect any other fixture in the same cycle.
+- **Unexpected error escaping a whole cycle**: previously, an uncaught
+  error anywhere in `main()`'s loop killed the entire process
+  (`process.exit(1)`, no supervisor). Now caught per-cycle — logs and
+  continues to the next poll rather than dying.
+- **Browser/process crash**: not handled in-process (no in-process
+  browser-recreation logic) — deliberately left to the host's process
+  supervisor (Railway/Render/Fly.io's built-in auto-restart, or
+  `systemd`/`pm2` on a VPS) restarting the whole Node process from
+  scratch. This is the simple, robust choice this phase's own brief
+  asks for over an in-process distributed-systems-style recovery
+  mechanism.
+- **Graceful shutdown**: `SIGTERM`/`SIGINT` now close the browser
+  context and health server cleanly before exit, instead of relying on
+  the `while(true)` loop never reaching its `finally` block. **Could
+  not be live-verified on this Windows development machine** — Windows
+  has no native POSIX signal delivery; `taskkill` without `/F` was
+  attempted against the running worker and Windows itself refused
+  ("This process can only be terminated forcefully"), proving this is
+  a real platform limitation of the dev machine, not a flaw in the
+  code. The production host is Linux (Railway/Render/Fly.io/VPS all
+  are), where this exact, standard Node.js pattern is well-established
+  and reliable — should be re-verified once running there.
+
+### Health monitoring
+
+New `GET /health` (Node's built-in `http` module, no new dependency,
+default port 8787, configurable via `WS_HEALTH_PORT`) on
+`ws-live-events.js` itself, returning `status` (ok/degraded),
+`uptimeSeconds`, `browserAlive`, `activeFixtureCount`, `lastPollAt`,
+`lastSuccessfulScrapeAt`, `lastDbWriteAt`, `lastError`, `pollCount`.
+Live-verified: started the hardened worker locally
+(`WS_HEADLESS=true`), confirmed `GET /health` returned real, correct
+state (`browserAlive:true`, `pollCount:1`, `activeFixtureCount:0` —
+correct, since no fixture is currently in the live window). Not a
+monitoring platform — logs plus this one endpoint, per the phase's own
+explicit "do not build a large monitoring platform" instruction.
+`sync-live-scores` reports into the existing `sync_runs` table (same
+mechanism every other Edge Function already uses) — only on ticks
+where it actually contacted football-data.org, not on every
+free/local-only no-op tick, to avoid ~1440 near-empty rows/day.
+
+### Cloudflare / WhoScored reliability — real, current evidence
+
+Live-tested this phase, using the exact persistent profile
+(`.chrome-profile`) and `headless:false` configuration the real
+scripts use: (1) the Premier League fixtures list page loaded
+successfully in ~4s, real content, no Cloudflare challenge; (2) the
+exact `/Matches/{id}/Live` URL pattern `ws-live-events.js` itself
+requests, for a real, correctly-`whoscored_fixture_id`-mapped fixture,
+loaded in ~1.4s with `matchCentreData` confirmed present in the page
+(`hasMatchCentreData: true`) — proving the entire extraction mechanism
+would work end-to-end for a real live match. **This is real, current,
+positive evidence, not a fabricated reliability statistic** — it is
+two successful samples on one day, not a measured failure rate over
+time (no log of historical attempts exists to compute one from). The
+mapping script's own prior, larger-scale success (380/380 real
+fixtures successfully mapped) is the stronger existing evidence of
+sustained reliability. `sync-whoscored-fixture-map.js`'s own explicit
+Cloudflare-block detection/manual-login-recovery code path is itself
+proof this has been a real, previously-encountered failure mode, not
+hypothetical — the persistent profile carrying forward cookies/session
+state is the primary mitigation already in place, and it worked in
+both of this phase's live tests. **Chosen deliberately not to switch
+to `headless:true` in production** for this reason — see
+`ws-live-events.js`'s own inline comment: a worker host with no
+display should run this under a virtual framebuffer (`xvfb-run`)
+rather than the script silently trading a working evasion posture for
+an unverified one. `WS_HEADLESS=true` is left available (and was used
+for this phase's own headless-mode compatibility test — Chromium
+itself launched and worked correctly headless too, see below), but
+defaults to `false` — the evidenced-working mode — unless explicitly
+overridden.
+
+### Production worker hosting recommendation
+
+**Railway**, with **Fly.io** as the strongest alternative and a
+self-managed VPS as a manual, cost-minimizing fallback. Not Render as
+the primary pick (background workers specifically don't get Render's
+free tier, and its deploy story is marginally more manual than
+Railway's for this project's needs) — still a fully viable option if
+preferred. Comparison basis, all confirmed by reasoning about the
+actual workload rather than generic platform marketing:
+
+| | Railway | Fly.io | Render | VPS |
+|---|---|---|---|---|
+| Persistent Node process | Yes | Yes | Yes (Background Worker type) | Yes (self-managed) |
+| Chromium/Playwright support | Yes, via a Dockerfile (Playwright's own base image) | Yes, same | Yes, same | Yes, direct apt install |
+| Auto-restart on crash | Built in | Built in | Built in | Requires `systemd`/`pm2` setup |
+| Logs | Built-in UI | Built-in UI | Built-in UI | Manual (journalctl or a log file) |
+| Env vars/secrets | UI-managed | UI/CLI-managed | UI-managed | Manual (`.env` file, file permissions your responsibility) |
+| Health checks | Configurable against `/health` | Configurable | Configurable | Your own responsibility |
+| Deploy simplicity | Highest — closest to this project's own Vercel choice's "git push" simplicity | Moderate — `fly.toml` config | Moderate | Lowest — full manual ops |
+| Approximate cost at this scale | Low tens of $/month, usage-based (not independently verified — see below) | Similar | Similar or slightly higher (no free tier for workers) | Often cheapest raw compute, but your time cost is real |
+
+**Chromium needs an X display or Xvfb regardless of host** — since
+this phase deliberately keeps `headless:false` as the default (see
+above), every one of these options needs `xvfb-run -a node
+ws-live-events.js` (or the Docker-image equivalent, `apt-get install
+-y xvfb` in a Dockerfile) — a well-established, standard pattern for
+"headed Chrome, no physical display," not something specific to this
+project. No Dockerfile/Procfile/`fly.toml`/`railway.json` exists in
+this repo yet — none created this phase, per the explicit "do not
+deploy" instruction; § 19's deployment plan documents exactly what
+each would contain without creating them.
+
+**Pricing not independently verified this phase** — per the explicit
+"do not invent precise API pricing" instruction, the table above gives
+directional tiers only ("low tens of $/month"), not quoted prices;
+confirm current pricing directly on each platform before deciding.
+
+### Infrastructure sizing — measured vs. estimated, stated honestly
+
+**Measured this phase**: a single page load against a real WhoScored
+match page completed in 1.4-4.0 seconds; the worker's own
+architecture is one shared persistent browser context + one page,
+scraping each tracked fixture **sequentially** within a single 60s
+cycle (confirmed by reading `runOnce()` — not one browser per fixture,
+which would be far more expensive).
+
+**Not measured, no PL match is live to measure against** (season
+starts 2026-08-21, "today" in this session is 2026-08-19) — startup
+time under real load, memory/CPU with multiple simultaneous live
+fixtures, exact requests-per-fixture over a full 90 minutes, and
+real-world recovery time after an actual Cloudflare challenge. Stated
+honestly rather than invented: a single persistent Chromium context
+typically runs in the low hundreds of MB, growing modestly as it
+sequentially navigates between fixtures rather than holding many pages
+open at once — a 1-2GB instance is a reasonable starting estimate, not
+a verified number. **Recommend validating against the `/health`
+endpoint's own real data during the season's first live matchday**
+before assuming any specific tier is sufficient.
+
+### The `sync-live-events-every-2-min` cron job (`ISSUE-4`) — now formally superseded
+
+Migration 003's `sync-live-events-every-2-min` cron job (calling a
+`/functions/v1/sync-live-events` Edge Function that has never existed
+— `ISSUE-4`) is not modified (never rewrite historical migrations) —
+it continues to `404` harmlessly, as already documented. This phase's
+architecture decision formally confirms *why* it was never built as an
+Edge Function and never should be: live event scraping needs Chromium,
+which cannot run in Deno's Edge Runtime — the persistent worker
+architecture above is the intended replacement, not a missing Edge
+Function. `ISSUE-4` updated in `current-state.md` to record this.
+
+### Verification performed, live, this session
+
+`deno check` on both modified/new TypeScript files: 0 errors.
+`deno test --allow-all`: 347/347, unchanged. `npm run build`: clean.
+Migrations 031/032/033 applied locally via `supabase migration up`,
+each independently re-verified against `pg_constraint`/
+`information_schema.columns`/`cron.job` — exact expected state, zero
+data loss (fixture/team/gameweek counts unchanged throughout). Live
+HTTP test of `sync-live-scores` (both the real-call and skip paths, plus
+an unauthenticated-rejection check) against the real football-data.org
+API and real local database, via a temporary reversible fixture
+perturbation, fully reverted and re-confirmed byte-for-byte afterward.
+Live browser test of `ws-live-events.js`'s hardened startup
+(`WS_HEADLESS=true`): Chromium launched successfully, health endpoint
+returned correct real state, DB connectivity confirmed. Two live,
+real network tests against whoscored.com itself (fixtures list page,
+and the exact `/Matches/{id}/Live` URL pattern the real scraper uses)
+— both succeeded, no Cloudflare challenge, `matchCentreData` confirmed
+present. Graceful-shutdown code path reviewed and is standard/correct
+Node.js practice; live signal delivery could not be tested on this
+Windows dev machine (documented above, not silently skipped).

@@ -13,6 +13,70 @@ from here.
 
 ---
 
+## 2026-08-19 (78) — Phase 22: Production Live-Match Event Pipeline
+
+**Goal:** make the existing WhoScored live-event pipeline
+production-capable and decide where it should run — treated as a core
+product feature, not an optional beta extra. Did not replace
+WhoScored — no evidence it can't be made reliable; every real problem
+found was this project's own code, not a WhoScored limitation. Full
+detail — see
+[decisions.md § Phase 22](./decisions.md#phase-22--production-live-match-event-pipeline).
+
+**Most important finding**: nothing in the codebase updated
+`fixtures.status`/`home_goals`/`away_goals` during a live match at
+all — `sync-fixtures` runs once daily, and the WhoScored worker only
+ever wrote `fixture_events`, never touching `fixtures`. Live score/
+LMS-winning/Predictor-scoreline could not have worked. **Fixed
+(`ISSUE-68`)**: new Edge Function `sync-live-scores`, football-data.org
+-sourced, scheduled every minute but free/no-op unless something is
+actually relevant — live-verified end to end via a reversible fixture
+perturbation.
+
+**Most severe bug found (`ISSUE-69`)**: `ws-live-events.js` wrote
+`event_type` in the wrong case (`'GOAL'` vs. the schema-wide `'goal'`
+convention) — would have silently scored zero Pick 5 goals forever,
+with no error anywhere. Fixed.
+
+**Two pieces of out-of-band schema drift formalized** (`ISSUE-70`,
+`ISSUE-71`, same class of gap as `ISSUE-21`/`ISSUE-24`): the real
+`fixture_events` unique constraint the worker's upsert already
+correctly targets existed only on this project's own local database,
+never in a migration; the entire `whoscored_fixture_id`/
+`whoscoredteamid`/`whoscoredplayerid`/`stats_*` column set the
+WhoScored pipeline depends on likewise existed only out-of-band. Both
+formalized in new migrations (031, 032) — a fresh hosted project would
+otherwise be missing them entirely.
+
+**Worker hardened (`ISSUE-72`)**: retry-with-backoff per fixture,
+per-cycle error isolation (no more whole-process death on one bad
+cycle), real `SIGTERM`/`SIGINT` handling, a new `GET /health`
+endpoint, configurable headless mode (default unchanged — kept
+`false`, the evidenced-working anti-Cloudflare posture, documented why
+switching wasn't safe to assume).
+
+**Live-tested, real evidence, not fabricated**: two real network
+calls against whoscored.com (fixtures list + the exact `/Matches/{id}/Live`
+pattern the scraper uses) — both succeeded, no Cloudflare challenge,
+`matchCentreData` confirmed present. Worker started headless locally,
+health endpoint returned correct real state. Graceful-shutdown signal
+delivery could not be tested on this Windows dev machine (Windows
+itself refused a non-forced process kill) — documented as a real
+platform limitation, not silently skipped.
+
+**Hosting recommendation**: Railway (primary), Fly.io (alternative),
+self-managed VPS (cost-minimizing fallback) — not Render as primary
+(no free tier for background workers). No account created, nothing
+deployed.
+
+**Verified**: `deno check` 0 errors on new/modified TS; Deno 347/347
+unchanged; `npm run build` clean. Migrations 031/032/033 applied and
+re-verified locally.
+
+**Not committed, not pushed, per this phase's explicit instruction.**
+
+---
+
 ## 2026-08-19 (77) — Phase 21: Beta Architecture Decisions + Deployment Preparation
 
 **Goal:** resolve the three decisions Phase 20 explicitly deferred

@@ -357,6 +357,17 @@ cron job is silently failing every 2 minutes in production, or whether it was
 deliberately removed/replaced by the manual scraper workflow. Plan:
 [roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
 
+**Phase 22 update (2026-08-19):** formally decided, not just left absent —
+live event scraping needs a real Chromium browser, which cannot run inside
+Deno's Edge Runtime, so `sync-live-events` was never buildable as an Edge
+Function and should not be. The intended replacement is the persistent
+Node/Playwright worker architecture documented in
+[decisions.md § Phase 22](./decisions.md#phase-22--production-live-match-event-pipeline)
+(`ws-live-events.js`, hardened this phase, run continuously on a separate
+host). This migration-003 cron job itself is left untouched (never rewrite
+a historical migration) and will continue to harmlessly `404` — this is
+now explicitly expected, not an open question.
+
 ### P1 — features that are half-built or internally inconsistent
 
 **Status: confirmed, not fixed.** This is the largest single gap between what
@@ -761,6 +772,122 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-69 — `ws-live-events.js` wrote `event_type` in the wrong case, silently guaranteeing zero Pick 5 goals ever
+**Discovered and resolved 2026-08-19, Phase 22 (Production Live-Match
+Event Pipeline)**, while auditing event idempotency. `mapEventType()`
+returned SCREAMING_SNAKE_CASE (`'GOAL'`, `'YELLOW_CARD'`, ...), but
+every real consumer of `fixture_events.event_type` — `business-rules.md`'s
+own documented rule, the Match Centre views
+(`025_match_centre_views.sql:108,119,126-127`), the demo pipeline's own
+CHECK constraint (migration 026), and `FixtureEventsTimeline.jsx`'s
+`EVENT_ICON` lookup — uses lowercase snake_case. **Impact, precisely
+traced**: Pick 5 scoring reads `player_fixture_goals`, a materialized
+view filtered on `fe.event_type in ('goal', 'penalty') and not
+fe.is_own_goal` — an uppercase `'GOAL'` row would never match. Even a
+fully working, unblocked, correctly-deduplicated scrape would have
+silently scored **zero goals for every player, forever**, with no
+error anywhere — the single most severe bug found this phase, more
+consequential than the idempotency or hosting questions, since it
+would have broken Pick 5 scoring invisibly the moment the worker ran
+for real. LMS/Predictor were unaffected (they read
+`fixtures.home_goals`/`away_goals` directly). **Fixed**: `mapEventType()`
+now returns the correct lowercase values; `parseEvents()`'s `tracked`
+Set updated to match. Full detail:
+[decisions.md § Phase 22](./decisions.md#critical-bug-found-and-fixed--issue-69-event_type-casing-mismatch).
+
+---
+
+#### ISSUE-68 — Nothing updated `fixtures.status`/`home_goals`/`away_goals` during a live match
+**Discovered and resolved 2026-08-19, Phase 22**, tracing how a goal
+would actually reach the UI. `sync-fixtures` (Phase 21) runs once
+daily; `ws-live-events.js` (the WhoScored worker) has never had any
+code path touching the `fixtures` table — confirmed by reading its
+full source, it only ever wrote `fixture_events`. `FixtureCard.jsx` and
+the LMS/Predictor Game Engine both read `fixtures.home_goals`/
+`away_goals`/`status` directly, not anything derived from
+`fixture_events`. Result: **no live score, in-play status, or LMS
+"currently winning"/Predictor live-scoreline could have worked at
+all**, independent of any WhoScored-specific issue. **Fixed**: new
+Edge Function `sync-live-scores`, football-data.org-sourced (the
+existing authoritative provider for these exact fields, not a new
+data source), scheduled every minute (migration 033) but only actually
+calling out to the API when a local, free DB check finds something
+relevant — safe to run continuously. Live-verified via a reversible
+fixture-window perturbation: real call made, real response received,
+fully reverted with the GW1 deadline confirmed byte-for-byte unchanged
+afterward. Full detail:
+[decisions.md § Phase 22](./decisions.md#the-most-important-finding-nothing-updated-live-scores-at-all).
+
+---
+
+#### ISSUE-70 — `fixture_events`' real unique constraint existed only out-of-band, not in any migration
+**Discovered and resolved 2026-08-19, Phase 22.** Verified against the
+live database directly (not just the migrations): `fixture_events`
+already has a working `fixtureevents_uniq UNIQUE (fixture_id,
+event_type, minute, team_id, player_id)` constraint, and
+`ws-live-events.js`'s upsert already correctly targets it — the
+application code was never actually broken. But no migration created
+this constraint; `001_initial_schema.sql` instead declares `unique
+(fixture_id, provider_id)`, absent from the live database entirely. A
+fresh hosted project built purely from tracked migrations would be
+missing this constraint, and every upsert call would fail (caught and
+logged, not thrown — appearing to run while silently writing zero
+events). **Fixed**: `031_fixture_events_uniqueness.sql`, formalizing
+the constraint the application already depends on, guarded to replay
+safely regardless of starting state. Same class of gap as `ISSUE-21`/
+`ISSUE-24`/migration 028's realtime-publication drift.
+
+---
+
+#### ISSUE-71 — `whoscored_fixture_id`/`whoscoredteamid`/`whoscoredplayerid`/`stats_*` columns existed only out-of-band, not in any migration
+**Discovered and resolved 2026-08-19, Phase 22**, while tracing
+`ISSUE-70`. `fixtures.whoscored_fixture_id`, `teams.whoscoredteamid`,
+`players.whoscoredplayerid`, and `fixtures.stats_status`/
+`stats_last_synced_at`/`stats_next_sync_at`/`stats_finalized_at`/
+`finished_at` all exist live, all indexed live, and none exist in
+`001_initial_schema.sql` or any later migration. A fresh hosted
+project would be missing the very columns the entire WhoScored
+pipeline reads and writes — every mapping script and
+`ws-live-events.js` itself would fail immediately with "column does
+not exist." The `stats_*` columns are unread/unwritten by any current
+application code (confirmed by grep) — kept as-is, not given new
+behavior, since dropping a column is destructive and there's no
+evidence of their original purpose. **Fixed**:
+`032_whoscored_and_stats_columns.sql`, purely additive, `IF NOT
+EXISTS` throughout. Applied locally — no-op against this project's own
+already-drifted database, real column adds on a fresh one.
+
+---
+
+#### ISSUE-72 — `ws-live-events.js` had no retry, no graceful shutdown, no health signal, and defaulted to a display-requiring browser mode
+**Discovered and resolved 2026-08-19, Phase 22**, auditing the worker
+for production-hosting readiness. Found: a single failed page load
+cost an entire fixture for the whole 60s cycle (no retry); an uncaught
+error anywhere in the main loop killed the whole process
+(`process.exit(1)`, no per-cycle isolation, no supervisor); no
+`SIGTERM`/`SIGINT` handler, so a host restart couldn't close the
+browser context cleanly; no way to ask the worker "are you alive, what
+are you doing" short of reading raw logs; `headless:false` hardcoded,
+which cannot run at all on a typical headless VPS/container without a
+virtual display. **Fixed**: one retry (5s delay) per fixture per
+cycle; per-cycle try/catch so one bad cycle doesn't kill the process;
+real `SIGTERM`/`SIGINT` handling closing the browser context and
+health server; a new `GET /health` endpoint (worker status, uptime,
+active fixture count, last successful scrape, last DB write, last
+error); `headless` now configurable via `WS_HEADLESS` (default `false`,
+preserving the evidenced-working anti-Cloudflare-detection posture —
+see `decisions.md` for why headless wasn't made the default). **Not
+fixed**: browser-process-crash recovery is deliberately left to the
+host's own supervisor (Railway/Render/Fly.io/`systemd` auto-restart),
+not handled in-process — matches this phase's own "keep it simple, do
+not over-engineer" instruction. Graceful-shutdown signal delivery
+could not be live-verified on this Windows dev machine (Windows itself
+refused a non-forced `taskkill`) — code-reviewed as correct, standard
+Node.js practice; should be re-verified on the actual Linux production
+host.
+
+---
 
 #### ISSUE-64 — `sync-fixtures` called a provider with no working key, and had a season-resolution bug that would have synced real data into the wrong season anyway
 **Discovered and resolved 2026-08-19, Phase 21 (Beta Architecture
