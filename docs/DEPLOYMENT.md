@@ -15,116 +15,154 @@ record of what was actually done, not a template to re-run), [current-state.md](
 [SMOKE-TESTS.md](./SMOKE-TESTS.md) (the companion smoke-test checklist for after
 any deployment).
 
-**Update, 2026-08-18 (Phase 15, Beta Deployment Preparation):** the
-database has been cleaned of all demo/disposable-test data ahead of a
-planned beta — see `decisions.md` § Phase 15 and `current-state.md`
-`ISSUE-58` for what changed.
+**Update, 2026-08-19 (Phase 20, Beta Readiness / Production Hardening
+Audit) — supersedes the Phase 16 status below as the current picture.**
+Full audit in `decisions.md` § Phase 20; issue-level detail in
+`current-state.md`. Bottom line: **CODE CHANGES REQUIRED items are now
+resolved or explicitly flagged as PRODUCT DECISION REQUIRED. Nothing
+below is BLOCKED by code — everything remaining is external
+configuration only supplied by the project owner.**
+
+**Update, 2026-08-19 (Phase 21, Beta Architecture Decisions +
+Deployment Preparation) — supersedes Phase 20's "PRODUCT DECISION
+REQUIRED" list below; all three items resolved.** Full detail in
+`decisions.md` § Phase 21. **Fixture ingestion is now CODE READY**:
+`sync-fixtures` was rewritten to call football-data.org (the provider
+that has always actually populated real data), fixing a previously-
+undiscovered season-resolution bug in the same change — live-verified
+against the real API and database. **Season rollover and `ISSUE-39`
+are now documented decisions**, not open questions — manual rollover
+(exact procedure in `decisions.md`), `is_current` intentionally
+unused. See § 0 and § 4 below for the updated picture.
 
 ---
 
-## 0. Beta deployment runbook (Phase 16) — READY vs. BLOCKED
+## 0. Beta deployment runbook — READY vs. BLOCKED vs. PRODUCT DECISION
 
 This section is the authoritative "what's actually needed, in order"
 checklist for moving from local development to a hosted controlled beta.
-It sits above the detailed technical reference (§ 1 onward, mostly
-unchanged and still accurate) because most of that reference describes
-*how* to do each step once the inputs below exist — this section says
-*which steps can happen now* versus *which are blocked on something only
-the project owner can supply*.
+It sits above the detailed technical reference (§ 1 onward) because that
+reference describes *how* to do each step once the inputs below exist —
+this section says *which steps can happen now* versus *which are
+blocked on something only the project owner can supply or decide*.
 
-**Status as of 2026-08-18 (Phase 16 audit): still a 100% local
-(`supabase start`) environment.** No hosted Supabase project, no
-production domain, no SMTP provider, no hosting platform has been
-specified anywhere in this repository — confirmed by inspection, not
-assumed (no `vercel.json`/`netlify.toml`/`render.yaml`/`fly.toml`/
-`Dockerfile`/CI deploy workflow exists anywhere in the repo; `vite.config.js`
-is the framework's own unmodified scaffold with no platform adapter).
+**Status as of 2026-08-19: still a 100% local (`supabase start`)
+environment.** No hosted Supabase project, no production domain, no
+SMTP provider, no hosting platform has been specified anywhere in this
+repository — re-confirmed by inspection this phase, not assumed (no
+`vercel.json`/`netlify.toml`/`render.yaml`/`fly.toml`/`Dockerfile`/CI
+deploy workflow exists anywhere in the repo; `vite.config.js` is the
+framework's own unmodified scaffold with no platform adapter).
 
-### READY IN CODE — verified this phase, needs no further code work
+### CODE READY — verified, needs no further code work
 
-- [x] **Migrations 001–028 replay cleanly.** `supabase migration list
-      --local` confirms 001–028 applied with zero gaps. Migration 028
-      (new, this phase) closes a real gap: `pot_standings_snapshots`
-      (subscribed to by `useLiveScores.js` for live LMS/leaderboard
-      updates) was in the local Realtime publication only via
-      out-of-band drift, not any migration — a fresh hosted project built
-      from migrations alone would have silently never fired those
-      updates. Fixed with an idempotent, guarded `ALTER PUBLICATION`
-      (see § 3a).
-- [x] **Frontend build produces zero secret leakage.** `npm run build`
-      then grepped the output `dist/assets/*.js` for
-      `SERVICE_ROLE`/`service_role`/`SMTP`/`DB_PASSWORD` — zero matches.
-      The only `localhost` strings present are `@supabase/supabase-js`'s
-      own internal fallback/cookie-domain-detection code, not this
-      project's configuration. Only `VITE_SUPABASE_URL`/
-      `VITE_SUPABASE_ANON_KEY` are inlined, as intended — the anon key is
-      safe to expose client-side (RLS is the real gate).
-- [x] **Demo isolation confirmed safe for a hosted environment.** All
-      3 demo Edge Functions (`demo-generate-data`, `demo-gameweek-control`,
-      `demo-teardown`) check `app_metadata.role === 'super_admin'`
-      server-side — confirmed by reading the source, re-verified live via
-      a direct HTTP call with a normal user's token (`403`). Demo data is
-      isolated by explicit `league_id`/`demo_sessions.id`, never by name
-      matching, and demo leagues are now created `is_active=false`
-      (Phase 15, `ISSUE-58`-adjacent fix) so they can never appear
-      alongside the real Premier League in Create Competition even while
-      a demo session is running.
-- [x] **Auth/RLS security model unchanged and re-verified.** Self-
-      escalation to `super_admin` structurally impossible
-      (`super-admin-actions` never accepts it as a grant target).
-      `useIsAdmin()`'s Super Admin gap found and fixed in Phase 15
-      (`ISSUE-58`). `requireVerifiedActiveUser()` and every RLS policy
-      untouched this phase.
-- [x] **Real fixture data refreshed and verified correct.** `ISSUE-59` —
-      every fixture in a gameweek was showing an identical kickoff time;
-      traced to stale upstream data (not a frontend bug), fixed by
-      re-running the existing `fullSyncInsert.js` sync against the live,
-      already-configured football-data.org API key. Gameweeks 1–9 now
-      show realistic, distinct kickoff times; verified live on both
-      Dashboard and the Score Predictor pot page. See § 4's note on the
-      `sync-fixtures`/`fullSyncInsert.js` provider mismatch — this fix is
-      one-time, not a recurring safeguard, until that gap is resolved.
+- [x] **Migrations 001–030 replay cleanly** (§ 3). Includes the Realtime
+      publication fix (028) and the pick-lock deadline consolidation
+      (029/030, § 3b) — both formerly out-of-band drift, now fully
+      migration-tracked.
+- [x] **One authoritative pick-lock rule**: 15 minutes before the
+      earliest confirmed fixture kickoff, one DB trigger, `compute-deadlines`
+      only reads it. Re-verified Phase 20 (§ 3b) — still holds.
+- [x] **Frontend build produces zero secret leakage** — re-confirmed
+      Phase 20: `dist/assets/*.js` grepped for
+      `SERVICE_ROLE`/`service_role`/`SMTP`/`DB_PASSWORD`, zero matches.
+- [x] **Demo isolation** — re-confirmed Phase 20 with a fresh live HTTP
+      matrix: `demo-teardown`/`super-admin-actions` both `403` for a
+      normal user AND an `app_admin` token, `200` only for the real
+      `super_admin` (positive control, not just "everyone rejected").
+      Zero active demo leagues, zero demo users, zero demo sessions in
+      the current database.
+- [x] **Auth/RLS security boundaries** — re-verified live Phase 20 (not
+      just re-cited): `compute-deadlines` (Manual Jobs) and
+      `super-admin-actions` both correctly `401`/`403` a normal user and
+      an `app_admin`, both correctly `200` for `super_admin`. Self-
+      escalation still structurally closed.
+- [x] **Real fixture data, kickoff times, and unconfirmed-time handling**
+      all correct (`ISSUE-59`, `ISSUE-62`) — confirmed gameweeks with
+      confirmed broadcast times show real, distinct kickoffs; gameweeks
+      without them show "Time TBC," never a fabricated `00:00`.
+- [x] **Top-level error boundary added** (Phase 20, new) — this app had
+      none; an uncaught render error would have unmounted the entire
+      React tree to a blank white page. `frontend/src/components/ErrorBoundary.jsx`,
+      wrapping `<App/>` in `main.jsx`, matching the existing
+      `NotAuthorized.jsx`/`NotFound.jsx` styled-fallback pattern. Not a
+      monitoring platform — a local `console.error` plus a real "Reload
+      page" recovery action.
+- [x] **Payment model is manual-only, and that's the intended design, not
+      a gap** — confirmed via `business-rules.md § Payment verification
+      rules`: no Stripe/PayPal/gateway integration anywhere in the
+      codebase (confirmed by grep). `entry_payments.is_paid` is an
+      admin-set record of money received off-platform. Beta-safe as-is —
+      no code change needed, no false "payment processed" implication
+      anywhere in the UI (checked: "Paid"/"Unpaid" badges only).
+- [x] **Fixture ingestion now has one authoritative, cron-scheduled
+      path** (Phase 21, `ISSUE-64`) — `sync-fixtures` calls
+      football-data.org (the provider that has always actually
+      populated real data), fixing a previously-undiscovered
+      season-resolution bug in the same rewrite. Live-verified end to
+      end against the real API and database. See § 4 and
+      `decisions.md § Phase 21` for the full SOURCE → TABLE →
+      FREQUENCY → PURPOSE breakdown and the production cron matrix
+      (§ 6c, new).
+- [x] **No secret reaches the client bundle** — re-confirmed Phase 21:
+      the one file that read a `VITE_`-prefixed football-data.org key
+      client-side (`lib/footballDataProvider.js`, already-dead code)
+      was deleted outright, and the built bundle was re-grepped clean
+      afterward. `.env.example` rewritten into an explicit PUBLIC
+      FRONTEND / SERVER-SECRET split.
+
+### DECIDED, DOCUMENTED — not a beta blocker, no code needed
+
+1. **Season/gameweek lifecycle beyond one season**: manual rollover,
+   by design (Phase 21) — the schema already isolates seasons cleanly
+   (per-season unique constraints, pots never re-point across
+   seasons), so rollover is a documented data operation, not a code
+   gap. Exact step-by-step procedure:
+   `decisions.md § Phase 21 — Season rollover`. Nothing to build before
+   beta; revisit only when the second season actually approaches.
+2. **`ISSUE-39`** (`is_current` never `true` on any gameweek) — Phase
+   21 formally investigated and decided **intentionally unused**:
+   every real consumer already has working fallback logic
+   (`useNextGameweek()`, fallback chains) that doesn't depend on it,
+   and building a maintenance mechanism would add a second, competing
+   "what's current" source for no correctness benefit. Full reasoning:
+   `decisions.md § Phase 21 — is_current`.
 
 ### MANUAL ACTION REQUIRED FROM YOU — nothing below this line can proceed without it
 
 1. **Hosting platform for the frontend static build.** Not specified
-   anywhere in the repo (see status note above). Common candidates —
-   **Vercel, Netlify, Cloudflare Pages** — would all work unmodified
-   (`npm run build` produces a plain static `dist/`, no platform-specific
-   code exists to favor one over another). **I have not created an
-   account or deployed anywhere.** Tell me which platform, or if you'd
-   like a recommendation with tradeoffs.
-2. **A hosted Supabase project.** Create one at
-   [supabase.com](https://supabase.com/dashboard) (or tell me if one
-   already exists that I haven't been told about). I need from you:
-   - The **project URL** (`https://<ref>.supabase.co`) and **anon key**
-     (safe to share — it's the public client key) once created.
-   - The **service-role key** and **database password**, provided only
-     through a secure channel (Supabase secrets / your own password
-     manager) — never pasted in chat, never committed.
-   - **Region**: recommend the region closest to your expected beta
-     users (e.g. `eu-west-2`/London for a UK-focused Premier League
-     product) — your call, I don't have a strong reason to override it.
-3. **A real SMTP provider.** Local dev uses Mailpit; hosted beta cannot.
-   Any transactional-email provider Supabase supports (Resend, Postmark,
-   SendGrid, AWS SES, etc.) works — I need:
-   SMTP host, port, username, password, sender email, sender name. These
-   go into Supabase's own Auth SMTP settings (dashboard or
-   `supabase secrets set`), never into frontend code.
-4. **A production domain** (or a subdomain, e.g. `beta.yourdomain.com`,
-   or the hosting platform's own generated URL if you don't have a
-   custom domain yet). Needed to set `site_url`/`additional_redirect_urls`
-   correctly — without it, every email verification/password-reset link
-   will point at the wrong place.
+   anywhere in the repo. Recommendation (§ 2 below, unchanged from
+   Phase 16, re-assessed Phase 20 and still the right call): **Vercel**.
+   Netlify and Cloudflare Pages would also work unmodified — no
+   platform-specific code exists to favor one over another; the choice
+   barely matters technically for this project's architecture. **I have
+   not created an account or deployed anywhere.**
+2. **A hosted Supabase project.** I need the project URL, anon key
+   (safe to share), service-role key and DB password (secure channel
+   only, never in chat), and your preferred region.
+3. **A real SMTP provider** (§ 11) — host, port, username, password,
+   sender email/name. Goes into Supabase's own Auth SMTP settings, never
+   into frontend code.
+4. **A production domain** (or subdomain, or the hosting platform's own
+   generated URL) — needed for `site_url`/`additional_redirect_urls`
+   (§ 7).
+5. **A real football-data.org API key** for `FOOTBALL_DATA_KEY` (§ 5) —
+   required for the now-fixed `sync-fixtures` cron job to keep fixture
+   data fresh on the hosted project; the key used for this phase's
+   local live verification does not automatically carry over to a
+   hosted deployment.
+6. **A decision on where the WhoScored live-events pipeline runs**
+   (§ 4, new) — it needs a persistent, always-on Node.js/Playwright
+   host outside the Vercel+Supabase serverless stack (a small VPS,
+   Fly.io/Render background worker, or similar). Not required for
+   fixtures/kickoffs/results to work correctly for beta — only for
+   live in-match events and goalscorers.
 
-**Once all four are supplied**, I can execute § 1–§ 9 below in order: run
+**Once these are supplied**, § 1–§ 9 below can execute in order: run
 migrations against the hosted project, deploy Edge Functions, set
-secrets, configure `config.toml`'s auth URLs for the real domain,
-configure SMTP, provision the Super Admin, deploy the frontend, and run
-the full smoke test (`SMOKE-TESTS.md`) before any real beta user is
-invited. Nothing in that sequence should require further input from you
-beyond confirming each step as it happens, unless something unexpected
-turns up.
+secrets, configure `config.toml`'s auth URLs, configure SMTP, provision
+the Super Admin, deploy the frontend, and run the full smoke test
+(`SMOKE-TESTS.md`) before any real beta user is invited.
 
 ---
 
@@ -182,11 +220,11 @@ Verify: `select extname from pg_extension where extname in ('pg_net',
 ## 3. Migrations
 
 `supabase/migrations/001_initial_schema.sql` through
-`028_realtime_standings_snapshot.sql` — **28 migrations**, confirmed
-applied in full, in order, with zero gaps, on this project's own local
-dev database (`supabase migration list --local` — 001 through 028, local
-and remote columns matching throughout, no missing or out-of-order
-entries). This is direct evidence migrations replay cleanly, not an
+`030_deadline_excludes_unconfirmed_kickoffs.sql` — **30 migrations**,
+confirmed applied in full, in order, with zero gaps, on this project's
+own local dev database (`supabase migration list --local` — 001 through
+030, local and remote columns matching throughout, no missing or
+out-of-order entries; re-confirmed again Phase 20, still true). This is direct evidence migrations replay cleanly, not an
 assumption: this local database's entire schema history came from
 exactly this sequential apply process (`supabase start`'s own
 fresh-provision-and-migrate flow), not a hand-built or manually-patched
@@ -207,6 +245,41 @@ existence check so it replays safely both on a fresh project and on this
 project's own database (where it was already present). Applied and
 re-verified locally this phase — `pg_publication_tables` now shows all 4
 tables on both.
+
+### 3b. Migrations 029/030 — the pick-lock deadline, one authoritative rule (Phase 19)
+
+**The rule**: picks lock 15 minutes before the earliest non-postponed,
+non-cancelled, non-unconfirmed (`'tbd'`) fixture kickoff in a gameweek —
+see [business-rules.md § When picks lock](./business-rules.md#when-picks-lock)
+for the full plain-language rule and its history (this project
+previously had *four* independent, disagreeing implementations of this
+one rule — `ISSUE-24`, `ISSUE-61`, resolved). **The single authoritative
+implementation**: the SQL function `refresh_gameweek_deadlines()`,
+invoked by an `AFTER INSERT OR UPDATE OR DELETE` statement-level trigger
+on `fixtures` (`trg_refresh_gameweek_deadlines_on_fixtures`) — both now
+created by `029_deadline_single_source_of_truth.sql` (offset, one
+writer) and `030_deadline_excludes_unconfirmed_kickoffs.sql` (excludes
+`'tbd'` fixtures too, so an all-unconfirmed gameweek gets `null`, never
+a fabricated deadline). `compute-deadlines` (§ 4) no longer computes or
+writes `gameweeks.deadline_utc`/`earliest_kickoff_utc` — it only reads
+what this trigger already maintains.
+
+**Re-verified Phase 20, still holds**: `earliest_kickoff_utc -
+deadline_utc = exactly 15 minutes` for every gameweek with at least one
+confirmed fixture; `null`/`null` for gameweeks where no fixture's
+kickoff is confirmed yet (`gameweeks.deadline_utc is null` — the
+frontend shows "Time TBC", never a countdown, for exactly this case —
+see `ISSUE-62`).
+
+**Both objects were `supabase_admin`-owned before these migrations,
+not `postgres`-owned** (the same ownership split `ISSUE-21` documents
+for other objects) — applying migrations 029/030 to a hosted project
+requires running as `supabase_admin` or an equivalent superuser role,
+same as § 7's GUC fix below, not the default migration-runner role. On
+a genuinely fresh hosted project (nothing created out-of-band before
+migrations run) this is a non-issue — `CREATE FUNCTION`/`CREATE
+TRIGGER` succeed under the standard migration role when nothing with
+the same name already exists under a different owner.
 
 Apply via the standard Supabase CLI migration path (`supabase db push` against
 a linked project, or the CLI's local `supabase start` for a fresh local
@@ -240,10 +313,10 @@ in the repo the whole time but never previously listed in this table):
 | Function | Purpose | Auth model | Classification |
 |---|---|---|---|
 | `admin-actions` | `mark_paid`/`mark_unpaid`/`record_payment`/`reinstate_entry`/`bulk_verify_payments`/`add_member`/`remove_member` | Signed-in user; per-action pot-admin or app-admin check inside | **PRODUCTION REQUIRED** |
-| `compute-deadlines` | Locks entries whose gameweek deadline has passed | Service-role key or signed-in `super_admin` only (`ISSUE-26`, tightened Phase 10B) | **PRODUCTION REQUIRED, CRON** |
+| `compute-deadlines` | Reads `gameweeks.deadline_utc` (maintained by the DB trigger — see § 3b) and locks entries whose deadline has passed. As of Phase 19, no longer computes or writes the deadline itself. | Service-role key or signed-in `super_admin` only (`ISSUE-26`, tightened Phase 10B) | **PRODUCTION REQUIRED, CRON** |
 | `compute-scores` | Refreshes `player_fixture_goals`, then scores every mode | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** |
 | `settle-gameweek` | Finalizes a gameweek: settle → standings → winner → prize → notify, per mode | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** |
-| `sync-fixtures` | Pulls fixtures/teams/players from api-football, upserts | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** — see note below on provider mismatch |
+| `sync-fixtures` | Pulls fixtures/teams/gameweeks from football-data.org, upserts (Phase 21 rewrite — `ISSUE-64`) | Service-role key or signed-in `super_admin` only | **PRODUCTION REQUIRED, CRON** — live-verified working, see § 6c for the full cron matrix |
 | `get-or-create-pick5-entry` | Pick 5 entry creation (idempotent) | Signed-in user | **PRODUCTION REQUIRED** |
 | `get-or-create-lms-entry` | LMS entry creation, enforces entry window | Signed-in user | **PRODUCTION REQUIRED** |
 | `get-or-create-predictor-entry` | Predictor entry creation | Signed-in user | **PRODUCTION REQUIRED** |
@@ -261,27 +334,35 @@ formalizing an alternative). Its cron job (`sync-live-events-every-2-min`)
 will `404` on every tick — expected, not a deployment failure; do not treat
 a `404` on this specific job as a broken deployment.
 
-**Provider mismatch, confirmed Phase 16, not yet resolved**: `sync-fixtures`
-(the cron-scheduled Edge Function) pulls from **api-football**
-(`v3.football.api-sports.io`), but the real Premier League data actually
-populating this project (league `6`, 20 teams/38 gameweeks/380 fixtures)
-was populated by `frontend/scripts/fullSyncInsert.js`, a **standalone
-Node script** pulling from **football-data.org** — a different provider
-entirely, run manually, not on any schedule. `sync-fixtures` has never
-had a working api-football key in this environment and has never
-successfully run. This means **the Edge Function actually wired into
-cron is not the one currently keeping real fixture data fresh** — see
-`current-state.md` `ISSUE-59` for the concrete kickoff-time staleness
-this caused and how it was fixed this phase (by manually re-running the
-football-data.org script, not by fixing `sync-fixtures`). **Recommendation
-for beta** (not applied this phase — a product/architecture decision, not
-a deployment-config one): either wire `fullSyncInsert.js`'s logic into a
-proper scheduled Edge Function (mirroring `sync-fixtures`'s cron pattern
-but calling football-data.org), or obtain a working api-football key and
-switch cron over to the existing `sync-fixtures` function. Either way,
-without one of these, real fixture data on the hosted beta will go stale
-the same way it did locally, and nobody will be re-running a local Node
-script against a hosted database as a matter of routine.
+**Provider mismatch — resolved Phase 21 (`ISSUE-64`).** `sync-fixtures`
+now pulls from **football-data.org**, the provider that has always
+actually populated this project's real data (league `6`, 20 teams/38
+gameweeks/380 fixtures) — porting `frontend/scripts/fullSyncInsert.js`'s
+proven logic directly into the cron-scheduled Edge Function, rather than
+leaving a second, disagreeing implementation in place. The rewrite also
+fixed a previously-undiscovered structural bug: the old function
+resolved "the" season via `seasons.is_current`, which points at an
+empty season on this project's real data — even a working api-football
+key would have synced real fixtures into the wrong season. Live-verified
+end to end this phase: a real HTTP call against the real football-data.org
+API and real database returned `{"success":true,"processed":438,...}`
+(exact match — 20 teams + 38 gameweeks + 380 fixtures), with no
+duplicate season/league created and Phase 19's deadline trigger firing
+correctly on the new writes. `fullSyncInsert.js` itself is unchanged and
+still works the same way — it's now the documented manual tool for
+season rollover (`decisions.md § Phase 21 — Season rollover`), not a
+competing production path. See `decisions.md § Phase 21` for the full
+provider comparison and the SOURCE → TABLE → FREQUENCY → PURPOSE table,
+and § 6c below for the production cron schedule.
+
+**What this does not cover**: fixture-level goal/card/substitution
+events and goalscorers. Neither football-data.org's nor api-football's
+implementation in this codebase provides those — that gap is covered by
+a third, separate mechanism (WhoScored via Playwright browser
+automation, `frontend/scripts/ws-live-events.js` and its mapping
+scripts), which requires a persistent Node.js host and cannot run as an
+Edge Function or via `pg_cron` alone — see § 6c and § 0's "Manual action
+required" list.
 
 ### 4a. Demo Edge Functions — hosted-environment isolation, verified Phase 16
 
@@ -325,8 +406,9 @@ the prior version of this document, which had two genuine errors (below).**
 | `SUPABASE_URL` | Server-side project API URL | Every Edge Function | Yes | **No hosted project exists** |
 | `SUPABASE_SERVICE_ROLE_KEY` | Full-privilege DB access; also the cron-auth comparison value | Every Edge Function, `_shared/adminOrCronAuth.ts` | Yes | **No hosted project exists** |
 | `SUPABASE_ANON_KEY` (server-side) | Resolves the calling user's own identity/claims | `admin-actions`, all `get-or-create-*`/`submit-*` functions, and the human-caller path of the four cron-gated functions | Yes | **No hosted project exists** |
-| `VITE_FOOTBALL_DATA_KEY` (server-side, `sync-fixtures` only) | api-football.com key | `sync-fixtures` | Yes, if switching cron to this provider (§ 4's provider-mismatch note) | Present locally but never confirmed working; **not carried over automatically** |
-| `COMPETITION_ID` | api-football league ID for `sync-fixtures` | `sync-fixtures`, optional | Only if using `sync-fixtures` | Not set |
+| `FOOTBALL_DATA_KEY` (server-side, `sync-fixtures` + `fullSyncInsert.js`/`fullSyncPlayers.js`) | football-data.org (`api.football-data.org/v4`) key | `sync-fixtures` | Yes | Confirmed working — live-verified this phase against the real API. **Still needs setting on the hosted project** — the key used for local verification does not carry over automatically |
+| `FOOTBALL_COMPETITION_CODE` | football-data.org competition code (e.g. `PL`) | `sync-fixtures`, optional, defaults to `'PL'` | No | Not set — default is correct for this project |
+| `FOOTBALL_SEASON` | football-data.org season start year | `sync-fixtures`, optional, defaults to current year | No | Not set — default is correct once the real season starts |
 | `VITE_SUPABASE_URL` (frontend build-time) | Public API URL | Frontend build | Yes | **No hosted project exists** |
 | `VITE_SUPABASE_ANON_KEY` (frontend build-time) | Public anon key | Frontend build | Yes | **No hosted project exists** |
 | SMTP host/port/user/password | Transactional auth email | Supabase Auth (dashboard/`supabase secrets set`), not app code | Yes | **No provider supplied** |
@@ -346,19 +428,20 @@ or `supabase/functions/.env` for local CLI dev — **not** the frontend's
 | `SUPABASE_URL` | Every function | Typically auto-available on hosted Supabase; verify rather than assume on a self-hosted target |
 | `SUPABASE_SERVICE_ROLE_KEY` | Every function | Also the value `_shared/adminOrCronAuth.ts` compares the `Authorization` header against for the cron-caller path — see § 7 |
 | `SUPABASE_ANON_KEY` | `admin-actions`, `get-or-create-{pick5,lms,predictor}-entry`, `submit-{pick5,lms,predictor}-picks`, and (via `_shared/adminOrCronAuth.ts`) `compute-deadlines`/`compute-scores`/`settle-gameweek`/`sync-fixtures` | Used to build a user-scoped client that resolves the caller's own identity/claims. The four cron-gated functions only need it for the *human app-admin* calling path (Manual Jobs buttons) — the service-role-key cron path doesn't touch it — but its absence would silently break Manual Jobs while cron itself kept working, a confusing failure mode worth avoiding by just setting it everywhere |
-| `VITE_FOOTBALL_DATA_KEY` | `sync-fixtures` only | **Name confirmed from `sync-fixtures/index.ts` line 28, despite the `VITE_` prefix normally meaning "frontend-only."** This is the api-football.com (`v3.football.api-sports.io`) API key, sent as the `x-rapidapi-key` header. The `VITE_` prefix here is a naming holdover, not a typo to "fix" — renaming it would be a code change, out of this sprint's scope. **`.env.example` previously documented this as plain `FOOTBALL_DATA_KEY` — wrong, fixed this sprint (see § 10).** |
-| `COMPETITION_ID` | `sync-fixtures` only, optional | Numeric api-football league ID (e.g. `39` = Premier League, a well-known constant for that service). Falls back to the request body's `competitionId`, then to the literal default `'WC'` (World Cup) if neither is set — **not** `FOOTBALL_COMPETITION_CODE`/`FOOTBALL_SEASON`, which `.env.example` previously (wrongly) documented and which no code reads at all. |
+| `FOOTBALL_DATA_KEY` | `sync-fixtures` only (Phase 21 rewrite, `ISSUE-64`) | The football-data.org (`api.football-data.org/v4`) API key, sent as the `X-Auth-Token` header. Also accepts `VITE_FOOTBALL_DATA_KEY` as a fallback name for backward compatibility with `frontend/.env.local`'s existing value — set `FOOTBALL_DATA_KEY` going forward. Live-verified working this phase. |
+| `FOOTBALL_COMPETITION_CODE` | `sync-fixtures` only, optional | football-data.org competition code, e.g. `PL` = Premier League. Defaults to `'PL'`; can also be overridden per-request via the function's JSON body (`{"competitionCode": "..."}`). |
+| `FOOTBALL_SEASON` | `sync-fixtures` only, optional | football-data.org season start year, e.g. `2026`. Defaults to the current calendar year; can also be overridden per-request (`{"seasonYear": ...}`). |
 
-**Confirmed, not assumed, this project's own current local gap**: neither
-`supabase/functions/.env` nor any equivalent exists locally, and the Edge
-Runtime container has zero `FOOTBALL`/`COMPETITION`-related env vars set —
-`sync-fixtures` has never had a working API key in this local environment
-(matches its own `sync_runs` history: `failed`, `0 processed`, repeatedly).
-This is a known, standing local-dev gap, not something this sprint fixed —
-doing so requires a real, paid third-party API key this session doesn't
-have. A fresh production deployment must set `VITE_FOOTBALL_DATA_KEY` (and
-optionally `COMPETITION_ID`) for `sync-fixtures`/the daily cron job to work
-at all.
+**Local verification performed this phase (Phase 21)**: a real
+`supabase/functions/.env` was created locally (gitignored, confirmed via
+`git check-ignore -v`) containing a real `FOOTBALL_DATA_KEY`, and the
+rewritten `sync-fixtures` was live-tested against it via a temporary
+`supabase functions serve --env-file supabase/functions/.env
+--no-verify-jwt` process — confirmed working end to end
+(`{"success":true,"processed":438,...}`). **This key does not
+automatically carry over to a hosted deployment** — a fresh production
+project must still have `FOOTBALL_DATA_KEY` set via `supabase secrets set`
+for `sync-fixtures`/the daily cron job to work.
 
 ### Frontend build-time variables (`frontend/.env.local` for local dev; the
 equivalent mechanism for your hosting platform — e.g. build-time environment
@@ -369,7 +452,16 @@ not runtime)
 |---|---|---|
 | `VITE_SUPABASE_URL` | Yes | The project's public API URL |
 | `VITE_SUPABASE_ANON_KEY` | Yes | The public anon key — safe to expose client-side, RLS is the real gate |
-| `VITE_FOOTBALL_DATA_KEY` | No, effectively unused | Only referenced by `lib/footballDataProvider.js`, which has zero importers anywhere in the reachable app (`ISSUE-11`/`ISSUE-12`, confirmed dead code). Harmless to leave unset for the frontend build. |
+
+**Phase 21 update**: `VITE_FOOTBALL_DATA_KEY` is no longer a frontend
+variable at all — `lib/footballDataProvider.js`, the only file that
+ever read it client-side, was **deleted** (`ISSUE-11`), since a
+`VITE_`-prefixed football-data.org key is a live client-bundle
+secret-exposure risk the moment anything imports it, not just dead
+code. Do not add a `VITE_`-prefixed football-data.org (or any other
+third-party API) key to the frontend build — it belongs only in the
+server/Edge Function secrets table above, under the plain
+`FOOTBALL_DATA_KEY` name.
 
 ### Database-level configuration (not an env var — a Postgres GUC, set via
 `ALTER DATABASE`, not a migration — see § 7 for why)
@@ -388,7 +480,7 @@ Registered by `003_cron_jobs.sql` + `006_fix_cron_job_headers.sql`:
 
 | Job | Schedule | Calls | Purpose | Auth | Production required? |
 |---|---|---|---|---|---|
-| `sync-fixtures-daily` | `0 5 * * *` | `sync-fixtures` | Fixture/team/player sync | service-role key, via `app.settings.service_role_key` | **Yes, but see § 4's provider-mismatch note — this job alone will not keep real data fresh as currently wired** |
+| `sync-fixtures-daily` | `0 5 * * *` | `sync-fixtures` | Fixture/team/gameweek sync (football-data.org, Phase 21 rewrite) | service-role key, via `app.settings.service_role_key` | Yes — live-verified working; see § 6c for the full schedule rationale |
 | `compute-deadlines-hourly` | `0 * * * *` | `compute-deadlines` | Locks entries past deadline | same | Yes |
 | `compute-scores-every-3-min` | `*/3 * * * *` | `compute-scores` | Live/final scoring, all modes | same | Yes |
 | `settle-gameweek-every-30-min` | `*/30 * * * *` | `settle-gameweek` | Settlement, standings, prizes, notifications | same | Yes |
@@ -448,6 +540,66 @@ migrations in order — Realtime is enabled by default on every hosted
 Supabase project and the publication membership is now fully
 migration-tracked (nothing left as manual/out-of-band drift, unlike
 before 028).
+
+---
+
+## 6b. SPA routing / hosted rewrite configuration (Phase 20)
+
+React Router (`BrowserRouter`, confirmed in `main.jsx`) handles routing
+entirely client-side — every route (`/dashboard`, `/pots`, `/profile`,
+`/admin`, `/super-admin`, `/pot/:potId`, `/pot/:potId/manage`,
+`/join/:inviteCode`, etc.) exists only in the JS bundle, not as a real
+file on the server. **A direct load or refresh of any non-root URL will
+`404` on a static host unless it's configured to serve `index.html` for
+every path and let the client-side router take over.** This is a
+generic SPA requirement, not specific to this project's route list, and
+applies identically to every route above.
+
+**Deliberately not configured yet** — per this phase's own instruction
+not to add hosting config before a provider is chosen, since the exact
+mechanism differs per platform:
+
+- **Vercel**: zero-config for a Vite SPA — its framework preset detects
+  Vite and serves `index.html` as the SPA fallback automatically. No
+  file needed.
+- **Netlify**: requires a `public/_redirects` file containing
+  `/* /index.html 200`, or the equivalent in `netlify.toml`.
+- **Cloudflare Pages**: same `_redirects` file format as Netlify, placed
+  in the build output directory.
+
+Whichever platform is chosen, this is a one-line config file (or zero
+config, for Vercel) — not a code change to the app itself, and not
+something to add speculatively for a platform that isn't the one
+actually used.
+
+---
+
+## 6c. Production fixture-sync schedule (Phase 21)
+
+Based on real provider/API constraints observed this phase, not
+invented frequencies. `sync-fixtures-daily` (§ 6) is already correctly
+scheduled for football-data.org's own rate limits — this section
+documents *why* each frequency is what it is, and what's still missing
+for live in-match data.
+
+| Function | Source | Purpose | Frequency | Time / window | Required secret | Failure impact |
+|---|---|---|---|---|---|---|
+| `sync-fixtures` (cron: `sync-fixtures-daily`) | football-data.org `/v4/competitions/{code}/{teams,matches}` | Fixtures, teams, gameweeks, kickoff times, status (scheduled/tbd/live/finished/postponed/cancelled), final scores | Once daily | `0 5 * * *` (05:00 UTC — outside any real Premier League kickoff window, so a mid-sync read never races a live match update) | `FOOTBALL_DATA_KEY` | A missed tick is not urgent — fixture data changes slowly day to day (schedule confirmations, postponements); the next day's tick self-corrects. A confirmed kickoff time that changes intraday (rare) would lag up to 24h until the next tick — acceptable for beta, revisit if a real postponement needs same-day visibility |
+| `frontend/scripts/fullSyncInsert.js` (manual, standalone) | football-data.org, identical logic to `sync-fixtures` | Season rollover (new season's teams/gameweeks/fixtures) or ad hoc backfill | Manual only — once per season, or on demand | N/A | `FOOTBALL_DATA_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (as script env vars) | None — not part of the automated pipeline. See `decisions.md § Phase 21 — Season rollover` for the exact manual procedure this script is step 1 of |
+| `frontend/scripts/fullSyncPlayers.js` (manual, standalone) | football-data.org `/v4/teams/{id}` (squads) | Player/squad reference data | Manual — after fixtures exist for a season, or when squads change | N/A, rate-limited to ~6.5s between requests (free-tier constraint, ~2+ min for 20 teams) | Same as above | None — not part of the automated pipeline. **Has a known, separate bug** (`ISSUE-65`, stale hardcoded `SEASON_ID`) that must be checked before running against a new season |
+| WhoScored live-events pipeline (`ws-live-events.js` + 3 mapping scripts) | WhoScored.com (Playwright browser automation, not an official API) | Live in-match goal/card/substitution events and goalscorers — the one thing neither football-data.org nor api-football's implementation in this codebase covers | `ws-live-events.js` polls every 60s while actively running; mapping scripts run once per season / as squads change | During live matches only | None (no API key — scraping) | **Not yet deployed anywhere** — requires a persistent, always-on Node.js/Playwright host outside the Vercel+Supabase serverless stack (cannot run as an Edge Function — Deno has no Chromium; cannot run via `pg_cron` — not an HTTP API). Without this, the app has correct fixtures/kickoffs/final scores but no live in-play events or goalscorers during a match. This is a real, open infrastructure decision for hosting, not solved this phase |
+
+**Why daily, not hourly or more frequent, for `sync-fixtures`**:
+football-data.org's free tier is the binding constraint (the same
+tier `fullSyncPlayers.js`'s ~6.5s inter-request delay exists to
+respect) — fixture schedule data doesn't change intraday under normal
+circumstances, so a daily sync is the correct match for how often the
+underlying data actually changes, not an arbitrary choice. Live
+scores/status *within* a match day are not this function's job at all
+— that's `compute-scores` (§ 6, every 3 minutes, reading
+`fixtures.status`/goals already present from the last daily sync) and,
+for events/goalscorers specifically, the not-yet-deployed WhoScored
+pipeline above.
 
 ---
 
@@ -700,3 +852,35 @@ value a migration should never hard-code.
   unmodified — it's explicitly a point-in-time record of what was actually
   done for the ISSUE-19/20/21 remediation, not a living document this sprint
   should rewrite.
+
+## 13. Known, not fixed Phase 20 (product decisions, not code bugs)
+
+- **Fixture-ingestion provider/scheduling mismatch** — **resolved
+  Phase 21**, see § 0, § 4, § 6c, and `decisions.md § Phase 21`.
+- **Season-to-season rollover** — **decided Phase 21**: manual, by
+  design, exact procedure documented in `decisions.md § Phase 21`.
+  Not a beta blocker; no code needed.
+- **`ISSUE-27`** (`PotDetail.jsx`'s data-loading effects have no
+  stale-response guard) — re-confirmed still present, still low
+  real-world likelihood at current usage patterns, still P2/tech-debt
+  per its own existing classification in `current-state.md`. Not
+  touched — no new evidence changed its risk assessment this phase.
+
+## 14. Known, not fixed Phase 21 (flagged, out of this phase's scope)
+
+- **`ISSUE-65`** — `fullSyncPlayers.js` hardcodes a stale `SEASON_ID`
+  that doesn't match this project's real season. Not fixed this phase
+  (out of the fixture-ingestion scope this phase prioritized); must be
+  checked/patched before the next season rollover's player-sync step
+  (`decisions.md § Phase 21 — Season rollover`, step 4).
+- **WhoScored live-events pipeline has no hosting home** — needs a
+  persistent Node.js/Playwright process, incompatible with both Edge
+  Functions and `pg_cron`. Documented in § 6c as a real, open
+  infrastructure decision, not solved this phase — beta can launch
+  without it (fixtures/kickoffs/results are correct either way; only
+  live in-match events/goalscorers are affected).
+- **`ISSUE-12`'s three-script overlap** (`fullSyncInsert.js`/
+  `fullSyncPlayers.js`/`syncFootballData.js`) — `fullSyncInsert.js` is
+  no longer purely dead (it's the season-rollover tool and the source
+  `sync-fixtures` was ported from), but the underlying duplication
+  across all three scripts was not consolidated this phase.

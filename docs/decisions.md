@@ -6283,3 +6283,314 @@ independent frontend calculation anywhere. Confirmed `ISSUE-59`'s fix
 (distinct real kickoff times) remains intact for confirmed gameweeks.
 Zero console errors. Responsive 375/390/768/1024/1440px — zero
 horizontal overflow.
+
+## Phase 20 — Beta Readiness / Production Hardening Audit
+
+Full audit across all 17 areas the phase specified (frontend, database,
+Edge Functions, auth, RLS, Realtime, cron, ingestion, secrets, payments,
+email, error handling, demo isolation, admin permissions, build, mobile,
+data lifecycle). Full detail in `DEPLOYMENT.md` (rewritten § 0 into a
+CODE READY / PRODUCT DECISION REQUIRED / MANUAL ACTION checklist, new
+§ 3b on the deadline architecture, new § 6b on SPA routing); one new
+issue in `current-state.md` (`ISSUE-63`). Summary of what this phase
+actually did, not just audited:
+
+**Re-verified live, not just re-cited from prior phases**: migrations
+001–030 fully tracked (`supabase migration list --local`); RLS enabled
+on all 36 public tables, unchanged; the Phase 19 deadline consolidation
+still holds (15-minute offset, `null` for unconfirmed gameweeks);
+production bundle re-scanned for secret leakage — clean; demo isolation
+re-tested with a **fresh live HTTP matrix** (not just re-citing Phase
+16's own test) — `demo-teardown`/`super-admin-actions`/`compute-deadlines`
+(Manual Jobs) all correctly reject a normal user AND an `app_admin`
+token (`401`/`403`), and correctly accept the real `super_admin` token
+(`200`) — a positive control, proving the boundary discriminates by
+role rather than just rejecting everyone.
+
+**Real, low-risk code fix made — `ISSUE-63`**: no top-level React error
+boundary existed anywhere in the app. Added
+`frontend/src/components/ErrorBoundary.jsx`, wrapping `<App/>` in
+`main.jsx`, matching the existing `NotAuthorized.jsx`/`EmptyState`
+styled-fallback pattern rather than inventing new UI language.
+
+**Explicitly NOT silently fixed — flagged as PRODUCT DECISION
+REQUIRED instead**, per this phase's own "do not silently fix
+everything, stop and report" instruction:
+- The fixture-ingestion provider/scheduling mismatch (`sync-fixtures`
+  vs. `fullSyncInsert.js`, unresolved since Phase 16) — still requires
+  the user to choose between wiring `fullSyncInsert.js` into a proper
+  scheduled function or obtaining a working api-football key.
+- Season-to-season rollover — confirmed no mechanism exists anywhere in
+  the codebase (the existing "rollover" concept is entirely
+  within-season, LMS wipeout/Pick 5 jackpot). Not a beta blocker for a
+  beta confined to 2026/27, but a real gap flagged for later.
+- `ISSUE-39` (`is_current` never `true`) — confirmed, this phase, that
+  every real consumer already has working fallback logic that doesn't
+  depend on it; left exactly as-is, per the phase's own explicit
+  instruction not to silently change a deliberate data-model gap.
+
+**Confirmed, not assumed — the payment model is intentional, not a
+gap**: `business-rules.md`/a fresh grep across every Edge Function
+confirm zero payment-gateway integration anywhere (no Stripe/PayPal/
+etc.) — `entry_payments.is_paid` is purely an admin-recorded fact about
+money received off-platform. No code change needed; the existing
+"Paid"/"Unpaid" UI language doesn't imply in-app processing anywhere.
+
+**Hosting recommendation re-assessed, unchanged**: Vercel remains the
+right call for this project — re-confirmed the reasoning still holds
+(no platform-specific code favors any of the three candidates
+technically; Vercel's zero-config Vite SPA detection is the smallest-
+friction path). Not deployed, no account created.
+
+### Verification performed, live, this session
+
+`npm run build` clean (multiple rebuilds, including after adding
+`ErrorBoundary`). Deno suite 347/347 unchanged. Migration tracking,
+RLS policy counts, demo-data footprint (0 sessions, 0 active demo
+leagues, 0 demo users), and the deadline single-source-of-truth all
+re-queried directly against the live database, not assumed from
+documentation. Fresh HTTP authorization matrix against 3 Edge Functions
+with 3 different real accounts (normal user, `app_admin`, `super_admin`)
+— 6 negative results + 2 positive controls, all correct. Responsive
+375/390/768/1024/1440px — zero horizontal overflow. Zero console errors
+during live navigation testing.
+
+---
+
+## Phase 21 — Beta Architecture Decisions + Deployment Preparation
+
+Resolves the three decisions Phase 20 explicitly deferred (fixture
+ingestion, season rollover, `ISSUE-39`) with real, evidence-based
+architecture — not preference calls. New issues in `current-state.md`:
+`ISSUE-64` (resolved), `ISSUE-65` (flagged, not fixed).
+
+### Fixture ingestion — the authoritative decision
+
+**What:** `supabase/functions/sync-fixtures/index.ts` — the one
+function already wired into the existing `sync-fixtures-daily` cron job
+— was rewritten to call **football-data.org** (porting
+`frontend/scripts/fullSyncInsert.js`'s exact, already-proven logic,
+Phase 19's `'tbd'`/15-minute fixes included), instead of api-football.
+No new function, no new cron entry, no new provider introduced.
+
+**Why, based on real comparison, not ease:**
+- api-football (the old `sync-fixtures`) has **never successfully run
+  in this environment** (no working key, confirmed by `sync_runs`
+  history: repeated `failed`, `0 processed`) and had a genuine
+  structural bug independent of the key: it resolved "the" season via
+  `.eq('is_current', true)`, which on this project's own real data
+  points at season id=1 — **zero real leagues or gameweeks**. Even with
+  a working key, it would have synced real fixtures into a wrong,
+  parallel season rather than the one every pot/gameweek/fixture
+  actually lives under (id=3).
+- football-data.org, via `fullSyncInsert.js`, is what has **actually
+  populated every real fixture this project has ever had** — proven
+  against real data repeatedly this session, not merely "available."
+- Neither provider's free tier delivers fixture-level goal/card/sub
+  events or goalscorers — that gap is real and pre-existing, and is
+  covered by a **third, entirely separate mechanism** (WhoScored via
+  Playwright browser automation — `frontend/scripts/ws-live-events.js`
+  and its companion mapping scripts), which cannot run as a Supabase
+  Edge Function (Deno has no Chromium) or as a plain `pg_cron`/
+  `net.http_post()` job (not an HTTP API — needs a persistent browser
+  process). This is a genuine, structural three-way split, not a
+  preference: football-data.org owns fixtures/teams/kickoffs/status,
+  WhoScored owns live events/goalscorers, and they were never
+  competing for the same field.
+- Player/squad data is deliberately **not** folded into `sync-fixtures`
+  — `fullSyncPlayers.js` needs football-data.org's squad endpoint,
+  which free-tier rate-limits hard enough to require a ~6.5s delay
+  between requests (~2+ minutes for 20 teams). Combining it with the
+  fast fixtures/teams/gameweeks sync would burn this function's own
+  execution budget for no benefit. Kept as two separate concerns,
+  matching how they already exist as two separate scripts.
+
+**One source of truth per field — SOURCE → TABLE → FREQUENCY → PURPOSE:**
+
+| Source | Database table(s) | Update frequency | Purpose |
+|---|---|---|---|
+| football-data.org (`sync-fixtures` Edge Function) | `seasons`, `leagues`, `teams`, `gameweeks`, `fixtures` (kickoff_utc, status, home/away goals, provider fields) | Daily (`sync-fixtures-daily` cron, `0 5 * * *`) | Authoritative fixture list, kickoff times, confirmed/TBC/postponed/cancelled status, final scores |
+| football-data.org (`frontend/scripts/fullSyncInsert.js`, standalone) | Same tables as above | Manual — season rollover or ad hoc backfill only | Identical logic to the Edge Function; kept as a standalone script for local/manual use and the season-rollover procedure (below), not a competing production path |
+| football-data.org (`frontend/scripts/fullSyncPlayers.js`, standalone) | `players`, `player_team_history` (squad rosters) | Manual — run after fixtures exist for a season, or when squads change | Player/squad reference data; rate-limit constraints make this unsuitable for the fast daily cron cadence |
+| WhoScored (Playwright scrapers: `ws-live-events.js`, `sync-whoscored-fixture-map.js`, `sync-whoscored-teamids.js`, `sync-whoscored-player-map.js`) | `fixtures.whoscored_fixture_id` (mapping, already 380/380 populated for real data), `fixture_events`, live goal/card/sub events, goalscorers | `ws-live-events.js` polls every 60s while running; mapping scripts run once per season/as teams change | Live in-match events and goalscorers — the one thing neither football-data.org's nor api-football's implementation in this codebase covers. **Requires a persistent, always-on Node.js host outside the Vercel+Supabase serverless stack** — cannot run as an Edge Function or via `pg_cron` alone. Not solved this phase (infra decision, not a code change); documented as an explicit gap for hosting planning |
+
+`sync-fixtures` never writes to `fixture_events`/goalscorer data, and
+the WhoScored scripts never write `kickoff_utc`/fixture `status` —
+each mechanism owns disjoint fields, so there is no overwrite risk
+between them.
+
+**Bug found and fixed as part of this rewrite (`ISSUE-64`, new)**: see
+`current-state.md`. **Bug found, not fixed (`ISSUE-65`, new)**:
+`fullSyncPlayers.js` hardcodes `SEASON_ID = 26`, which doesn't match
+this project's real season id (3) — out of this phase's scope (fixture
+ingestion, not player sync), flagged for a future session.
+
+**Verified live**, not just type-checked: `deno check` 0 errors (down
+from the old file's 31, `ISSUE-38`); `deno test --allow-all` 347/347
+unchanged; a real HTTP call (via a temporary local
+`supabase functions serve --env-file supabase/functions/.env
+--no-verify-jwt`, immediately killed afterward) against the real
+football-data.org API returned `{"success":true,"processed":438,...}`
+(438 = 20 teams + 38 gameweeks + 380 fixtures, exact match with real
+league 6). Post-call DB verification: no duplicate season/league
+created (still exactly 3 seasons: 1/3/13; league 6 still
+`provider_name='football-data'`, `season_id=3`, `is_active=true`),
+real counts unchanged (20 teams/38 gameweeks/380 fixtures), and GW1's
+`deadline_utc` still exactly 15 minutes before `earliest_kickoff_utc`
+— proving Phase 19's `refresh_gameweek_deadlines()` trigger correctly
+fires on this function's writes without any change to the trigger
+itself. `sync_runs` logged the call as `status='success'`,
+`records_processed=438`.
+
+**What it rules out**: a second, independently-scheduled fixture
+ingestion path competing for the same fields (rejected — the standalone
+scripts and the Edge Function now run the *same* logic, not
+*different* logic, so there's nothing to reconcile); switching to
+api-football (rejected — would require a new paid key for a provider
+that has never worked in this environment and had its own season-
+resolution bug, replacing a proven path with an unproven one for no
+stated benefit).
+
+### `is_current` (`ISSUE-39`) — decision
+
+**What:** Left intentionally unused/legacy on both `seasons.is_current`
+and `gameweeks.is_current`. No maintenance mechanism implemented.
+
+**Why:** Full trace (every read and write site, both tables) confirms
+**nothing in the codebase has ever set either flag to `true`** — only
+`false`, at season/gameweek creation and gameweek completion. The one
+`true` season row live today (id=1) is a stale manual artifact
+pointing at empty data, itself evidence the flag was never wired to a
+real process even historically. Every real consumer — `useNextGameweek()`
+(deadline-ordering, the actual "what's current" source of truth since
+Phase 10B), the `find(is_current) || find(upcoming) || [0]` fallback
+chains in `PotDetail.jsx`/`AdminPayments.jsx`, and `PotManager.jsx`'s
+cosmetic "— Current" league badge — already work correctly without it.
+The app is provably correct today with `is_current` permanently false
+everywhere.
+
+**What it rules out**: building a trigger/cron to atomically flip
+`is_current` as fixtures complete (rejected — non-trivial correctness
+work, given the partial unique index across potentially multiple
+concurrent leagues/seasons, to duplicate a decision `useNextGameweek()`
+already makes correctly a simpler way — would introduce a second,
+competing "what's current" mechanism, violating this same phase's own
+fixture-ingestion "one source of truth" principle); dropping the
+columns (rejected — destructive schema change, no correctness benefit,
+and `settle-gameweek` still legitimately clears the gameweek flag to
+`false` on completion as a lightweight, harmless secondary marker).
+
+**Consequence**: `ISSUE-39` stays open but is now explicitly documented
+as "intentionally unused, decision made Phase 21" rather than an
+undecided gap — future engineers must not assume `is_current` reflects
+reality on either table, and should look at `useNextGameweek()` /
+explicit year-lookup patterns (matching `sync-fixtures`' own
+`year_start`/`year_end` lookup) as the real source of truth for "what's
+current."
+
+### Season rollover — decision
+
+**What:** Manual rollover, no automation built. The schema already
+provides full multi-season isolation (per-season unique constraints on
+`teams`/`gameweeks`/`fixtures`; `pots` carry their own immutable
+`season_id`/`league_id` at creation, never re-pointed) — a new season
+coexists safely with old ones today with zero migration/archival step,
+proven live by this same phase's `sync-fixtures` test run (season
+id=3's 2026 data upserted without disturbing id=1 or id=13).
+
+**Why:** Nothing about a past season is entangled with a new one at the
+schema level — rollover is fundamentally "ingest the new season's data,
+then flip two pointers," not a migration. Building an admin UI or
+automated trigger for a once-a-year, 5–20-user-beta event would add a
+new failure surface (a wrong-season promotion is a nasty bug class) to
+solve a problem the schema doesn't actually have.
+
+**The one real dependency found**: `PotManager.jsx`'s
+`defaultLeagueId()` uses `seasons.is_current` as a tie-break for which
+league a new pot defaults to. Both `fullSyncInsert.js` and the new
+`sync-fixtures` always insert new seasons with `is_current: false` —
+deliberately, ingestion never auto-promotes — so after ingesting a new
+season, pot creation still defaults to the old season's league until
+`is_current` is flipped by hand. No admin UI exists to do this; it's
+SQL-only today, which is fine for a once-a-year, deliberate operator
+action.
+
+**Manual rollover procedure** (to run once, before each new season):
+1. Ingest the new season's data — call `sync-fixtures` (needs
+   `FOOTBALL_DATA_KEY` set) or run `fullSyncInsert.js` with
+   `FOOTBALL_SEASON=<year>` `FOOTBALL_COMPETITION_CODE=PL`. Either path
+   upserts `seasons`/`leagues`/`teams`/`gameweeks`/`fixtures`,
+   `is_current: false` by default, never touching the old season's rows.
+2. Verify: `select id, name, year_start from seasons order by
+   year_start desc limit 3;` and confirm the new league's team/gameweek/
+   fixture counts are real and non-zero.
+3. Flip the pointers (as `supabase_admin`/`postgres`, matching this
+   project's established migration-adjacent workaround pattern):
+   `update seasons set is_current = false where id = <old>; update
+   seasons set is_current = true where id = <new>;`.
+4. Run `fullSyncPlayers.js` for the new season's squads once fixtures
+   exist — **first check/patch `ISSUE-65`'s hardcoded `SEASON_ID`**, or
+   player data will sync into the wrong season.
+5. Spot-check pot creation as a real user: the league picker should now
+   default to the new season's Premier League without manual selection.
+6. Leave the old season's `leagues.is_active` as `true` — old pots/
+   fixtures/history must remain fully queryable; never cascade-delete
+   or archive anything.
+
+**What it rules out**: automatic/scheduled season creation (rejected —
+no clear trigger signal exists for "season has ended," and this is
+exactly the kind of automation this phase's own brief says not to
+build absent genuine necessity); an admin "promote season" UI button
+(rejected — adds a new admin surface with real blast radius for a
+once-a-year action safer done deliberately via SQL).
+
+### Client-bundle secret exposure — found and fixed
+
+**What:** `frontend/src/lib/footballDataProvider.js` read
+`import.meta.env.VITE_FOOTBALL_DATA_KEY` — a `VITE_`-prefixed var,
+which Vite inlines into the public client bundle for any code path
+that imports it. Confirmed via grep this file had **zero importers**
+anywhere in `frontend/src` (already flagged as dead code under
+`ISSUE-11`), so the key was not actually present in today's built
+bundle — but the file was a live landmine: the moment anyone innocently
+imported it (e.g. building a client-side scores widget), a paid
+football-data.org key would leak to every visitor. Deleted outright
+rather than left as unused-but-risky code, since it was both provably
+obsolete (superseded by the now-corrected Edge Function/scripts) and a
+genuine latent security exposure, not merely unused.
+
+**Verified**: `npm run build` clean; `grep` across `frontend/dist/assets/*.js`
+for `VITE_FOOTBALL_DATA_KEY`/`api-football`/`football-data.org` — zero
+matches, confirming no secret-shaped string reaches the shipped bundle.
+`.env.example` rewritten into an explicit PUBLIC FRONTEND VARIABLES /
+SERVER-SUPABASE-SECRETS split (previously a single undifferentiated
+list, and stale — still describing the old api-football variable
+names/values from before this phase's rewrite).
+
+### Verification performed, live, this session
+
+`deno check` on the rewritten `sync-fixtures/index.ts`: 0 errors.
+`deno test --allow-all`: 347/347, unchanged. `npm run build`: clean,
+786.5 kB main bundle (pre-existing size, unrelated to this phase's
+changes). Built bundle grepped clean of the football-data key and
+provider name strings. Live HTTP test of the rewritten `sync-fixtures`
+against the real football-data.org API and real local database (see
+above). `sync_runs` table confirms the call logged correctly
+(`status='success'`, `records_processed=438`, ~2.3s runtime) alongside
+the two pre-existing `failed` rows from the old api-football-backed
+function — real evidence this rewrite fixed a genuinely, previously
+broken production path. Beta data-safety re-check: 1 inactive
+(`is_active=false`), zero-fixture `Demo Premier League` league (the
+Demo Centre's own isolated scaffold, not stray pollution — 0 pots, 0
+gameweeks with fixtures reference it), 0 demo pots, the two
+`bentest5`/`bentest6` accounts confirmed as the explicitly-kept test
+accounts from Phase 15's approved cleanup, not new pollution. Security
+re-audit (`ISSUE-51`/`52`/`53`/`54`/`58`/`63`) — all six fixes
+reconfirmed still live in current code, unaffected by this session's
+changes (only `sync-fixtures/index.ts`, docs, and the already-untracked
+`ErrorBoundary.jsx`/`main.jsx` from Phase 20 are modified). Auth flow
+walk (Sign Up/Sign In/Forgot Password/session restore/sign out) —
+all sane, no silent failures, no exposed stack traces. `ErrorBoundary`
+re-confirmed: catches render errors only, doesn't swallow auth
+promise-rejections (already handled locally in each auth page), no
+secret/stack-trace leakage in its fallback UI.

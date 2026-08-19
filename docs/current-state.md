@@ -523,7 +523,35 @@ verified against the happy path via a temporary, fully-reverted
 `is_current = true` toggle on one real gameweek (not a data fix, not left
 in place). The underlying data gap itself is still open.
 
+**Phase 21 decision (2026-08-19):** formally investigated (every read
+and write site, both `seasons.is_current` and `gameweeks.is_current`)
+and decided **intentionally left unused/legacy** — nothing in the
+codebase has ever set either flag to `true` (only ever `false`), every
+real consumer already has a working fallback that doesn't depend on it
+(`useNextGameweek()`, `find(is_current) || find(upcoming) || [0]`
+chains), and building a correct maintenance mechanism would introduce a
+second, competing "what's current" source rather than fixing anything
+broken today. Full reasoning, alternatives considered, and consequences:
+[decisions.md § Phase 21 — `is_current`](./decisions.md#is_current-issue-39--decision).
+**Status: confirmed, decision made, not fixed** — this is now a
+deliberate design choice, not an open question.
+
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
+
+#### ISSUE-65 — `fullSyncPlayers.js` hardcodes a stale `SEASON_ID`
+**Discovered 2026-08-19, Phase 21**, while investigating the fixture-
+ingestion architecture (`ISSUE-64`). `frontend/scripts/fullSyncPlayers.js`
+hardcodes `SEASON_ID = 26`, which does not match this project's real
+season id (`3` — the season all real leagues/gameweeks/fixtures
+actually live under). Deliberately **not fixed this phase** — out of
+the fixture-ingestion scope this phase's brief marked as most
+important (fixtures/teams/kickoffs/status, not player/squad sync), and
+fixing it safely needs more research into why `26` was originally
+chosen before changing it. **Relevant before the next season rollover**:
+step 4 of the manual rollover procedure
+([decisions.md § Phase 21 — Season rollover](./decisions.md#season-rollover--decision))
+explicitly calls out checking/patching this constant first, or player
+data will sync into the wrong season. **Status: confirmed, not fixed.**
 
 #### ISSUE-27 — `PotDetail.jsx`'s data-loading effects have no stale-response guard
 **Discovered 2026-08-05**, during the production hardening sprint audit.
@@ -597,7 +625,18 @@ silently diverge. Plan:
 [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
 
 #### ISSUE-11 — Dead code, including a latent case-sensitivity import bug
-`components/entryBuilder.jsx`, `lib/gameAPI.js`, `lib/footballDataProvider.js`, and
+**Phase 21 update (2026-08-19):** `lib/footballDataProvider.js` has
+been **removed** — beyond being dead code, it read a `VITE_`-prefixed
+football-data.org API key (`import.meta.env.VITE_FOOTBALL_DATA_KEY`),
+which Vite would inline into the public client bundle the moment
+anything imported it. A live secret-exposure risk sitting in the
+codebase, not merely unused code, so it was deleted outright rather
+than left for a future cleanup pass. See
+[decisions.md § Phase 21 — Client-bundle secret exposure](./decisions.md#client-bundle-secret-exposure--found-and-fixed).
+The remaining three files below are unchanged, still dead, still
+out of scope.
+
+`components/entryBuilder.jsx`, `lib/gameAPI.js`, and
 `lib/whoScored.js` have no importers anywhere in the reachable app (confirmed by
 grepping for each module's name across `frontend/src`). `entryBuilder.jsx` additionally
 imports `from '../lib/gameApi'` (lowercase `Api`) when the actual file is
@@ -637,8 +676,20 @@ similar-but-not-identical upsert logic against football-data.org v4, none of the
 invoked by the running app, cron, or any edge function. See
 [architecture.md § Three football data providers](./architecture.md#three-football-data-providers)
 and [decisions.md § Provider abstraction was planned but never completed](./decisions.md#provider-abstraction-was-planned-but-never-completed)
-for how this relates to the (also unused) `footballDataProvider.js` abstraction.
-**Status: confirmed.** Plan: [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
+for how this relates to the now-removed `footballDataProvider.js` abstraction
+(`ISSUE-11`).
+
+**Phase 21 update (2026-08-19):** `fullSyncInsert.js` is no longer
+purely "unused" — its exact logic was ported into the production,
+cron-scheduled `sync-fixtures` Edge Function (`ISSUE-64`), and the
+script itself is now the documented manual-rollover tool
+([decisions.md § Phase 21 — Season rollover](./decisions.md#season-rollover--decision)),
+not dead weight. `fullSyncPlayers.js` remains standalone/manual-only
+(and has its own separate, flagged bug — `ISSUE-65`). `syncFootballData.js`
+is unchanged, unexamined this phase, still presumed dead. The
+three-script *overlap* this issue describes is otherwise unchanged —
+not consolidated this phase, out of scope. **Status: confirmed.** Plan:
+[roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
 
 #### ISSUE-13 — Duplicate `.env` files
 A root-level `.env` and `frontend/.env.local` contain the same keys (Supabase URL/
@@ -710,6 +761,127 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-64 — `sync-fixtures` called a provider with no working key, and had a season-resolution bug that would have synced real data into the wrong season anyway
+**Discovered and resolved 2026-08-19, Phase 21 (Beta Architecture
+Decisions + Deployment Preparation), during the fixture-ingestion
+provider comparison this phase's brief marked most important.** The
+cron-scheduled `supabase/functions/sync-fixtures/index.ts` called
+api-football (`v3.football.api-sports.io`) and had never successfully
+run in this environment (`sync_runs` history: repeated `failed`,
+`0 processed` — no working key). Reading the function's actual source
+(not just re-citing the known key gap from Phase 16/20) found a second,
+independent, previously-undiscovered bug: it resolved "the" season via
+`.eq('is_current', true).single()`, which on this project's own real
+data points at season id=1 — zero real leagues or gameweeks (see
+`ISSUE-39`). Even with a working key, this function would have silently
+created/synced real fixtures into a wrong, parallel season rather than
+updating the one every pot/gameweek/fixture actually lives under
+(id=3).
+
+**Fixed**: rewrote the function to call football-data.org, porting
+`frontend/scripts/fullSyncInsert.js`'s exact, already-proven logic
+(Phase 19's `'tbd'`/15-minute-offset fixes included) — the provider
+that has actually populated every real fixture this project has ever
+had. Season resolution now uses an explicit `year_start`/`year_end`
+lookup (matching `fullSyncInsert.js`'s own pattern), never
+`is_current`. Same Edge Function, same existing `sync-fixtures-daily`
+cron entry, same auth model (`_shared/adminOrCronAuth.ts`, unchanged)
+— no new function, no new cron job, no new provider introduced. Full
+comparison and the resulting one-source-of-truth table:
+[decisions.md § Phase 21](./decisions.md#phase-21--beta-architecture-decisions--deployment-preparation).
+
+**Verified**: `deno check` 0 errors (down from the old file's 31,
+`ISSUE-38`); `deno test --allow-all` 347/347 unchanged; a real HTTP
+call via a temporary local `supabase functions serve` process against
+the real football-data.org API returned
+`{"success":true,"processed":438,...}` (exact match: 20 teams + 38
+gameweeks + 380 fixtures). Post-call DB check: no duplicate season/
+league created, real counts unchanged, and GW1's `deadline_utc` still
+exactly 15 minutes before `earliest_kickoff_utc` — confirming Phase
+19's `refresh_gameweek_deadlines()` trigger fires correctly on this
+function's writes. `sync_runs` logged `status='success'`,
+`records_processed=438`.
+
+---
+
+#### ISSUE-67 — React Query Devtools shipped unconditionally to every visitor
+**Discovered and resolved 2026-08-19, Phase 21**, during the final
+new-user beta UX pass (section 9 of the phase brief). `main.jsx`
+rendered `<ReactQueryDevtools initialIsOpen={false} />` unconditionally
+— `initialIsOpen={false}` only keeps the panel closed by default, it
+does not remove the floating toggle button, which was visible to every
+real beta user regardless of environment. **Fixed**: gated behind
+`import.meta.env.DEV`, which Vite statically replaces at build time,
+so the devtools code is fully eliminated from the production bundle,
+not merely hidden. **Verified**: `npm run build` clean.
+
+---
+
+#### ISSUE-66 — Every Premier League gameweek was named "REGULAR SEASON" instead of "Gameweek N"
+**Discovered and resolved 2026-08-19, Phase 21**, during the final
+new-user beta UX pass — the gameweek/leaderboard page's `<h1>` read
+"REGULAR SEASON" with no gameweek number anywhere on the page,
+confusing for a new user. Traced to the ingestion layer's own
+`gwName()` helper (present identically in both
+`frontend/scripts/fullSyncInsert.js` and, since `ISSUE-64`'s rewrite,
+`supabase/functions/sync-fixtures/index.ts`): it used
+`match.stage.replaceAll('_', ' ')` whenever football-data.org supplied
+a `stage`, and Premier League matches always carry `stage:
+'REGULAR_SEASON'` even in normal league play (`stage` isn't unique to
+cup/knockout competitions) — so every one of the 38 real gameweeks was
+named from that raw stage string, never falling through to the
+intended `Matchday ${number}` fallback. Root-caused at the ingestion
+layer rather than papered over in the frontend, matching this
+project's own established Phase 19 precedent. **Fixed**: both
+`gwName()` implementations now special-case `stage === 'REGULAR_SEASON'`
+→ `` `Gameweek ${number}` ``, matching this app's own established
+terminology ("Gameweek 1", not "Matchday 1", throughout the UI and
+docs); other stages (group/knockout, not currently used by the real
+Premier League league but preserved for correctness) still get the
+human-readable stage name. **Verified**: `deno check` 0 errors, `deno
+test --allow-all` 347/347 unchanged. **Not yet applied to the 38
+already-synced real gameweek rows** — the existing `sync-fixtures`
+upsert already writes `name` on every call, so the next scheduled
+daily cron tick (or any manual re-run) self-corrects all 38 rows
+automatically; no separate backfill or one-off script was written or
+run, since it wasn't necessary and running an extra unscheduled live
+sync against the real database wasn't part of what this phase asked
+for.
+
+---
+
+#### ISSUE-63 — No top-level error boundary; an uncaught render error would blank the entire app
+**Discovered and resolved 2026-08-19, Phase 20 (Beta Readiness /
+Production Hardening Audit).** Found while auditing error handling for
+"blank screens/silent failures" per this phase's own explicit checklist
+— confirmed via grep that no `ErrorBoundary`/`componentDidCatch` existed
+anywhere in `frontend/src`. Without one, React's default behavior for
+any uncaught error thrown during render is to unmount the entire tree —
+a real user hitting any unexpected render-time exception would see a
+blank white page with no recovery path, not a graceful degradation.
+Every other unhappy-path in this app already has a real, styled
+fallback (`NotAuthorized.jsx`, `NotFound.jsx`, `EmptyState`) — this was
+the one gap above all of them.
+
+**Fixed**: new `frontend/src/components/ErrorBoundary.jsx` (a class
+component — React error boundaries cannot be function components/hooks,
+confirmed against React's own API constraints, not a stylistic choice),
+wrapping `<App/>` in `main.jsx`. Matches the existing
+`NotAuthorized.jsx` visual pattern (`EmptyState` + a real action button)
+rather than inventing new UI language. Deliberately minimal: logs to
+`console.error` for local/hosted-log debugging, offers a "Reload page"
+button — not a monitoring platform, per this phase's own explicit "do
+not build a large monitoring platform" instruction.
+
+**Verified**: `npm run build` clean; live-tested normal navigation
+across Dashboard/pot pages afterward — zero console errors, confirming
+the boundary doesn't interfere with normal rendering. Not verified via
+a forced live crash (would require contrived throw-during-render code
+serving no other purpose) — correctness verified via code review of a
+standard, well-established React pattern instead.
+
+---
 
 #### ISSUE-62 — Unconfirmed future fixture kickoff times displayed as a fabricated `00:00`
 **Reported and resolved 2026-08-19, Phase 19 (mid-session addition,

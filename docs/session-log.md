@@ -13,6 +13,106 @@ from here.
 
 ---
 
+## 2026-08-19 (77) — Phase 21: Beta Architecture Decisions + Deployment Preparation
+
+**Goal:** resolve the three decisions Phase 20 explicitly deferred
+(fixture-ingestion architecture, season rollover, `ISSUE-39`), define
+the production cron matrix, and re-verify security/auth/beta-data
+safety one final time before hosting. Full detail — see
+[decisions.md § Phase 21](./decisions.md#phase-21--beta-architecture-decisions--deployment-preparation).
+
+**Fixed — `ISSUE-64`** (the phase's most important finding):
+`sync-fixtures` called api-football with no working key, and — a
+previously undiscovered bug — resolved "the" season via
+`seasons.is_current`, which points at a season with zero real data.
+Rewrote the function to call football-data.org, porting
+`fullSyncInsert.js`'s proven logic and replacing `is_current` with an
+explicit year lookup. Same function, same cron entry, no new provider.
+Live-verified end to end against the real API and real database:
+`{"success":true,"processed":438,...}`, exact match, zero duplication,
+Phase 19's deadline trigger fired correctly on the new writes.
+
+**Decided, documented, not built**: `is_current` stays intentionally
+unused (every consumer already has a working fallback); season
+rollover stays manual (schema already isolates seasons cleanly — exact
+step-by-step procedure now documented).
+
+**Fixed — three more issues found during this phase's own
+verification passes**: `ISSUE-67` (React Query Devtools shipped to
+every visitor, now dev-only), `ISSUE-66` (every Premier League
+gameweek was labeled "REGULAR SEASON" instead of "Gameweek N" — root-
+caused to the ingestion layer's `gwName()`, fixed in both the script
+and the Edge Function), and a live client-bundle secret-exposure risk
+(`lib/footballDataProvider.js`, dead code reading a `VITE_`-prefixed
+football-data.org key — deleted, not just left dead, since importing
+it would have leaked the key publicly).
+
+**Flagged, not fixed**: `ISSUE-65` (`fullSyncPlayers.js`'s stale
+hardcoded `SEASON_ID`), the WhoScored live-events pipeline's hosting
+requirement (needs a persistent Node/Playwright host, cannot run as an
+Edge Function or via `pg_cron` — documented for later hosting
+decisions, not solved this phase).
+
+**Re-verified, not re-cited**: `ISSUE-51`/`52`/`53`/`54`/`58`/`63` all
+still fixed in current code; auth flow (sign up/in/reset/session
+restore/sign out) sane; `ErrorBoundary` doesn't swallow auth errors;
+beta data footprint still clean (one inactive, zero-fixture demo
+league; zero demo pots; kept test accounts only, no new pollution).
+Full new-user UX walk found two genuine beta-blockers (both fixed
+above) and two cosmetic notes (left as-is).
+
+**Verified**: `deno check` 0 errors on the rewritten function (down
+from 31); Deno 347/347 unchanged; `npm run build` clean; built bundle
+grepped clean of the football-data key. `.env.example` rewritten into
+an explicit PUBLIC FRONTEND / SERVER-SECRET split.
+
+**Not committed, not pushed, per this phase's explicit instruction** —
+awaiting explicit approval of the full change set.
+
+---
+
+## 2026-08-19 (76) — Phase 20: Beta Readiness / Production Hardening Audit
+
+**Goal:** full production-readiness audit across frontend, database,
+Edge Functions, auth, RLS, Realtime, cron, ingestion, secrets, payments,
+email, error handling, demo isolation, admin permissions, build,
+mobile, and data lifecycle — classify each area, fix clear low-risk
+code issues, stop and report anything needing a product decision. Full
+detail — see
+[decisions.md § Phase 20](./decisions.md#phase-20--beta-readiness--production-hardening-audit).
+
+**Re-verified live** (not just re-cited): migrations 001–030 fully
+tracked; RLS unchanged on all 36 tables; Phase 19's deadline
+consolidation still holds; production bundle re-scanned, clean; demo
+isolation re-tested with a fresh HTTP matrix across 3 real accounts
+(normal user/`app_admin`/`super_admin`) against 3 Edge Functions — 6
+correct rejections, 2 correct positive-control acceptances.
+
+**Fixed — `ISSUE-63`**: no top-level React error boundary existed
+anywhere; an uncaught render error would have blanked the whole app.
+Added `ErrorBoundary.jsx`, matching the existing
+`NotAuthorized.jsx`/`EmptyState` pattern.
+
+**Flagged as PRODUCT DECISION REQUIRED, not silently fixed**: the
+fixture-ingestion provider/scheduling mismatch (still open since Phase
+16), season-to-season rollover (no mechanism exists, not designed),
+and `ISSUE-39` (confirmed non-blocking, left as-is).
+
+**Confirmed, not assumed**: the payment model is intentionally
+manual-only (no gateway integration anywhere, confirmed by grep) — not
+a gap, no code change needed.
+
+**Documentation**: `DEPLOYMENT.md` rewritten — § 0 now a CODE READY /
+PRODUCT DECISION REQUIRED / MANUAL ACTION checklist, new § 3b (deadline
+architecture) and § 6b (SPA routing/hosted rewrite requirements per
+platform). Hosting recommendation (Vercel) re-assessed and confirmed
+still appropriate.
+
+**Verified**: `npm run build` clean; Deno 347/347 unchanged; responsive
+375–1440px clean; zero console errors during live navigation.
+
+---
+
 ## 2026-08-19 (75) — Phase 19: Pick Lock Deadline Correction + Time Consistency Audit
 
 **Goal:** change the pick-lock rule to 15 minutes before gameweek start

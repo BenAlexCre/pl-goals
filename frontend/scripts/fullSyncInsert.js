@@ -126,6 +126,7 @@ function gwNumber(match) {
 }
 
 function gwName(match, number) {
+  if (match.stage === 'REGULAR_SEASON') return `Gameweek ${number}`;
   if (match.stage) return match.stage.replaceAll('_', ' ');
   return `Matchday ${number}`;
 }

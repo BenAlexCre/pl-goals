@@ -34,6 +34,7 @@ chrome-profile/
 test-results/
 playwright-report/
 playwright/.cache/
+.playwright-mcp/
 
 # Logs
 *.log
