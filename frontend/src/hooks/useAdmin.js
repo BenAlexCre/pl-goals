@@ -452,7 +452,18 @@ export function useReinstateEntry() {
 // reason to be here."
 export function useIsAdmin() {
   const { user } = useAuthStore()
-  const isAppAdmin = user?.app_metadata?.role === 'app_admin'
+  // Phase 15, Part 14 — real gap found live during beta-hardening: this
+  // check never accepted `super_admin` directly (unlike `is_app_admin()`,
+  // the actual backend/RLS boundary two hooks below, and `useIsAppAdmin()`
+  // right below that, both of which already treat super_admin as a
+  // superset of app_admin). It only ever worked for a super_admin account
+  // because they also happened to administer a pot, satisfying the
+  // fallback query below. Removing the Super Admin's demo-linked pots
+  // during this phase's cleanup surfaced the gap: with zero pots owned,
+  // benalexcre@gmail.com was locked out of /admin (including Manual Jobs)
+  // entirely. Widened to match the same pattern useIsAppAdmin() already
+  // uses, not a new role concept.
+  const isAppAdmin = user?.app_metadata?.role === 'app_admin' || user?.app_metadata?.role === 'super_admin'
 
   const potAdminQuery = useQuery({
     queryKey: ['has-pot-admin-membership', user?.id],

@@ -13,6 +13,92 @@ from here.
 
 ---
 
+## 2026-08-18 (73) — Phase 16: Hosted Beta Deployment + Production Environment
+
+**Goal:** move from local development toward a hosted controlled beta —
+audit and prepare, stop before any irreversible external action. Full
+detail — see
+[decisions.md § Phase 16](./decisions.md#phase-16--hosted-beta-deployment--production-environment)
+and the new runbook at
+[DEPLOYMENT.md § 0](./DEPLOYMENT.md#0-beta-deployment-runbook-phase-16--ready-vs-blocked).
+
+**Confirmed blocked on external inputs (as expected, none invented):**
+no hosting platform, hosted Supabase project, SMTP provider, or
+production domain exists anywhere in this repo. `DEPLOYMENT.md` § 0 now
+lists exactly what's needed from the project owner.
+
+**Shipped:** migration `028_realtime_standings_snapshot.sql` — a real
+gap found during the Realtime audit (`pot_standings_snapshots` was never
+migration-tracked into the `supabase_realtime` publication, only present
+locally via drift; a fresh hosted project would have silently never
+fired live-standings updates). Applied and verified locally. `DEPLOYMENT.md`
+§ 4's Edge Function table corrected from 11 to the real 15 functions,
+each classified; all 15 verified server-side/RLS-protected as
+appropriate.
+
+**Bug found and fixed live, at the user's request mid-session —
+`ISSUE-59`:** every fixture in a Premier League gameweek showed an
+identical kickoff time on the Dashboard. Traced the full data path
+before assuming a layer — root cause was stale upstream reference data
+(the real `fullSyncInsert.js` football-data.org sync had only run once,
+before several gameweeks' broadcast times were confirmed), not a
+frontend field-selection or timezone bug (both independently ruled out).
+Fixed by re-running the existing, correct sync script against the
+already-configured, live, working API key — no fabricated data. Verified
+live: Gameweek 1 now shows 7 distinct, correctly localized kickoff
+times on both Dashboard and Score Predictor.
+
+**Verified:** `npm run build` clean; production bundle grepped for
+secret leakage — zero matches (only third-party SDK's own internal
+`localhost` strings present); Deno 347/347 unchanged; migration 028
+applied and tracked; `fullSyncInsert.js` re-run confirmed idempotent (DB
+counts unchanged before/after).
+
+---
+
+## 2026-08-18 (72) — Phase 15: Beta Deployment Preparation + Complete Demo Data Cleanup
+
+**Goal:** transition the environment from development/demo into a clean
+beta-ready state — full audit first, destructive cleanup only after
+explicit approval. Full detail — see
+[decisions.md § Phase 15](./decisions.md#phase-15--beta-deployment-preparation--complete-demo-data-cleanup).
+
+**Audit (read-only, prior turn):** inventoried every league/season/pot/
+account/table, classified KEEP/REMOVE/UNCLEAR, found (not yet fixed) that
+demo leagues were created `is_active=true`, making them selectable
+alongside the real Premier League in Create Competition.
+
+**Approved cleanup (this turn):** active demo session (league `34`, 50
+synthetic users, 3 pots) torn down via the app's own `demo-teardown`
+function, independently re-verified. Orphaned demo league `16` (no
+surviving `demo_sessions` row) — its 3 solo pots deleted by exact ID; the
+league itself set `is_active=false` rather than force-deleted, protecting
+a real, unrelated `bentest6` LMS row from an id-collision (matches
+`teardown.ts`'s own documented precedent). Four disposable test accounts
+(`bentest`/`2`/`3`/`4@gmail.com`) deleted via the Admin API, including
+`bentest2`'s two dead-league pots. `benalexcre@gmail.com`,
+`bentest5@gmail.com`, `bentest6@gmail.com` retained untouched (roles,
+passwords, real pots all unchanged).
+
+**Fixed:** `generateLeague.ts`'s demo league insert now sets
+`is_active=false` (was `true`) — confirmed nothing in the demo stack
+depends on it. `ISSUE-58` — `useIsAdmin()` never accepted `super_admin`
+directly; invisible until this same cleanup removed the Super Admin's
+last pot-ownership fallback and locked them out of `/admin` live. Widened
+to match `useIsAppAdmin()`'s existing pattern.
+
+**Verified live:** all three retained accounts' access levels
+(`benalexcre` → full Super Admin surface incl. Manual Jobs/Demo Centre;
+`bentest5` → admin payments/rollovers only; `bentest6` → neither),
+server-side `403` on a demo endpoint called with a normal user's token,
+Create Competition showing only the real Premier League/2026/27, final DB
+counts (3 users, 4 pots, 1 active league, 0 demo rows anywhere). `npm run
+build` clean, Deno 347/347 unchanged. Explicitly did not create a hosted
+Supabase project, configure SMTP, or invent a production domain — still
+100% local, documented as a remaining blocker in `DEPLOYMENT.md`.
+
+---
+
 ## 2026-08-18 (71) — Phase 14: Score Predictor UI Overhaul + Global UX Polish
 
 **Goal:** full information-hierarchy redesign of the Score Predictor

@@ -99,7 +99,20 @@ export async function generateDemoLeague(
       provider_id: runTag,
       provider_name: 'demo',
       season_id: season.id,
-      is_active: true,
+      // Phase 15, Part 5 — real gap found during the beta-readiness audit:
+      // `is_active` defaulted to `true` (matching the column's own default),
+      // which put "Demo Premier League" into the same `is_active=true` pool
+      // PotManager.jsx's Create Competition league picker and
+      // useGameweek.js's Dashboard queries both filter on — a real user
+      // could pick the demo league while a demo session was running.
+      // Nothing in the demo stack (this file's own reload, Demo Centre's
+      // frontend, demo-gameweek-control) filters by `is_active` anywhere —
+      // every demo lookup already goes by explicit `league_id`/
+      // `demo_sessions.league_id`, confirmed by reading each call site —
+      // so setting this `false` only removes the league from the two real,
+      // user-facing `is_active=true` queries above; Demo Centre keeps
+      // working unchanged.
+      is_active: false,
     })
     .select('id')
     .single()

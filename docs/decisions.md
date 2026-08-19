@@ -5930,3 +5930,198 @@ the expanded score/goalscorer section) and Dashboard — zero horizontal
 overflow at any breakpoint. Confirmed, at 1440px, that `TopNav`'s and
 Dashboard's content containers now share identical left/right pixel
 bounds.
+
+## Phase 15 — Beta Deployment Preparation + Complete Demo Data Cleanup
+
+Two-part phase: a read-only environment audit (inventory every table,
+classify KEEP/REMOVE/UNCLEAR, no destructive action) followed by, on
+explicit approval, the actual cleanup. Full inventory, exact record
+counts, and the KEEP/REMOVE/UNCLEAR reasoning for every league/pot/
+account are recorded in this session's own audit output — summarized
+here as the decisions actually taken.
+
+### Demo data removed
+
+The active demo session (`demo_sessions.id = 7211baed…`, league `34`,
+"Demo Premier League"/2285-86, created by `benalexcre@gmail.com` during
+earlier Predictor testing) was torn down via the app's own
+`demo-teardown` Edge Function — the real, deployed code path, not a
+hand-rolled deletion — then independently re-verified against the
+database directly (league/season/demo_sessions/demo_timeline_events/the
+50 synthetic `demo+*@example.test` users/all 3 demo pots and their
+`game_entries`/`entry_payments` all confirmed gone).
+
+A second, orphaned demo league (`16`, "Demo Premier League"/2099-2100)
+had no surviving `demo_sessions` row — residue from an earlier session
+whose teardown hit the exact FK-collision scenario `teardown.ts`'s own
+comment documents (a real, unrelated `game_entry_lms.eliminated_gameweek_id`
+belonging to `bentest6@gmail.com`'s genuine real-league LMS entry had
+been reassigned, by Postgres's own id-sequence reuse, to point at one of
+this orphaned league's gameweeks). Its 3 solo pots (all owned by
+`benalexcre@gmail.com`, zero other members, zero `game_entries`/
+`entry_payments`) were deleted by explicit ID. The one colliding
+gameweek was deliberately left in place rather than deleted — touching
+or reassigning a real user's `eliminated_gameweek_id` to force the
+delete through would be exactly the "flip a real user's competitive
+status" action `teardown.ts`'s own precedent refuses to take. Instead the
+orphaned league itself was set `is_active = false`, which is what
+actually matters for beta (it can no longer appear in Create Competition
+or Dashboard queries) — the same resolution the codebase already applies
+to the other two dead reference leagues (`1`, `3`).
+
+### Disposable test accounts removed
+
+`bentest@gmail.com`, `bentest2@gmail.com`, `bentest3@gmail.com`,
+`bentest4@gmail.com` — all confirmed, before deletion, to hold no
+elevated role and (for the two with zero pots) zero dependent data.
+`bentest2@gmail.com`'s two "Ben Test" Pick 5 pots (on the already-dead
+FIFA World Cup reference league) and their `entry_payments`/
+`pot_members` were deleted first, by exact pot ID, then all four accounts
+via `auth.admin.deleteUser()` — the same Admin API `teardown.ts` itself
+uses — with `profiles` cascade (`ON DELETE CASCADE` to `auth.users`)
+confirmed live afterward, not assumed.
+
+### Retained — untouched
+
+`benalexcre@gmail.com` (`super_admin`), `bentest5@gmail.com`
+(`app_admin`), `bentest6@gmail.com` (no elevated role, 3 real pots on the
+real Premier League) — passwords not reset, roles not changed, the one
+real notification and one real `pot_prizes`/`entry_payments` row tied to
+these accounts left untouched. League `3` (FIFA World Cup) kept in place
+as the already-documented dead reference row it's been since `ISSUE-52` —
+not revived, still `is_active = false`.
+
+### Demo league `is_active` fix
+
+Real gap found during the audit, approved and fixed: `generateLeague.ts`
+created every demo league with `is_active = true` (the column's own
+default) — while a demo session was running, "Demo Premier League" was a
+selectable option in the real Create Competition league picker
+(`PotManager.jsx`) and eligible for `useGameweek.js`'s Dashboard queries,
+both of which filter on `leagues.is_active = true`. Confirmed, by reading
+every demo call site (`demo-generate-data`'s own `reloadLeague()`,
+`demo-gameweek-control`, `DemoCentre.jsx`/`DemoGameweek.jsx`), that
+nothing in the demo stack itself depends on `is_active` — every demo
+lookup already goes by explicit `league_id`. Changed the one insert to
+`is_active: false`; Demo Centre re-verified structurally afterward
+(loads correctly, "Generate demo data" state) — not regenerated live,
+since doing so would just reintroduce demo data this same phase set out
+to remove.
+
+### Second bug found live during Super Admin verification — `ISSUE-58`
+
+Full detail under `ISSUE-58` in `current-state.md`. In short:
+`useIsAdmin()` never accepted `super_admin` directly, only falling back
+to pot-ownership — invisible until this phase's own approved cleanup
+removed the Super Admin's last pots and exposed it live as a real
+`/admin` (including Manual Jobs) lockout. Fixed by widening the check to
+match `useIsAppAdmin()`'s already-established `app_admin`-or-`super_admin`
+pattern one function below it in the same file — not a new role system,
+and the real backend boundary (`is_app_admin()`) was never affected,
+confirmed via `pg_get_functiondef` before touching anything.
+
+### Explicitly not done this phase — hosted deployment is out of scope
+
+Per the user's own explicit instruction: no hosted Supabase project was
+created, no SMTP provider configured, no production domain invented. This
+remains a 100% local (`supabase start`) environment — `config.toml`'s
+`site_url` is still `http://localhost:5173`, `[auth.email.smtp]` is still
+commented out (Mailpit/Inbucket only). `DEPLOYMENT.md` updated to record
+exactly what's still required, not to pretend it's configured.
+
+### Verification performed, live, this session
+
+`npm run build` clean; Deno suite 347/347 unchanged. Independently
+re-queried the database after every deletion step (never trusted a
+`{"success":true}` response alone). Final counts: 3 `auth.users`
+(down from 57), 4 pots (down from 12), 1 active league (`6`, real
+Premier League — 20 teams/38 gameweeks/380 fixtures, all unchanged), 0
+`demo_sessions`, 0 `demo_timeline_events`, 0 rows anywhere tagged
+`provider_name='demo'`. Live-tested all three retained accounts via the
+established magic-link session-injection technique (no password ever
+touched): `benalexcre@gmail.com` now reaches `/admin`, `/super-admin`,
+Users, Roles, Audit log, Demo Centre, Manual Jobs; `bentest5@gmail.com`
+reaches `/admin` (payments/rollovers only, not Manual Jobs/Demo Centre)
+and is blocked from `/super-admin`; `bentest6@gmail.com` is blocked from
+both. Server-side defense-in-depth re-confirmed by calling
+`demo-teardown` directly with `bentest6`'s own token — `403`, not just a
+frontend redirect. Create Competition's league picker, live, shows only
+"Premier League (England) · Season: 2026/27" — no demo league, no FIFA
+World Cup. `formatSeasonName()` confirmed live rendering "2026/27"
+everywhere a season is shown. Responsive 375/390/768/1024/1440px on the
+landing page, Dashboard, and Create Competition — zero horizontal
+overflow.
+
+## Phase 16 — Hosted Beta Deployment + Production Environment
+
+Goal was to move from local development toward a hosted controlled beta.
+Full audit and runbook now live in `DEPLOYMENT.md` § 0 (new) — not
+duplicated here. Summary of what this phase actually changed and found:
+
+**Confirmed blocked, as expected, on external inputs**: no hosting
+platform, hosted Supabase project, SMTP provider, or production domain
+exists or was specified anywhere in the repo (checked: no
+`vercel.json`/`netlify.toml`/`render.yaml`/`fly.toml`/`Dockerfile`/CI
+deploy workflow; `vite.config.js` is the framework's unmodified
+scaffold). Per the phase's own explicit instruction, none of these were
+invented or created — `DEPLOYMENT.md` § 0 lists exactly what's needed
+from the project owner before § 1 onward can execute.
+
+**Real, additive fix applied — migration 028**: `useLiveScores.js`
+subscribes to `postgres_changes` on `pot_standings_snapshots`, but no
+migration before this phase ever added that table to the
+`supabase_realtime` publication (it was present locally only via
+out-of-band drift, the same class of gap migration 011 itself already
+documents for the publication as a whole). A fresh hosted project built
+purely from migrations would have silently never fired live-standings
+updates. Fixed with a guarded, idempotent `ALTER PUBLICATION ADD TABLE`,
+applied and re-verified locally (`pg_publication_tables` now shows all 4
+tables).
+
+**Edge Function inventory corrected**: `DEPLOYMENT.md` § 4 previously
+listed only 11 of the 15 real functions — `demo-generate-data`,
+`demo-gameweek-control`, `demo-teardown`, and `super-admin-actions` were
+present in the repo but never documented in that table. All 15
+re-classified (PRODUCTION REQUIRED / SUPER ADMIN ONLY / CRON), and the
+three demo functions' hosted-environment isolation re-verified
+end-to-end (server-side `super_admin` check, explicit-ID-only teardown,
+zero references to league `6` or any real pot/user in their source).
+
+**Real bug found and fixed live, off-plan, at the user's explicit
+request mid-session — `ISSUE-59`**: the Dashboard showed an identical
+kickoff time for every fixture in a gameweek. Traced the full data path
+per the user's own instruction (DB row → query hook → Dashboard →
+FixtureCard → rendered time) before assuming a layer: `fixtures.kickoff_utc`
+itself was flat in the database for several gameweeks, while others
+(4, 5) already had correctly varied times — ruling out both a frontend
+field-selection bug (`FixtureCard.jsx`/`Dashboard.jsx` confirmed to
+always read `fixture.kickoff_utc`, never a gameweek-level field) and a
+timezone bug (`toLocalTimeShort()` confirmed correct, DST-aware
+`Intl.DateTimeFormat` against `Europe/Dublin`). Root cause: the real
+ingestion script that originally populated this data
+(`frontend/scripts/fullSyncInsert.js`, football-data.org) had only run
+once, before those specific gameweeks' broadcast kick-off times were
+confirmed upstream — a real, normal characteristic of that API, not a
+mapping bug (confirmed the script correctly maps each match's own
+`utcDate` per-fixture). Fixed by verifying the already-configured
+`FOOTBALL_DATA_KEY` is live (`200` from the real API), then re-running
+the existing script exactly as designed — no fabricated data, no new
+data source, the same established provider/sync architecture. Verified
+live on Dashboard and the Score Predictor pot page: Gameweek 1 now shows
+7 distinct kickoff times across 10 fixtures. Full detail in
+`current-state.md` `ISSUE-59`, including the flagged (not yet fixed)
+gap that nothing currently re-runs this script on a schedule — recorded
+as a recommendation in `DEPLOYMENT.md` § 4, not applied unilaterally.
+
+### Verification performed, live, this session
+
+`npm run build` clean (checked before and after the migration/data
+changes); production build's `dist/assets/*.js` grepped for
+`SERVICE_ROLE`/`service_role`/`SMTP`/`DB_PASSWORD` — zero matches; the
+only `localhost` strings present are `@supabase/supabase-js`'s own
+internal fallback code, not this project's configuration. Deno suite
+347/347 unchanged throughout. Migration 028 applied and confirmed via
+`supabase migration list --local` (local=remote=028). `fullSyncInsert.js`
+re-run confirmed idempotent — DB row counts identical before/after
+(seasons 3, leagues 4, teams 68, gameweeks 48, fixtures 484), proving an
+in-place update, not duplication.

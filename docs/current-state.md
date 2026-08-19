@@ -772,6 +772,118 @@ a real regression risk with no safety net. Plan:
 
 ## Resolved issues
 
+#### ISSUE-59 — Every fixture in a Premier League gameweek showed an identical kickoff time on the Dashboard
+**Reported and resolved 2026-08-18, Phase 16 (Hosted Beta Deployment +
+Production Environment).** Reported live: the Dashboard's "Upcoming
+fixtures" showed the exact same kickoff time (`Fri, 21 Aug, 20:00`) for
+every fixture in Gameweek 1.
+
+**Traced the full data path before assuming a layer**: confirmed via
+direct SQL that `fixtures.kickoff_utc` itself held the identical
+timestamp for all 10 rows in gameweeks 1/2/3/6/7/8/9 (while gameweeks
+4/5 already had correctly varied times) — ruling out a frontend bug
+immediately, since the database value itself was flat. Independently
+confirmed `FixtureCard.jsx`/`Dashboard.jsx` correctly read
+`fixture.kickoff_utc` (never `gameweek.deadline_utc`/`start_at`) in every
+call site, and that `toLocalTimeShort()` (`utils/time.js`) does correct,
+DST-aware UTC→`Europe/Dublin` conversion via `Intl.DateTimeFormat` — so
+neither (B) frontend field selection nor (C) timezone handling was the
+cause. Root cause: **(A) stale upstream reference data.**
+`frontend/scripts/fullSyncInsert.js` (the real, existing football-data.org
+ingestion script that originally populated league `6`'s data — confirmed
+correct: it maps each match's own `utcDate` to `kickoff_utc` per-fixture,
+not a shared value) had only been run once, at a point where the live
+API had not yet published confirmed broadcast kickoff times for those
+specific gameweeks — a real, normal characteristic of football-data.org's
+own data (distant fixtures default to a placeholder time until TV picks
+are announced). No cron job or recurring process re-runs this standalone
+script (only the differently-provider'd `sync-fixtures` Edge Function,
+using api-football, is cron-scheduled — and that one has never had a
+working API key, per this document's own § 5).
+
+**Fixed**: verified the configured `FOOTBALL_DATA_KEY` is live and valid
+(a real `200` from `api.football-data.org`), confirmed the live API now
+returns genuinely varied, current kickoff times for the near-term
+gameweeks, then re-ran the existing `fullSyncInsert.js` script exactly as
+designed — no code changes, no fabricated data, no second data source.
+The script's `on_conflict=provider_id,provider_name` upsert updated the
+existing 380 real fixtures/38 gameweeks/20 teams in place (DB counts
+unchanged before/after, confirming no duplication). Gameweeks 1–9 now
+show 6–7 distinct kickoff times each across their 10 fixtures, matching
+a realistic Premier League broadcast schedule (Friday night, Saturday
+12:30/15:00/17:30, Sunday, Monday). Gameweeks further out (10+) still
+show a single placeholder time per gameweek — this is the real,
+legitimate current state of the upstream API for fixtures whose TV picks
+aren't confirmed yet, not a bug.
+
+**Verified live**: Dashboard and the Score Predictor pot page (same
+underlying `fixtures.kickoff_utc` data, different pages) both now render
+7 distinct kickoff times for Gameweek 1's 10 fixtures, correctly
+converted to `Europe/Dublin` local time. `deadline_utc` (a separate,
+trigger-derived field — `MIN(fixture.kickoff_utc) − 15min` per gameweek)
+was unaffected and remained correct throughout. Zero console errors.
+`npm run build` clean; Deno suite 347/347 unchanged (no code changed,
+data-only fix).
+
+**Not fixed, out of scope, noted for awareness**: `fullSyncInsert.js`'s
+`gwName()` helper returns `match.stage.replaceAll('_', ' ')`
+("REGULAR SEASON") for every Premier League gameweek — `stage` is always
+`"REGULAR_SEASON"` for league fixtures, so the `Matchday ${number}`
+fallback branch is structurally unreachable for this competition. This
+is pre-existing behavior (the same code ran at the original sync too,
+not something this fix introduced) and only affects a secondary
+dropdown label ("GW1 — REGULAR SEASON"), not the primary "Gameweek 1"
+heading anywhere. Cosmetic, low-priority, not touched this phase per
+its own "do not make unnecessary product/UX changes" scope.
+
+**Recurring-sync gap flagged for beta**: since nothing currently
+re-runs `fullSyncInsert.js` on a schedule, kickoff times for gameweeks
+whose broadcast picks get confirmed later will go stale again after this
+one-time fix unless either (a) this script is re-run periodically by an
+operator, or (b) it's wired into a proper cron job before beta (out of
+this phase's scope to decide unilaterally — flagged in `DEPLOYMENT.md`
+as a recommendation, not applied).
+
+---
+
+#### ISSUE-58 — `useIsAdmin()` never accepted `super_admin` directly, locking the Super Admin out of `/admin` once they owned no pots
+**Discovered and resolved 2026-08-18, Phase 15 (Beta Deployment
+Preparation + Demo Data Cleanup).** Found live during this phase's own
+Super Admin verification step, immediately after the approved demo-data
+cleanup removed `benalexcre@gmail.com`'s three demo-linked pots:
+navigating to `/admin` as the Super Admin returned "Not authorised."
+
+**Root cause**: `useAdmin.js`'s `useIsAdmin()` (the hook `AdminRoute`
+gates `/admin`, `/admin/payments`, `/admin/rollovers` with) checked
+`role === 'app_admin'` only, falling back to "administers at least one
+pot" for everyone else — it never accepted `super_admin` directly, unlike
+the sibling `useIsAppAdmin()` hook two functions below it in the same
+file, which already widens to `app_admin` OR `super_admin` "since Super
+Admin inherits every app_admin capability," and unlike the real backend
+boundary (`is_app_admin()`, the Postgres function backing RLS, confirmed
+via `pg_get_functiondef` to already accept `('app_admin', 'super_admin')`).
+The gap was invisible before this phase because `benalexcre@gmail.com`
+always happened to also administer at least one pot (three demo-linked
+ones), silently satisfying the fallback query — removing those pots as
+part of this phase's approved cleanup was what exposed it.
+
+**Fixed**: `useIsAdmin()`'s `isAppAdmin` check widened to
+`role === 'app_admin' || role === 'super_admin'`, matching the exact
+pattern `useIsAppAdmin()` already uses — not a new role concept, no
+change to the real authorization boundary (`is_app_admin()`/RLS/Edge
+Function checks were already correct; only the frontend route guard was
+behind).
+
+**Verified live**: reproduced the lockout with `benalexcre@gmail.com`'s
+real session before the fix, confirmed `/admin` (including "Manual
+jobs") loads correctly after it; re-confirmed `bentest5@gmail.com`
+(`app_admin`) still sees `/admin` (payments/rollovers, not Manual
+jobs/Demo Centre) and is still blocked from `/super-admin`;
+`bentest6@gmail.com` (no elevated role) still blocked from both `/admin`
+demo-only sections and `/super-admin`.
+
+---
+
 #### ISSUE-57 — Predictor entries with a non-`pending` status (e.g. `void`) disabled every score input with no explanation
 **Discovered and resolved 2026-08-18, Phase 14 (Score Predictor UI Overhaul
 + Global UX Polish).** Found live while testing the redesigned Score
