@@ -241,7 +241,11 @@ export default function PredictorPotDetail({ pot, potId }) {
               {selectedGameweek?.deadline_utc && !deadlinePassed ? (
                 <div className="ml-auto flex items-center gap-1.5 text-white/60">
                   <Clock size={13} className="text-white/35" />
-                  <span>Closes in</span>
+                  {/* Phase 18 — terminology pass: "Closes in" didn't say
+                      what closes. Same underlying gw.deadline_utc every
+                      other mode/the Dashboard header now also labels
+                      consistently ("Picks lock"/"Predictions close"). */}
+                  <span>Predictions close in</span>
                   <CountdownTimer deadlineUtc={selectedGameweek.deadline_utc} showSeconds={false} />
                 </div>
               ) : deadlinePassed ? (

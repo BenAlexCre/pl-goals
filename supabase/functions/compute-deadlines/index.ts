@@ -25,11 +25,22 @@ import '../_shared/game-engine/predictor/index.ts'
 
 // Milestone 4, Slice 3 — docs/game-engine.md § GE-6 (lockEntries) / GE-8.2
 // (Locking flow) / GE-19 (sequence diagram, which names this exact function
-// as the locking flow's Edge Function). Deadline computation itself
-// (earliest_kickoff_utc/deadline_utc) is unchanged from before this slice;
-// what's new is that once a gameweek's just-computed deadline has already
-// passed, this function now also calls every registered mode's
-// lockEntries().
+// as the locking flow's Edge Function).
+//
+// Phase 19 — this function used to compute earliest_kickoff_utc/
+// deadline_utc itself (earliest - 30 minutes) and write it here, in
+// parallel with an out-of-band DB trigger doing the same computation
+// with a different, undocumented offset (ISSUE-24) and two other
+// ingestion-time writers each with their own third and fourth answers
+// (see migration 029's own comment for the full inventory). Four
+// independent implementations of one business rule is the actual bug,
+// not just the wrong number in any one of them — resolved by making the
+// DB trigger (`refresh_gameweek_deadlines()`, now migration-tracked) the
+// single authoritative writer of both columns, always freshly derived
+// from `fixtures` itself on every write, regardless of which of the
+// three ingestion paths performed it. This function's job is narrower
+// now: read the deadline that trigger already maintains, and call
+// lockEntries() for whichever gameweeks have passed it.
 //
 // Revised, Milestone 5 Slice 3 (docs/decisions.md § LMS locking): this used
 // to pre-filter which game types to call by querying game_entries for rows
@@ -78,24 +89,15 @@ Deno.serve(async (req) => {
   let locked = 0
 
   try {
-    const { data: gws } = await sb.from('gameweeks').select('id').in('status', ['upcoming', 'live'])
+    const { data: gws } = await sb.from('gameweeks').select('id, deadline_utc').in('status', ['upcoming', 'live'])
 
     for (const gw of gws ?? []) {
-      const { data: fixtures } = await sb
-        .from('fixtures')
-        .select('kickoff_utc')
-        .eq('gameweek_id', gw.id)
-        .not('status', 'in', '("postponed","cancelled")')
-
-      if (!fixtures?.length) continue
-
-      const earliest = new Date(Math.min(...fixtures.map((f) => new Date(f.kickoff_utc).getTime())))
-      const deadline = new Date(earliest.getTime() - 30 * 60 * 1000)
-
-      await sb.from('gameweeks').update({
-        earliest_kickoff_utc: earliest.toISOString(),
-        deadline_utc: deadline.toISOString(),
-      }).eq('id', gw.id)
+      // deadline_utc is already correct here — refresh_gameweek_deadlines()
+      // (migration 029) recomputes it from `fixtures` on every write to
+      // that table, not just when this function happens to run. Nothing
+      // to compute or write in this loop anymore, only to read.
+      if (!gw.deadline_utc) continue
+      const deadline = new Date(gw.deadline_utc)
 
       updated++
 

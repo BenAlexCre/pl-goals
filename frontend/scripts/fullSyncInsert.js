@@ -81,8 +81,19 @@ async function sb(path, { method = 'GET', body, prefer } = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+// Phase 19 — real, previously-undiscovered bug: `TIMED` and `SCHEDULED`
+// were both collapsed into our own `'scheduled'`, discarding the exact
+// distinction football-data.org's API uses to mean "kickoff time
+// confirmed" (TIMED, a real hour/minute) vs "date known, exact time not
+// yet set by broadcasters" (SCHEDULED — sent with `utcDate` at a literal
+// `00:00:00Z` placeholder, confirmed live against the real API). The
+// schema already has a status for exactly this — `'tbd'`, already read
+// by Dashboard.jsx/useMatchCentre.js, just never populated by either
+// ingestion path. Mapped correctly here instead of inventing a new
+// column.
 function fixtureStatus(s) {
-  if (['TIMED', 'SCHEDULED'].includes(s)) return 'scheduled';
+  if (s === 'TIMED') return 'scheduled';
+  if (s === 'SCHEDULED') return 'tbd';
   if (['IN_PLAY', 'PAUSED'].includes(s)) return 'live';
   if (s === 'FINISHED') return 'finished';
   if (s === 'POSTPONED') return 'postponed';
@@ -117,6 +128,19 @@ function gwNumber(match) {
 function gwName(match, number) {
   if (match.stage) return match.stage.replaceAll('_', ' ');
   return `Matchday ${number}`;
+}
+
+// Phase 19 — real, previously-undiscovered bug: this script wrote
+// `deadline_utc = kickoff` (zero offset at all), not the intended
+// "15 minutes before the gameweek's earliest kickoff" business rule —
+// found while auditing every writer of this column, not from a live
+// symptom. Harmless in practice only because `refresh_gameweek_deadlines()`
+// (migration 029) recomputes it correctly the moment this script's own
+// `upsertFixtures()` commits a write to `fixtures` — but this script's
+// own initial value should never be wrong even momentarily, and should
+// remain correct standalone if that trigger is ever unavailable.
+function minusFifteenMinutes(isoString) {
+  return new Date(new Date(isoString).getTime() - 15 * 60 * 1000).toISOString();
 }
 
 async function insertSyncRun() {
@@ -219,7 +243,7 @@ async function upsertGameweeks(matches, seasonId, leagueId) {
         number,
         name: gwName(m, number),
         status,
-        deadline_utc: kickoff,
+        deadline_utc: minusFifteenMinutes(kickoff),
         earliest_kickoff_utc: kickoff,
         is_current: false,
         provider_id: `${COMPETITION_CODE}-${number}`,
@@ -227,7 +251,7 @@ async function upsertGameweeks(matches, seasonId, leagueId) {
     } else {
       if (new Date(kickoff) < new Date(record.earliest_kickoff_utc)) {
         record.earliest_kickoff_utc = kickoff;
-        record.deadline_utc = kickoff;
+        record.deadline_utc = minusFifteenMinutes(kickoff);
       }
       if (status === 'live') record.status = 'live';
       else if (status === 'upcoming' && record.status !== 'live') record.status = 'upcoming';

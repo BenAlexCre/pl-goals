@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { usePots, useDashboardPotStatus } from '../hooks/usePots'
-import { useCurrentGameweek, useNextGameweek } from '../hooks/useGameweek'
+import { useCurrentGameweek, useNextGameweek, useGameweek, useAllGameweeks } from '../hooks/useGameweek'
 import { useLiveScores } from '../hooks/useLiveScores'
 import { useLeaderboard } from '../hooks/useLeaderboard'
 import { useOwnsAnyPot, useIsSuperAdmin } from '../hooks/useAdmin'
@@ -16,8 +16,9 @@ import FixtureCard from '../components/matchcentre/FixtureCard'
 import {
   Trophy, Users, Shield, Target, CalendarOff, CheckCircle2, CreditCard,
   CalendarClock, Radio, Lock, ArrowRight, PlusCircle, LogIn, Settings, ListChecks,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
-import { isPastDeadline, toLocalTimeShort } from '../utils/time'
+import { isPastDeadline, toLocalTimeShort, toLocalDateTimeLong } from '../utils/time'
 import { formatSeasonName } from '../utils/format'
 
 const GAME_TYPE_LABELS = {
@@ -36,50 +37,87 @@ const GAMEWEEK_STATUS_META = {
   completed: { badge: 'completed', label: 'Completed' },
   upcoming: { badge: 'upcoming', label: 'Upcoming' },
 }
+// Phase 18, Part 3 — locked/completed gameweeks still show real fixtures
+// below (FixtureCard already renders each fixture's own status/score
+// correctly, untouched); this only controls the section's own heading so
+// it never says "Upcoming fixtures" over a gameweek whose deadline has
+// already passed, or "This gameweek" over one the user has navigated away
+// from "this" week to view.
+const FIXTURE_SECTION_TITLE = {
+  live: 'Live fixtures',
+  locked: 'Fixtures',
+  completed: 'Results',
+  upcoming: 'Upcoming fixtures',
+}
 // Phase 12, Part 6/16 — display order for the sidebar's per-mode
 // leaderboard blocks, matching the order in the brief's own mockup.
 // Modes the viewer isn't in simply don't produce a block (§6: "If the
 // user is not in a particular mode, do not show an empty leaderboard").
 const MODE_ORDER = ['score_predictor', 'last_man_standing', 'pick5']
 
-// Phase 11, Part 2/9; Phase 12, Part 10 — one state machine for "what's
-// the headline gameweek doing right now", shared by the hero, the summary
-// card, the sidebar status panel, AND the fixture section header (Phase
-// 12 adds the fixture-section badge on top of Phase 11's three) so the
-// same gameweek is never described two different ways on one page.
-// currentGw only ever comes from useCurrentGameweek() (is_current = true
-// — still permanently empty locally, ISSUE-39, not fixed this phase);
-// nextGw is the real fallback that actually has data today. "Locked"
-// means the pick deadline has passed, independent of whether the
-// football itself has kicked off — business-rules.md's own deadline
-// concept, not a guess.
-function resolveGameweekState(currentGw, nextGw) {
-  const gw = currentGw ?? nextGw
+// Phase 11, Part 2/9; Phase 12, Part 10; Phase 18 — one state machine for
+// "what's this gameweek doing right now", shared by the hero, the summary
+// card, the sidebar status panel, AND the fixture section header, so the
+// same gameweek is never described two different ways on one page (Part
+// 9's explicit requirement). Takes a single, already-selected gameweek —
+// Phase 18 replaced the old currentGw-vs-nextGw pair with real Prev/
+// Current/Next navigation (see Dashboard() below), and "which gameweek"
+// is now decided once, before this function ever runs, not inside it.
+//
+// Real bug fixed in the same change: the old signature's locked branch
+// was gated on `currentGw &&`, but `useCurrentGameweek()` (is_current =
+// true) has never once returned a row on this project's own data
+// (ISSUE-39) — so that gate was permanently false, meaning a gameweek
+// whose deadline had genuinely passed could never show as "Locked"; it
+// fell through to "Upcoming" with a countdown target already in the
+// past. Locked status now derives purely from the gameweek's own
+// deadline_utc, matching business-rules.md's own deadline concept and
+// Part 3's explicit "a locked gameweek must still show as locked"
+// requirement — independent of any is_current flag.
+function resolveGameweekState(gw) {
   if (!gw) return null
 
   const fixtures = gw.fixtures ?? []
   const live = fixtures.filter((f) => f.status === 'live')
   const finished = fixtures.filter((f) => f.status === 'finished')
   const deadlinePassed = gw.deadline_utc ? isPastDeadline(gw.deadline_utc) : false
+  // Phase 18 — mid-session addition: users need the actual picks-lock
+  // moment, not just kickoff. `deadline_utc` is the exact same field
+  // every pot page's own `isPastDeadline(gw.deadline_utc)`/canPick check
+  // already gates submission on (PredictorPotDetail.jsx,
+  // LmsPotDetail.jsx, PotDetail.jsx) — reused as-is, never inferred from
+  // kickoff. Computed once here, for every status branch, so the header
+  // can show "Gameweek starts" and "Picks lock"/"Picks locked" side by
+  // side regardless of which state the gameweek is in.
+  //
+  // Phase 19 — this used to recompute "earliest kickoff" itself from
+  // `fixtures`, a second, independent implementation of exactly what
+  // `refresh_gameweek_deadlines()` (migration 029/030) already computes
+  // and stores as `gw.earliest_kickoff_utc` — trusting that field
+  // directly instead is both simpler and, since that same migration now
+  // excludes unconfirmed (`'tbd'`) fixtures from the calculation, is the
+  // only way this correctly comes back `null` (never a fabricated
+  // `00:00` placeholder) when a gameweek's fixtures don't have confirmed
+  // kickoff times yet.
+  const startsAt = gw.earliest_kickoff_utc ?? null
 
   if (live.length > 0) {
-    return { gw, status: 'live', detail: `${live.length} match${live.length === 1 ? '' : 'es'} live now`, isNext: !currentGw }
+    return { gw, status: 'live', detail: `${live.length} match${live.length === 1 ? '' : 'es'} live now`, startsAt, deadlinePassed }
   }
   if (fixtures.length > 0 && finished.length === fixtures.length) {
-    return { gw, status: 'completed', detail: 'Gameweek complete', isNext: !currentGw }
+    return { gw, status: 'completed', detail: 'Gameweek complete', startsAt, deadlinePassed }
   }
-  if (currentGw && deadlinePassed) {
-    return { gw, status: 'locked', detail: 'Results are being finalised', isNext: false }
+  if (deadlinePassed) {
+    return { gw, status: 'locked', detail: 'Results are being finalised', startsAt, deadlinePassed }
   }
 
-  const kickoffs = fixtures.map((f) => f.kickoff_utc).filter(Boolean).sort()
-  const firstKickoff = kickoffs[0] ?? null
   return {
     gw,
     status: 'upcoming',
-    detail: firstKickoff ? `Starts ${toLocalTimeShort(firstKickoff)}` : 'Not yet scheduled',
-    countdownTarget: firstKickoff ?? gw.deadline_utc ?? null,
-    isNext: !currentGw,
+    detail: startsAt ? `Starts ${toLocalTimeShort(startsAt)}` : 'Time TBC',
+    startsAt,
+    deadlinePassed,
+    countdownTarget: startsAt ?? gw.deadline_utc ?? null,
   }
 }
 
@@ -297,13 +335,44 @@ export default function Dashboard() {
   const { data: ownsAnyPot } = useOwnsAnyPot()
   const isSuperAdmin = useIsSuperAdmin()
 
-  const gwState = resolveGameweekState(currentGw, nextGw)
+  // Phase 18 — Dashboard gameweek navigation. `defaultGw` is exactly the
+  // old currentGw-or-nextGw smart default (unchanged logic), used only to
+  // seed the INITIAL selection and to resolve which league/season's full
+  // gameweek list to fetch — never re-applied over a selection the user
+  // has already made (the effect below only fires once, when nothing is
+  // selected yet).
+  const defaultGw = currentGw ?? nextGw
+  const [selectedGameweekId, setSelectedGameweekId] = useState(null)
+  useEffect(() => {
+    if (selectedGameweekId === null && defaultGw?.id) setSelectedGameweekId(defaultGw.id)
+  }, [selectedGameweekId, defaultGw?.id])
+
+  // Lightweight (no fixtures) full-season list, scoped to the same
+  // league/season the smart default already resolved — drives Prev/Next
+  // bounds. Real, previously-unused/unscoped hook fixed for this purpose,
+  // see useGameweek.js's own comment.
+  const { data: allGameweeks = [] } = useAllGameweeks(defaultGw?.league_id, defaultGw?.season_id)
+  const gwIndex = allGameweeks.findIndex((g) => g.id === selectedGameweekId)
+  const canGoPrev = gwIndex > 0
+  const canGoNext = gwIndex >= 0 && gwIndex < allGameweeks.length - 1
+  const goPrevGameweek = () => canGoPrev && setSelectedGameweekId(allGameweeks[gwIndex - 1].id)
+  const goNextGameweek = () => canGoNext && setSelectedGameweekId(allGameweeks[gwIndex + 1].id)
+
+  // The one full-fixture fetch for whichever gameweek is actually
+  // displayed — same useGameweek(id) hook GameweekPage already uses,
+  // reused rather than duplicated. Always sourced this way (even when
+  // selectedGameweekId === defaultGw.id) because useLiveScores below
+  // invalidates the ['gameweek', id] query key specifically; reusing
+  // currentGw/nextGw's own data for the default case would silently never
+  // pick up a live update.
+  const { data: selectedGwFull, isLoading: selectedGwLoading } = useGameweek(selectedGameweekId)
+  const gwState = resolveGameweekState(selectedGwFull)
   const displayGw = gwState?.gw ?? null
 
   // Same realtime channel GameweekPage.jsx already relies on — no second
-  // subscription. Keyed on currentGw specifically (not displayGw): an
-  // upcoming-only gameweek has nothing live to subscribe to yet.
-  useLiveScores(currentGw?.id, null)
+  // subscription. Targets whichever gameweek is currently selected (Part
+  // 8: "Live now" reflects the selected gameweek, not a hardcoded one).
+  useLiveScores(selectedGameweekId, null)
 
   const fixtures = displayGw?.fixtures ?? []
   const sortedFixtures = fixtures.slice().sort((a, b) => {
@@ -360,7 +429,12 @@ export default function Dashboard() {
     ? (usernameLooksAutoGenerated ? null : rawUsername)
     : (rawDisplayName || (usernameLooksAutoGenerated ? null : rawUsername))
   const firstName = greetingSource?.trim().split(/\s+/)[0] || 'there'
-  const loadingHero = gwLoading || (nextGwLoading && !currentGw)
+  // Before any gameweek is selected yet, "loading" means resolving the
+  // smart default (old behaviour, unchanged); once a selection exists,
+  // it means fetching THAT gameweek's own full fixture data.
+  const loadingHero = selectedGameweekId === null
+    ? (gwLoading || (nextGwLoading && !currentGw))
+    : selectedGwLoading
   const statusMeta = gwState ? GAMEWEEK_STATUS_META[gwState.status] : null
 
   // Phase 14, Part 12 — this root used to also carry `max-w-[1400px]
@@ -462,27 +536,108 @@ export default function Dashboard() {
           </section>
         )}
 
-        {/* C. Upcoming/current fixtures — always the full list for
-            whichever gameweek resolveGameweekState() found (live, locked,
-            or upcoming), never empty just because nothing is live right
-            now. Two columns, not three (Part 2/3/15) — real width for
-            full team names instead of "Hull... vs Man...". Header always
-            states the same league/gameweek/status resolveGameweekState()
-            already resolved for the hero and sidebar (Part 10) — never a
-            second, independently-derived status. */}
+        {/* C. Gameweek navigation + fixtures — Phase 18. Real Prev/
+            Current/Next navigation through the same league/season's
+            gameweeks (Part 1/2), while always showing the FULL fixture
+            list for whichever gameweek is selected — live, locked,
+            completed, or upcoming (Part 3: a locked/completed gameweek
+            must never fall back to an empty state). The nav header and
+            the fixture-list heading both read the one shared gwState
+            (Part 9) so they can never disagree with each other or with
+            the sidebar's own status card below. */}
         <section>
+          <div className="mb-5 rounded-2xl border border-white/8 bg-surface-1 p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-2 sm:gap-4">
+              <button
+                type="button"
+                onClick={goPrevGameweek}
+                disabled={!canGoPrev}
+                aria-label="Previous gameweek"
+                title="Previous gameweek"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <ChevronLeft size={16} />
+              </button>
+
+              <div className="min-w-0 flex-1 text-center">
+                <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-white/35">
+                  {displayGw?.leagues?.name ?? 'Premier League'}
+                </p>
+                <div className="mt-0.5 flex items-center justify-center gap-2">
+                  <h2 className="truncate text-xl font-bold text-white">
+                    {gwState ? `Gameweek ${gwState.gw.number}` : 'No gameweek'}
+                  </h2>
+                  {statusMeta && <Badge status={statusMeta.badge}>{statusMeta.label}</Badge>}
+                </div>
+                {!gwState && <p className="mt-1 truncate text-sm text-white/45">No gameweek scheduled yet</p>}
+                {(gwState?.status === 'live' || gwState?.status === 'completed') && (
+                  <p className="mt-1 truncate text-sm text-white/45">{gwState.detail}</p>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={goNextGameweek}
+                disabled={!canGoNext}
+                aria-label="Next gameweek"
+                title="Next gameweek"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+
+            {/* Phase 18 (mid-session addition) — the actual picks-lock
+                moment, not just kickoff. `deadline_utc` is the exact same
+                field every pot page's own submission gate already checks
+                (isPastDeadline(gw.deadline_utc), unchanged there) — shown
+                here as-is, never inferred from the kickoff time next to
+                it. Reuses CountdownTimer, the same component every pot
+                page's own deadline countdown already uses, instead of a
+                second countdown implementation. No countdown once the
+                deadline has passed — a ticking timer past zero would be
+                actively misleading. */}
+            {gwState && (
+              <div className="mt-4 grid grid-cols-1 gap-3 border-t border-white/8 pt-4 sm:grid-cols-2">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-white/35">Gameweek starts</p>
+                  <p className="mt-1 text-sm font-medium text-white">
+                    {gwState.startsAt ? toLocalDateTimeLong(gwState.startsAt) : 'Time TBC'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-white/35">
+                    {gwState.deadlinePassed ? 'Picks locked' : 'Picks lock'}
+                  </p>
+                  {displayGw?.deadline_utc ? (
+                    <>
+                      <p className="mt-1 text-sm font-medium text-white">
+                        {gwState.deadlinePassed
+                          ? (gwState.status === 'locked'
+                              ? `Locked at ${toLocalDateTimeLong(displayGw.deadline_utc)}`
+                              : toLocalDateTimeLong(displayGw.deadline_utc))
+                          : toLocalDateTimeLong(displayGw.deadline_utc)}
+                      </p>
+                      {!gwState.deadlinePassed && (
+                        <CountdownTimer deadlineUtc={displayGw.deadline_utc} showSeconds={false} className="mt-1 text-xs text-accent" />
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-1 text-sm text-white/40">Time TBC</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-semibold text-white">
-                  {gwState?.status === 'upcoming' ? 'Upcoming fixtures' : 'This gameweek'}
-                </h2>
-                {statusMeta && <Badge status={statusMeta.badge}>{statusMeta.label}</Badge>}
-              </div>
+              <h3 className="text-base font-semibold text-white">
+                {gwState ? FIXTURE_SECTION_TITLE[gwState.status] : 'Fixtures'}
+              </h3>
               {gwState && (
-                <p className="mt-1 text-sm text-white/40">
+                <p className="mt-0.5 text-sm text-white/40">
                   {displayGw?.leagues?.name} · Gameweek {gwState.gw.number}
-                  {gwState.status === 'locked' && ' · picks are locked, results are being finalised'}
                 </p>
               )}
             </div>
@@ -495,7 +650,7 @@ export default function Dashboard() {
               </Link>
             )}
           </div>
-          {gwLoading || nextGwLoading ? (
+          {loadingHero ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
             </div>
@@ -614,10 +769,27 @@ export default function Dashboard() {
                 <span className="text-sm text-white">Gameweek {gwState.gw.number}</span>
                 <Badge status={statusMeta?.badge ?? 'upcoming'}>{statusMeta?.label ?? gwState.status}</Badge>
               </div>
-              <p className="text-xs text-white/45">{gwState.detail}</p>
-              {gwState.status === 'upcoming' && gwState.countdownTarget && (
-                <CountdownTimer deadlineUtc={gwState.countdownTarget} showSeconds={false} className="text-xs" />
+              {(gwState.status === 'live' || gwState.status === 'completed') && (
+                <p className="text-xs text-white/45">{gwState.detail}</p>
               )}
+              {/* Phase 18/19 — same picks-lock fact as the main header
+                  above, never a second, independently-computed deadline.
+                  "Time TBC" (never a fabricated countdown) whenever this
+                  gameweek's fixtures don't have confirmed kickoff times
+                  yet — refresh_gameweek_deadlines() (migration 030)
+                  already leaves deadline_utc null for exactly that case. */}
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-white/40">{gwState.deadlinePassed ? 'Picks locked' : 'Picks lock'}</span>
+                {displayGw?.deadline_utc ? (
+                  gwState.deadlinePassed ? (
+                    <span className="text-white/60">{toLocalTimeShort(displayGw.deadline_utc)}</span>
+                  ) : (
+                    <CountdownTimer deadlineUtc={displayGw.deadline_utc} showSeconds={false} className="text-xs" />
+                  )
+                ) : (
+                  <span className="text-white/40">Time TBC</span>
+                )}
+              </div>
             </div>
           ) : (
             <p className="text-xs text-white/35">No gameweek data available yet.</p>

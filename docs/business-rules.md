@@ -5,9 +5,9 @@ Last reviewed: 2026-08-10.
 This document describes **what the game's rules are**, in plain language, for anyone
 who needs to reason about the product without reading code — a support conversation,
 a dispute about a payout, a new feature that has to respect an existing rule. It is
-deliberately *not* an implementation document: it says "picks lock 30 minutes before
-kickoff," not "`compute-deadlines` sets `deadline_utc` to `earliest_kickoff_utc` minus
-1800 seconds." For the implementation, follow the link in each section to
+deliberately *not* an implementation document: it says "picks lock 15 minutes before
+kickoff," not "`refresh_gameweek_deadlines()` sets `deadline_utc` to `earliest_kickoff_utc`
+minus 900 seconds." For the implementation, follow the link in each section to
 [database.md](./database.md) or [api.md](./api.md).
 
 Every rule below is a **verified fact**, derived from reading the schema, RLS
@@ -26,29 +26,44 @@ were).
 
 ## When picks lock
 
-Each gameweek has a `deadline_utc`, computed as **30 minutes before the earliest
-kickoff of any fixture in that gameweek** — not 30 minutes before each individual
-match, one single deadline for the whole gameweek, set by the earliest game. Once the
-deadline passes, an entry can no longer be created or edited.
+Each gameweek has a `deadline_utc`, computed as **15 minutes before the earliest
+kickoff of any non-postponed, non-cancelled fixture in that gameweek** — not 15
+minutes before each individual match, one single deadline for the whole gameweek,
+set by the earliest game. "Gameweek start" has no dedicated field of its own in this
+schema — it *is* this same earliest-kickoff value (`gameweeks.earliest_kickoff_utc`,
+maintained alongside `deadline_utc` by the same calculation). Once the deadline
+passes, an entry can no longer be created or edited.
 
-Implementation: `compute-deadlines` edge function
-([api.md § compute-deadlines](./api.md#post-functionsv1compute-deadlines)) sets
-`gameweeks.deadline_utc`; enforcement is a client-side check in `useSubmitPicks`
-(`PicksPage` flow) that compares `deadline_utc` to the current time before allowing a
-submission — there is no database-level (RLS or constraint) enforcement of the
-deadline itself, only of entry `status` (see
+Implementation, as of Phase 19 (2026-08-19) — **one authoritative writer, not
+several**: the SQL function `refresh_gameweek_deadlines()`
+(`029_deadline_single_source_of_truth.sql`) is the single source of truth for both
+`gameweeks.earliest_kickoff_utc` and `deadline_utc`. It's invoked by an `AFTER
+INSERT OR UPDATE OR DELETE` statement-level trigger on `fixtures`
+(`trg_refresh_gameweek_deadlines_on_fixtures`), so the deadline is recomputed fresh
+from real fixture data every time fixtures change, regardless of which of this
+project's several fixture-ingestion paths performed the write. `compute-deadlines`
+edge function ([api.md § compute-deadlines](./api.md#post-functionsv1compute-deadlines))
+no longer computes or writes this value itself — it only *reads* the
+already-correct `deadline_utc` to decide when to call each mode's `lockEntries()`.
+Enforcement is a client-side check in `useSubmitPicks`/each pot page's own
+`isPastDeadline(deadline_utc)` check that compares `deadline_utc` to the current
+time before allowing a submission — there is no database-level (RLS or constraint)
+enforcement of the deadline itself, only of entry `status` (see
 [database.md § Row Level Security summary](./database.md#row-level-security-summary):
 `user_entries`/`user_entry_picks` can only be updated while `status = 'pending'`).
 
-**Caveat — this 30-minute rule is not reliably what's actually live.** An
-undocumented SQL trigger on `fixtures` recomputes the same column using a
-different, 15-minute offset on every fixture change, silently overwriting
-`compute-deadlines`' correct 30-minute value in the common case. Confirmed
-live 2026-08-05 — see
-[current-state.md ISSUE-24](./current-state.md#issue-24--an-undocumented-sql-trigger-recomputes-gameweeksdeadline_utc-with-a-conflicting-incorrect-offset).
-Until that's resolved, treat the live `deadline_utc` value as potentially 15
-minutes early, not the 30 minutes this section (and the codebase's own
-`compute-deadlines` function) describes as intended.
+**Resolved, 2026-08-19 (Phase 19) — see
+[current-state.md ISSUE-24](./current-state.md#issue-24--an-undocumented-sql-trigger-recomputes-gameweeksdeadline_utc-with-a-conflicting-incorrect-offset).**
+This section previously described a documented-but-not-actually-enforced 30-minute
+rule, undermined by an undocumented 15-minute trigger. Both numbers were replaced by
+this phase's own explicit new rule (15 minutes), and the two competing
+implementations were consolidated into the one above — not merely realigned to the
+same number, since two implementations of one rule can drift again even when they
+currently agree. Two further, previously-undiscovered writers of this same column
+(`sync-fixtures` edge function and `frontend/scripts/fullSyncInsert.js`, each with
+their own independent — and, in `fullSyncInsert.js`'s case, entirely missing —
+offset) were found during this same audit and corrected; see
+[current-state.md ISSUE-61](./current-state.md#issue-61--fullsyncinsertjs-wrote-deadline_utc-with-zero-offset-at-all).
 
 ## What counts as a valid goal
 

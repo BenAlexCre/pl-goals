@@ -7,7 +7,7 @@ import PlayerCard from './PlayerCard'
 import TeamCrest from '../ui/TeamCrest'
 import { useTeamHomeAwayRecord, useHeadToHead, fixtureDifficultyFromStanding } from '../../hooks/useMatchCentre'
 import { usePlayersForFixture } from '../../hooks/usePredictorEntry'
-import { toLocalTimeShort } from '../../utils/time'
+import { toLocalTimeShort, formatFixtureKickoff } from '../../utils/time'
 import { formatTeamName } from '../../utils/format'
 
 const DIFFICULTY_STYLES = {
@@ -127,7 +127,7 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
             </div>
             <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-white/8 bg-black/10 p-3 text-xs text-white/45">
               <div className="space-y-1">
-                <p>Kickoff: {toLocalTimeShort(fixture.kickoff_utc)}</p>
+                <p>Kickoff: {formatFixtureKickoff(fixture.kickoff_utc, fixture.status)}</p>
                 <p>Competition: {competitionName}</p>
                 {/* Venue intentionally omitted — fixtures has no venue
                     column; nothing invented in its place. */}

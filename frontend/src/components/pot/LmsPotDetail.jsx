@@ -255,7 +255,11 @@ export default function LmsPotDetail({ pot, potId }) {
 
                 {selectedGameweek?.deadline_utc && !deadlinePassed ? (
                   <div className="mb-4 flex items-center gap-2 text-sm text-white/50">
-                    <span>Deadline:</span>
+                    {/* Phase 18 — terminology pass: bare "Deadline:" didn't
+                        say what happens at it. Same underlying
+                        gw.deadline_utc every other mode/the Dashboard
+                        header now also labels consistently. */}
+                    <span>Picks lock in</span>
                     <CountdownTimer deadlineUtc={selectedGameweek.deadline_utc} showSeconds={false} />
                   </div>
                 ) : null}

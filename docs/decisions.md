@@ -6125,3 +6125,161 @@ internal fallback code, not this project's configuration. Deno suite
 re-run confirmed idempotent — DB row counts identical before/after
 (seasons 3, leagues 4, teams 68, gameweeks 48, fixtures 484), proving an
 in-place update, not duplication.
+
+## Phase 18 — Dashboard Gameweek Navigation & Final UX Polish
+
+The Dashboard previously had no way to browse gameweeks — it hardcoded
+`currentGw ?? nextGw` and showed exactly one, with no navigation. Added
+real Prev/Current/Next navigation through the full season, reusing
+existing hooks rather than inventing a second gameweek data model:
+`useAllGameweeks(leagueId, seasonId)` (fixed, see `ISSUE-60`) supplies the
+lightweight ordered list Prev/Next step through; `useGameweek(id)` (the
+same per-ID hook `GameweekPage.jsx` already used) supplies the full
+fixture data for whichever gameweek is selected — never a second query
+for the same thing. `resolveGameweekState()` was refactored to take one
+already-selected gameweek instead of a `currentGw`/`nextGw` pair, fixing
+a real latent bug in the same change (`ISSUE-60`, part 2): its "locked"
+branch was gated on `currentGw`, which — since `is_current` has never
+once been true locally (`ISSUE-39`) — meant a passed-deadline gameweek
+could never actually render as "Locked," only ever "Upcoming" with a
+stale countdown. `useLiveScores()` now subscribes to the selected
+gameweek (was hardcoded to `currentGw`), so "Live now" correctly reflects
+whichever gameweek the user is looking at, not a fixed one.
+
+**Mid-session addition** (your own follow-up message): the header
+initially only showed "Starts <date>." Extended it to show both
+"Gameweek starts" (first fixture kickoff) and "Picks lock"/"Picks
+locked" (the actual `deadline_utc` — the same field every pot page's own
+`isPastDeadline()` submission gate already reads, never inferred from
+kickoff), reusing the existing `CountdownTimer` component rather than a
+second countdown implementation, and only counting down while the
+deadline hasn't passed yet (a countdown past zero would mislead). Same
+treatment applied to the sidebar's "Gameweek status" card, which already
+shared `resolveGameweekState()`'s output and needed no separate data
+source to stay in sync. Terminology also harmonized across the three
+pot-detail pages that show this same field with three different, mildly
+inconsistent phrasings — `PredictorPotDetail.jsx`'s bare "Closes in" →
+"Predictions close in", `LmsPotDetail.jsx`'s bare "Deadline:" → "Picks
+lock in" — copy-only changes, no logic touched. Pick 5's own "Deadline"
+stat-card label and bare `CountdownTimer` chip were left alone — a
+different, already-unambiguous compact style, not the same
+sentence-flow ambiguity the other two had.
+
+Locked/completed gameweeks keep showing their full fixture list
+(`FixtureCard.jsx` untouched — it already renders each fixture's own
+live/finished/scheduled state and score correctly regardless of the
+gameweek-level status); only the section's own heading changed, from a
+binary "Upcoming fixtures"/"This gameweek" to a per-status map (`Live
+fixtures`/`Fixtures`/`Results`/`Upcoming fixtures`) so it's never wrong
+about what it's showing. "Your competitions"/"Your next pick" (driven by
+`useDashboardPotStatus()`, never by `gwState`) were deliberately left
+untouched — confirmed by reading, not just assumed, that they don't read
+any gameweek-selection state.
+
+### Verification performed, live, this session
+
+`npm run build` clean throughout (three separate rebuilds, one per major
+change); Deno suite 347/347 unchanged (no backend files touched).
+Live-tested via the established magic-link session-injection technique:
+Prev disabled on Gameweek 1 (first in season), Next steps forward
+correctly through Gameweeks 1→2 with distinct fixtures/dates, sidebar and
+main header confirmed to stay in sync across navigation, "Your
+competitions"/"Your next pick" confirmed unchanged across gameweek
+navigation. Fixture click → Match Centre drawer confirmed still opens
+with the correct kickoff time. Score Predictor ("Predictions close in")
+and LMS pages loaded without regression. Create Competition still shows
+"Premier League (England) · Season: 2026/27". Sign-out still returns to
+the landing page. `app_admin` (`bentest5`) re-confirmed blocked from
+`/super-admin` and from Manual Jobs/Demo Centre at `/admin`. Zero console
+errors throughout. Responsive 375/390/768/1024/1440px — zero horizontal
+overflow, Prev/Next buttons remain fully visible and tappable at 375px.
+Verified the real `deadline_utc` value directly against the database
+(`18:30 UTC` for Gameweek 1) matches exactly what the UI renders
+("19:30" Dublin local, correctly DST-converted) — confirmed this is
+`ISSUE-24`'s already-documented 30-minute-offset value, not a display
+bug, and left `ISSUE-24` itself untouched (pre-existing, out of this
+phase's scope).
+
+## Phase 19 — Pick Lock Deadline Correction + Time Consistency Audit
+
+Two parts, the second added mid-session by the user's own follow-up
+message. Full detail in `current-state.md` (`ISSUE-24` resolution,
+`ISSUE-61`, `ISSUE-62`) and `business-rules.md § When picks lock`
+(rewritten) — summarized here.
+
+**Part 1 — the 15-minute rule, and a real architectural fix, not just a
+number.** The user explicitly changed the business rule from the
+previously-documented-but-not-enforced 30 minutes to 15 minutes before
+the gameweek's earliest kickoff. Before touching anything, traced every
+writer of `gameweeks.deadline_utc` and found **four**, not the two
+`ISSUE-24` already tracked: `compute-deadlines/index.ts` (30 min,
+documented), the out-of-band DB trigger `refresh_gameweek_deadlines()`
+(15 min, undocumented, missing the postponed/cancelled exclusion
+`compute-deadlines` had), `sync-fixtures/index.ts` (30 min, dormant —
+never successfully run in this environment), and
+`frontend/scripts/fullSyncInsert.js` — the script that actually
+populated this project's real Premier League data — which wrote
+`deadline_utc = kickoff` with **zero offset at all**, a genuine,
+separate, previously-undiscovered bug (`ISSUE-61`), only ever masked
+because the trigger immediately overwrote it.
+
+Consolidated to one authoritative writer rather than just aligning
+numbers (aligning numbers alone would have left the same four-writer
+structure free to drift apart again): `refresh_gameweek_deadlines()`,
+corrected to 15 minutes with the postponed/cancelled exclusion added,
+formalized into a real migration
+(`029_deadline_single_source_of_truth.sql`, applied as `supabase_admin`
+— the pre-existing objects were owned by that role, not `postgres`,
+matching the same ownership split `ISSUE-21` already documents).
+`compute-deadlines/index.ts` no longer computes or writes the deadline
+at all — it now only reads the value the trigger already maintains, to
+decide when to call each mode's `lockEntries()`. `sync-fixtures/index.ts`
+and `fullSyncInsert.js` were also corrected to write 15 minutes on their
+own initial insert (defense in depth; the trigger remains the real
+enforced last word either way). `business-rules.md § When picks lock`
+rewritten to describe this architecture and rule; its stale "30-minute,
+not reliably enforced" caveat removed.
+
+**Part 2 — mid-session addition: unconfirmed future fixture times
+(`ISSUE-62`).** Reported live: future gameweeks showed every fixture at
+a fabricated `00:00`. Traced to the actual data source before writing
+any code — fetched a real distant matchday directly from
+football-data.org and confirmed the provider itself distinguishes
+`TIMED` (confirmed) from `SCHEDULED` (date-only, sent with a `00:00:00Z`
+placeholder); api-football has the equivalent `NS`/`TBD` distinction.
+Both ingestion paths collapsed this into one `'scheduled'` value,
+discarding the exact signal needed — root cause was ingestion, not the
+schema (which already had an unused `'tbd'` enum value for exactly this)
+and not presentation alone. Fixed at the ingestion layer (both status
+mappings corrected), added one shared `formatFixtureKickoff()` helper
+(`utils/time.js`) used by all four fixture-display consumers, and
+extended migration 030 to exclude `'tbd'` fixtures from the deadline
+calculation so an all-unconfirmed gameweek correctly gets a `null`
+deadline rather than a midnight-derived fake one. `Dashboard.jsx`'s
+`resolveGameweekState()` was changed in the same phase (Part 1) to trust
+`gw.earliest_kickoff_utc` directly rather than recomputing from
+fixtures client-side — this meant the TBC fix needed no second frontend
+calculation, only correct `null`-handling copy.
+
+### Verification performed, live, this session
+
+`npm run build` clean throughout (multiple rebuilds); Deno suite
+347/347 unchanged (no test file covers `compute-deadlines/index.ts`
+directly — confirmed via `deno check` that only pre-existing, unrelated
+type errors remain in `sync-fixtures/index.ts`, not introduced by the
+one-line offset change there). Migrations 029/030 applied and tracked
+(`supabase migration list --local`, local=remote through 030). Trigger
+verified firing correctly on a live `UPDATE fixtures`; postponed-fixture
+exclusion verified in a rolled-back transaction with no lasting change.
+Every existing real gameweek's deadline recomputed via the same
+corrected, legitimate function — confirmed exactly 15 minutes before
+`earliest_kickoff_utc` for gameweeks 1-3 and 9; confirmed gameweeks
+10-15+ (all-`'tbd'`) now correctly `null`. Live-tested via the
+established magic-link session-injection technique: Dashboard header,
+sidebar, Score Predictor, and Match Centre drawer all show the
+identical "Picks lock: Fri, 21 Aug at 19:45" for a confirmed gameweek
+and identical "Time TBC" (no countdown) for an unconfirmed one — zero
+independent frontend calculation anywhere. Confirmed `ISSUE-59`'s fix
+(distinct real kickoff times) remains intact for confirmed gameweeks.
+Zero console errors. Responsive 375/390/768/1024/1440px — zero
+horizontal overflow.

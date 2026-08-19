@@ -78,11 +78,18 @@ async function requireSingle<T>(
   return data
 }
 
+// Phase 19 — `TBD` (api-football's own "kickoff time not yet confirmed"
+// status) was previously collapsed into the same `'scheduled'` a real,
+// confirmed `NS` ("not started") fixture gets — the exact distinction
+// fixtureStatus() in fullSyncInsert.js had the same bug for, fixed there
+// for the same reason (the schema's own pre-existing `'tbd'` status,
+// never populated by either provider's ingestion until now).
 function mapFixtureStatus(short: string | null | undefined) {
   if (!short) return 'scheduled'
   if (['1H', 'HT', '2H', 'ET', 'P', 'LIVE', 'INT'].includes(short)) return 'live'
   if (['FT', 'AET', 'PEN'].includes(short)) return 'finished'
-  if (['PST', 'SUSP', 'TBD', 'NS'].includes(short)) return 'scheduled'
+  if (short === 'TBD') return 'tbd'
+  if (['PST', 'SUSP', 'NS'].includes(short)) return 'scheduled'
   if (short === 'CANC') return 'cancelled'
   return 'scheduled'
 }
@@ -272,7 +279,15 @@ Deno.serve(async (req) => {
       const earliest = new Date(
         Math.min(...roundFixtures.map((f) => new Date(f.fixture.date).getTime()))
       )
-      const deadline = new Date(earliest.getTime() - 30 * 60 * 1000)
+      // Phase 19 — 15 minutes, not 30 (the new authoritative business
+      // rule — see migration 029's own comment for the full "four
+      // independent implementations" history). This value is immediately
+      // superseded by refresh_gameweek_deadlines() the moment this
+      // upsert's INSERT/UPDATE on `gameweeks`/`fixtures` commits anyway
+      // (that trigger is the real, always-correct enforcement point) —
+      // corrected here too so this function's own initial write is never
+      // even momentarily wrong.
+      const deadline = new Date(earliest.getTime() - 15 * 60 * 1000)
 
       const gw = await requireSingle(
         sb.from('gameweeks')

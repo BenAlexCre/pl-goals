@@ -105,67 +105,6 @@ was once broken" survives.
 
 ### P0 — verify or fix before building further on pots/scoring
 
-#### ISSUE-24 — An undocumented SQL trigger recomputes `gameweeks.deadline_utc` with a conflicting, incorrect offset
-**Discovered and confirmed live 2026-08-05**, by accident, during Milestone 4 Slice
-6's live verification (unrelated to Slice 6's own work — surfaced while
-temporarily flipping a fixture's status for a settlement test). `deadline_utc`
-kept reverting to a value inconsistent with `compute-deadlines`' own formula
-immediately after any change to a row in `fixtures`, with no Edge Function
-involved. Root-caused via `information_schema.triggers`: `fixtures` has an
-`AFTER INSERT OR UPDATE OR DELETE` trigger,
-`trg_refresh_gameweek_deadlines_on_fixtures`, calling
-`trigger_refresh_gameweek_deadlines()`, which calls `refresh_gameweek_deadlines()`
-— a SQL function that recomputes **every** gameweek's `earliest_kickoff_utc`/
-`deadline_utc` from `fixtures` directly, using
-`earliest_kickoff_utc - interval '15 minutes'`.
-
-This **conflicts with** `compute-deadlines/index.ts`'s formula (`earliest - 30
-minutes`) and with the documented business rule
-([business-rules.md § When picks lock](./business-rules.md#when-picks-lock):
-"30 minutes before the earliest kickoff... one single deadline for the whole
-gameweek"). Both mechanisms write the same column; whichever ran most recently
-wins — in practice, since any real fixture status change (a normal, frequent
-occurrence via `sync-fixtures`/`sync-live-events`) fires this trigger
-immediately, the *documented* 30-minute deadline is silently overwritten by an
-undocumented 15-minute one on essentially every live update, not just
-occasionally.
-
-**Confirmed via direct, controlled reproduction** (not inferred): a real,
-isolated `compute-deadlines` invocation correctly set gameweek 9's
-`deadline_utc` to `18:30:00` (matching `19:00:00 earliest_kickoff_utc - 30
-min`, and matching the row's own already-consistent `earliest_kickoff_utc`);
-a subsequent plain `UPDATE fixtures SET status = ...` on that gameweek's one
-fixture — no Edge Function call at all — immediately changed it to
-`18:45:00` (`19:00:00 - 15 min`). **Re-confirmed a third time** later the
-same session, purely from background activity: with no deliberate change to
-gameweek 9's own fixture at all, `deadline_utc` drifted back to `18:45:00`
-again. `refresh_gameweek_deadlines()`'s single `UPDATE ... FROM (... group by
-gameweek_id)` recomputes **every** gameweek in one statement, so it doesn't
-need anyone to touch a *specific* gameweek's own fixture — any write
-anywhere in the `fixtures` table (routine background sync activity) fires
-the trigger and re-derives all gameweeks' deadlines with the wrong offset.
-This is continuous, ambient drift, not an occasional coincidence.
-
-**Not in any migration** — confirmed via `grep` across
-`supabase/migrations/`, zero matches for either function/trigger name. Owned
-by `supabase_admin`, matching the same out-of-band, undocumented-prototype
-pattern as [ISSUE-1](#issue-1--pot-creation-likely-violates-its-own-rls-policy)'s
-policy and [ISSUE-21](#issue-21--postgres-role-cannot-alter-supabase_admin-owned-prototype-objects)'s
-ownership split — created directly against the live database at some point,
-never captured as a migration.
-
-**Impact:** real, not cosmetic. If this trigger fires after `compute-deadlines`
-computes the correct 30-minute deadline (the common case, since fixture
-updates are frequent), the live deadline enforced by the rest of the system is
-15 minutes before kickoff, not 30 — a fairness/correctness gap directly
-affecting real-money pots, on top of the already-known
-[ISSUE-17](#issue-17--leaderboard-ranking-has-no-tie-break-rule) tie-break
-gap. **Not fixed as part of Slice 6** — entirely unrelated to that slice's
-scope (`generateStandings()`/`ISSUE-15`/`ISSUE-17`); flagged here for a
-deliberate decision on which value is actually correct (this repo's own
-documentation says 30 minutes) before either removing the trigger or updating
-`compute-deadlines` to match it.
-
 #### ISSUE-19 — Cron-triggered Edge Function pipeline has a 100% failure rate
 **Confirmed live**, 2026-08-03, via direct inspection of `cron.job_run_details`
 (26,217 rows, back to the earliest recorded run on 2026-06-13): every cron job that
@@ -771,6 +710,219 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-62 — Unconfirmed future fixture kickoff times displayed as a fabricated `00:00`
+**Reported and resolved 2026-08-19, Phase 19 (mid-session addition,
+during the Pick Lock Deadline Correction audit).** Reported live:
+future gameweeks showed every fixture at `00:00`, and the Dashboard
+header showed a "Gameweek starts ... at 00:00" that read as a real,
+confirmed kickoff.
+
+**Root cause, confirmed against the live provider API before touching
+anything** (not assumed): football-data.org distinguishes `TIMED`
+(kickoff time confirmed, a real hour/minute) from `SCHEDULED` (only the
+date is known; broadcasters haven't set an exact time yet) — sent with
+`utcDate` at a literal `00:00:00Z` placeholder for the latter, confirmed
+by fetching a real distant matchday directly. api-football has the
+equivalent distinction (`NS` vs `TBD`). Both of this project's ingestion
+paths (`frontend/scripts/fullSyncInsert.js`,
+`supabase/functions/sync-fixtures/index.ts`) collapsed both statuses
+into the same `'scheduled'` `fixture_status` value, discarding the exact
+signal needed to tell "confirmed" from "not yet confirmed" apart. The
+schema already had the right representation for this —
+`fixture_status`'s `'tbd'` enum value, already read by
+`Dashboard.jsx`/`useMatchCentre.js`, just never populated by either
+ingestion path. **Root cause: ingestion**, not the database schema, not
+presentation alone — confirmed by tracing the actual data flow rather
+than assumed, per the explicit instruction not to just hide `00:00` in
+the frontend.
+
+**Fixed**: `fixtureStatus()` (`fullSyncInsert.js`) and
+`mapFixtureStatus()` (`sync-fixtures/index.ts`) now map the
+provider's own "date-only" status to `'tbd'` instead of `'scheduled'` —
+no schema change, the enum value already existed. New
+`formatFixtureKickoff(kickoffUtc, status)` (`utils/time.js`) is the one
+shared place that turns `status === 'tbd'` into "Time TBC" — used by
+all four fixture-kickoff-display consumers (`FixtureCard.jsx`,
+`PredictorFixtureCard.jsx`, `MatchCentreDrawer.jsx`,
+`LmsFixtureSelector.jsx`), never inferred from a bare `00:00` time
+(which a genuinely confirmed midnight kickoff would also produce).
+`refresh_gameweek_deadlines()` (migration 030) now also excludes `'tbd'`
+fixtures from the earliest-kickoff/deadline calculation — a gameweek
+where every fixture is still unconfirmed correctly gets
+`earliest_kickoff_utc`/`deadline_utc = null` rather than a fabricated
+midnight-derived deadline. `Dashboard.jsx`'s `resolveGameweekState()`
+was already changed in this same phase (see `ISSUE-24`'s resolution) to
+trust `gw.earliest_kickoff_utc` directly instead of recomputing from
+fixtures client-side — this meant the "Time TBC" fix for the
+gameweek-level header/sidebar required no separate frontend
+recalculation, only correct `null`-handling copy ("Time TBC" instead of
+"Not yet scheduled", no `CountdownTimer` rendered when null — both
+already gated correctly by existing conditionals).
+
+**Verified live**: re-ran `fullSyncInsert.js` with the corrected
+mapping — confirmed gameweeks 10+ (previously all `'scheduled'` with
+identical midnight timestamps) now correctly show `'tbd'`; confirmed via
+direct query that `refresh_gameweek_deadlines()` now leaves those
+gameweeks' `earliest_kickoff_utc`/`deadline_utc` `null` instead of a
+midnight-derived value. Live-tested Gameweek 10: Dashboard header shows
+"Gameweek starts / Time TBC" and "Picks lock / Time TBC" with no
+countdown; sidebar shows the same; fixture cards show "Sat, 7 Nov ·
+Time TBC" (date preserved, time correctly replaced); Score Predictor and
+the Match Centre drawer both show identical text for the same fixture.
+Re-confirmed Gameweek 1 (fully confirmed) is unaffected — real, distinct
+kickoff times still render correctly (`ISSUE-59`'s fix intact). Zero
+console errors. `npm run build` clean; Deno 347/347 unchanged.
+Responsive 375–1440px — zero overflow.
+
+---
+
+#### ISSUE-61 — `fullSyncInsert.js` wrote `deadline_utc` with zero offset at all
+**Discovered and resolved 2026-08-19, Phase 19 (Pick Lock Deadline
+Correction + Time Consistency Audit).** Found while auditing every
+writer of `gameweeks.deadline_utc` before changing the ISSUE-24
+offset conflict, not from a live symptom —
+`frontend/scripts/fullSyncInsert.js` (the actual script that populated
+this project's real Premier League data via football-data.org) wrote
+`deadline_utc: kickoff` in its `upsertGameweeks()` — the earliest
+kickoff time itself, with no subtraction of any kind. A fourth,
+independent, and until now undiscovered implementation of the "when do
+picks lock" rule, on top of the three ISSUE-24 already tracked.
+
+**Why this hadn't caused visible drift**: the out-of-band DB trigger
+`refresh_gameweek_deadlines()` (see `ISSUE-24`) fires `AFTER INSERT OR
+UPDATE` on `fixtures` and this script's own `upsertFixtures()` always
+writes to `fixtures` immediately after `upsertGameweeks()` — so the
+trigger's own (previously 15-minute, undocumented) recomputation
+silently overwrote this script's zero-offset value before anyone would
+ever have read it. The bug was real but masked by another bug.
+
+**Fixed**: added `minusFifteenMinutes()`, used at both write sites in
+`upsertGameweeks()`, matching the new 15-minute business rule (see
+`ISSUE-24`'s resolution). Not strictly load-bearing on its own now that
+`refresh_gameweek_deadlines()` is the enforced single source of truth
+(migration 029), but correct standalone regardless, per "don't leave a
+value wrong even momentarily."
+
+---
+
+#### ISSUE-24 — An undocumented SQL trigger recomputes `gameweeks.deadline_utc` with a conflicting, incorrect offset — RESOLVED
+**Originally discovered and confirmed live 2026-08-05**, during Milestone
+4 Slice 6's live verification. `deadline_utc` kept reverting to a value
+inconsistent with `compute-deadlines`' own formula immediately after any
+change to a row in `fixtures`, with no Edge Function involved.
+Root-caused via `information_schema.triggers`: `fixtures` has an `AFTER
+INSERT OR UPDATE OR DELETE` trigger,
+`trg_refresh_gameweek_deadlines_on_fixtures`, calling
+`trigger_refresh_gameweek_deadlines()`, which calls
+`refresh_gameweek_deadlines()` — a SQL function recomputing **every**
+gameweek's `earliest_kickoff_utc`/`deadline_utc` from `fixtures`
+directly, using `earliest_kickoff_utc - interval '15 minutes'`. This
+conflicted with `compute-deadlines/index.ts`'s own formula (`earliest -
+30 minutes`, matching the then-documented business rule) — whichever
+mechanism ran most recently won, and since routine fixture syncs fire
+the trigger constantly, the undocumented 15-minute value usually won in
+practice. Neither object was tracked by any migration — created
+directly against the live database at some point, `supabase_admin`-owned
+(the same out-of-band pattern `ISSUE-1`/`ISSUE-21` document for other
+objects).
+
+**Resolved 2026-08-19, Phase 19 (Pick Lock Deadline Correction + Time
+Consistency Audit)**, at the user's own explicit direction: rather than
+just picking one of the two existing numbers, the business rule itself
+was deliberately changed to **15 minutes before the gameweek's earliest
+(non-postponed, non-cancelled) fixture kickoff** — "gameweek start" has
+no dedicated field in this schema; it *is* this earliest-kickoff value,
+confirmed by reading every writer of it, not assumed. The real fix was
+architectural, not numeric: a full audit found **four** independent
+implementations of this one rule, not the two this issue originally
+tracked —
+1. `compute-deadlines/index.ts` — 30 minutes (documented, but not what
+   was actually live in practice)
+2. This trigger's `refresh_gameweek_deadlines()` — 15 minutes,
+   undocumented, and missing the postponed/cancelled exclusion
+   `compute-deadlines` already had
+3. `sync-fixtures/index.ts` (api-football, never successfully run in
+   this environment) — 30 minutes
+4. `frontend/scripts/fullSyncInsert.js` (the script that actually
+   populated this project's real Premier League data) — **zero
+   offset**, a genuine, separate, previously-undiscovered bug, tracked
+   as its own issue (`ISSUE-61` above) rather than folded silently into
+   this one, since it's a distinct root cause
+
+Consolidated to exactly one authoritative writer:
+`refresh_gameweek_deadlines()`, corrected to exclude postponed/cancelled
+fixtures (matching `compute-deadlines`' own prior exclusion) and now
+tracked by a real migration
+(`supabase/migrations/029_deadline_single_source_of_truth.sql`) instead
+of existing out-of-band. `compute-deadlines/index.ts` no longer computes
+or writes `deadline_utc` at all — it now only reads the value this
+trigger already maintains, to decide when to call each mode's
+`lockEntries()`. `sync-fixtures/index.ts` and `fullSyncInsert.js` were
+also corrected to write 15 minutes on their own initial insert (defense
+in depth; the trigger is the real enforced last word either way).
+`business-rules.md § When picks lock` rewritten to describe this
+architecture and rule, its own "30-minute, not reliably enforced" caveat
+removed since the conflict it described no longer exists.
+
+**Verified live**: recomputed every existing real gameweek's
+`deadline_utc` via the same corrected, legitimate function (not
+manually fabricated) — confirmed exactly 15 minutes before
+`earliest_kickoff_utc` for gameweeks 1-3 (`18:45:00` vs `19:00:00`).
+Confirmed the trigger fires correctly on a live `UPDATE fixtures`.
+Confirmed, in a rolled-back transaction, that marking the earliest
+fixture `postponed` correctly shifts the deadline to the next-earliest
+non-postponed fixture, then confirmed no lasting change after rollback.
+Confirmed the same corrected value renders identically on the Dashboard
+header, Dashboard sidebar, Score Predictor, and LMS — all four already
+read the single `gameweeks.deadline_utc` column directly, with no
+independent frontend calculation anywhere, so no frontend code changes
+were needed for the value itself to be correct everywhere at once.
+
+---
+
+#### ISSUE-60 — Two real gameweek-state bugs found and fixed while building Dashboard gameweek navigation
+**Discovered and resolved 2026-08-19, Phase 18 (Dashboard Gameweek
+Navigation & Final UX Polish).** Two separate, real bugs found while
+building the Dashboard's new Prev/Next gameweek navigation, both fixed
+in the same change:
+
+1. **`useAllGameweeks()` (`useGameweek.js`) had no league/season
+   scoping.** The hook was defined but never called anywhere (confirmed
+   by grep) — on this project's own database, calling it as originally
+   written would have silently mixed the real Premier League's
+   gameweeks with the dead FIFA World Cup reference league's gameweeks
+   (both numbered 1-9+, genuinely ambiguous together once merged), the
+   exact `ISSUE-52` class of bug `useCurrentGameweek()`/`useNextGameweek()`
+   were already fixed for. Fixed by requiring an explicit
+   `leagueId`/`seasonId` and filtering on both.
+2. **`resolveGameweekState()`'s "locked" branch was gated on
+   `currentGw &&`**, but `useCurrentGameweek()` (`is_current = true`)
+   has never once returned a row on this project's own data
+   (`ISSUE-39`) — so that gate was permanently false, meaning a
+   gameweek whose deadline had genuinely passed could never actually
+   render as "Locked" on the Dashboard; it fell through to "Upcoming"
+   with a countdown target already in the past. Fixed by deriving
+   locked status purely from the gameweek's own `deadline_utc`,
+   independent of `is_current`, matching
+   [business-rules.md's own deadline concept](./business-rules.md#when-picks-lock).
+
+**Verified**: `resolveGameweekState()` unit-level logic re-read
+line-by-line after the change; live-tested Prev/Next navigation across
+gameweeks 1-2 (all currently "upcoming" — no fixture in the live
+dataset has reached a locked/completed state yet to exercise those two
+branches live, since the 2026/27 season hasn't started; verified by
+code reading instead, not assumed).
+
+**Also re-confirmed, not newly found**: `ISSUE-24` (the `deadline_utc`
+15-min-vs-30-min trigger/Edge-Function conflict) is still present —
+the Dashboard's new "Picks lock" display correctly shows whatever
+`deadline_utc` actually holds at read time, per this phase's own
+explicit "use the real deadline field, never infer it" requirement;
+it does not paper over or fix `ISSUE-24` itself, which remains a
+pre-existing, out-of-scope backend conflict.
+
+---
 
 #### ISSUE-59 — Every fixture in a Premier League gameweek showed an identical kickoff time on the Dashboard
 **Reported and resolved 2026-08-18, Phase 16 (Hosted Beta Deployment +

@@ -13,6 +13,86 @@ from here.
 
 ---
 
+## 2026-08-19 (75) — Phase 19: Pick Lock Deadline Correction + Time Consistency Audit
+
+**Goal:** change the pick-lock rule to 15 minutes before gameweek start
+(from the previously documented-but-unenforced 30 minutes) and resolve
+`ISSUE-24` properly — one authoritative deadline, not two competing
+ones. Full detail — see
+[decisions.md § Phase 19](./decisions.md#phase-19--pick-lock-deadline-correction--time-consistency-audit).
+
+**Traced before changing anything:** found **four** independent writers
+of `gameweeks.deadline_utc`, not the two `ISSUE-24` tracked —
+`compute-deadlines` (30 min), an undocumented DB trigger (15 min,
+`ISSUE-24`), `sync-fixtures` (30 min, dormant), and
+`fullSyncInsert.js` — the script that actually populated the real
+Premier League data — with **zero offset at all** (`ISSUE-61`, a new,
+previously-undiscovered bug). "Gameweek start" confirmed to have no
+dedicated field — it's `MIN(fixture.kickoff_utc)` in every
+implementation.
+
+**Fixed:** consolidated to one authoritative writer —
+`refresh_gameweek_deadlines()`, corrected to 15 minutes, now a real
+migration (`029_deadline_single_source_of_truth.sql`) instead of
+out-of-band. `compute-deadlines` no longer computes/writes the deadline,
+only reads it. All four sites now agree. `ISSUE-24` marked resolved.
+
+**Mid-session addition (`ISSUE-62`):** future fixtures showed a
+fabricated `00:00`. Traced to the real football-data.org API and
+confirmed it distinguishes confirmed (`TIMED`) from date-only
+(`SCHEDULED`, sent as a `00:00:00Z` placeholder) kickoffs — our own
+ingestion collapsed both into one status, discarding the signal. Fixed
+by mapping correctly to the schema's existing (previously unused)
+`'tbd'` status, adding one shared `formatFixtureKickoff()` helper used
+by all four fixture-display consumers, and extending migration 030 to
+exclude unconfirmed fixtures from the deadline calculation so an
+all-unconfirmed gameweek correctly shows "Time TBC" with no fake
+countdown, rather than a midnight-derived deadline.
+
+**Verified live:** confirmed gameweek 1's picks-lock now shows
+"Fri, 21 Aug at 19:45" (exactly 15 min before 20:00) identically on
+Dashboard header, sidebar, Score Predictor, and Match Centre. Confirmed
+gameweek 10 (unconfirmed) shows "Time TBC" everywhere, no countdown.
+`npm run build` clean; Deno 347/347 unchanged. Responsive 375–1440px
+clean.
+
+---
+
+## 2026-08-19 (74) — Phase 18: Dashboard Gameweek Navigation & Final UX Polish
+
+**Goal:** the Dashboard hardcoded `currentGw ?? nextGw` with no way to
+browse other gameweeks. Full detail — see
+[decisions.md § Phase 18](./decisions.md#phase-18--dashboard-gameweek-navigation--final-ux-polish).
+
+**Shipped:** real Prev/Current/Next gameweek navigation on the Dashboard,
+reusing existing hooks (`useAllGameweeks` fixed and reused, `useGameweek`
+reused, no new gameweek data model). `resolveGameweekState()` refactored
+to a single-gameweek signature. Sidebar "Gameweek status" stays in sync
+automatically (same shared state). Locked/completed gameweeks keep
+showing their full fixture list, just with a corrected section heading.
+**Mid-session addition**: header/sidebar now show both "Gameweek starts"
+and "Picks lock"/"Picks locked" (the real `deadline_utc`, reusing
+`CountdownTimer`), and deadline terminology was harmonized across
+Predictor/LMS's pot pages (copy-only).
+
+**Bugs found and fixed — `ISSUE-60`**: `useAllGameweeks()` had no
+league/season scoping (would have mixed real Premier League gameweeks
+with the dead FIFA World Cup league's); `resolveGameweekState()`'s
+locked branch was gated on `currentGw`, which — since `is_current` is
+never true locally (`ISSUE-39`) — meant a passed-deadline gameweek could
+never render as "Locked." Both fixed. `ISSUE-24` (deadline offset
+conflict) re-confirmed still present but explicitly not touched —
+out of scope, the Dashboard just faithfully displays whatever
+`deadline_utc` holds.
+
+**Verified live:** `npm run build` clean (×3), Deno 347/347 unchanged,
+Prev/Next navigation across real gameweeks with sidebar sync, fixture
+click → Match Centre, Score Predictor/LMS/Create Competition/sign-out
+all regression-free, `app_admin` still blocked from Super Admin/Manual
+Jobs/Demo Centre, zero console errors, responsive 375–1440px clean.
+
+---
+
 ## 2026-08-18 (73) — Phase 16: Hosted Beta Deployment + Production Environment
 
 **Goal:** move from local development toward a hosted controlled beta —

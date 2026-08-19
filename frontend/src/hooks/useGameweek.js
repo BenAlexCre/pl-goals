@@ -116,14 +116,30 @@ export function useGameweek(gameweekId) {
   })
 }
 
-export function useAllGameweeks() {
+// Phase 18 — real, pre-existing bug fixed while building Dashboard's
+// gameweek navigation: this hook was defined but never called anywhere
+// (confirmed by grep), and its query had no league/season scoping at
+// all — on this project's own database that would silently mix the real
+// Premier League's gameweeks with the dead FIFA World Cup reference
+// league's gameweeks (both numbered 1-9+, genuinely ambiguous together),
+// the exact ISSUE-52 class of bug useCurrentGameweek()/useNextGameweek()
+// were already fixed for. Scoped to an explicit leagueId/seasonId
+// (supplied by the caller, itself already resolved through those two
+// correctly-filtered hooks) rather than re-adding the same
+// `leagues!inner(...).eq('is_active', true)` embed here — once a caller
+// already has a trusted league_id or a real gameweek in hand, fetching
+// that gameweek's own siblings by ID is simpler and unambiguous.
+export function useAllGameweeks(leagueId, seasonId) {
   return useQuery({
-    queryKey: ['gameweeks', 'all'],
-    staleTime: 5 * 60_000,
+    queryKey: ['gameweeks', 'all', leagueId, seasonId],
+    enabled: !!leagueId && !!seasonId,
+    staleTime: 60_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('gameweeks')
         .select('id, number, name, status, deadline_utc, is_current')
+        .eq('league_id', leagueId)
+        .eq('season_id', seasonId)
         .order('number')
       if (error) throw error
       return data ?? []

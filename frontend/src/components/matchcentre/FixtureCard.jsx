@@ -3,7 +3,7 @@ import { useLeagueStandings, useTeamForm, fixtureDifficultyFromStanding } from '
 import TeamForm from './TeamForm'
 import MatchCentreDrawer from './MatchCentreDrawer'
 import TeamCrest from '../ui/TeamCrest'
-import { toLocalTimeShort } from '../../utils/time'
+import { formatFixtureKickoff } from '../../utils/time'
 import { formatTeamName } from '../../utils/format'
 
 const DIFFICULTY_STYLES = {
@@ -134,7 +134,7 @@ export default function FixtureCard({ fixture, leagueId, seasonId, competitionNa
                 {fixture.minute ? `${fixture.minute}'` : 'Live'}
               </span>
             ) : (
-              <span>{fixture.status === 'finished' ? 'Full time' : toLocalTimeShort(fixture.kickoff_utc)}</span>
+              <span>{fixture.status === 'finished' ? 'Full time' : formatFixtureKickoff(fixture.kickoff_utc, fixture.status)}</span>
             )}
           </span>
         </div>

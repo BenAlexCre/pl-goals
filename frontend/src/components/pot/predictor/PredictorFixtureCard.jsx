@@ -7,7 +7,7 @@ import PlayerCard from '../../matchcentre/PlayerCard'
 import TeamForm from '../../matchcentre/TeamForm'
 import TeamCrest from '../../ui/TeamCrest'
 import Button from '../../ui/Button'
-import { toLocalTimeShort } from '../../../utils/time'
+import { formatFixtureKickoff } from '../../../utils/time'
 import { formatTeamName } from '../../../utils/format'
 
 const DIFFICULTY_STYLES = {
@@ -239,7 +239,7 @@ export default function PredictorFixtureCard({
                 {fixture.minute ? `${fixture.minute}'` : 'Live'}
               </span>
             ) : (
-              <span>{hasScore ? 'Full time' : toLocalTimeShort(fixture.kickoff_utc)}</span>
+              <span>{hasScore ? 'Full time' : formatFixtureKickoff(fixture.kickoff_utc, fixture.status)}</span>
             )}
           </span>
         </div>
