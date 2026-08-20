@@ -413,6 +413,15 @@ async function main() {
     await context.close();
     healthServer.close();
     console.log('[shutdown] Clean exit.');
+    // Phase 23 — confirmed by direct container testing (`docker stop`):
+    // without this, the process doesn't reliably drop out of the event
+    // loop on its own after a graceful shutdown (a lingering Chrome/Xvfb
+    // child handle, not investigated further since forcing exit here is
+    // simple and safe), so the host's stop grace period expires and it
+    // gets SIGKILLed instead — the shutdown work above still completes
+    // correctly either way, but this makes the exit prompt and
+    // deterministic rather than relying on it.
+    process.exit(0);
   }
 }
 

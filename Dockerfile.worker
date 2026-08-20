@@ -1,0 +1,67 @@
+# Phase 23 — persistent WhoScored live-event worker (frontend/scripts/ws-live-events.js).
+#
+# Not the main app image — this repo has no other Dockerfile. Deployed
+# separately from Vercel (frontend) and Supabase (backend), per
+# decisions.md § Phase 22's target architecture: a genuinely separate
+# piece of infrastructure, because Playwright/Chromium cannot run in
+# Supabase's Deno Edge Runtime and cannot be invoked by pg_cron (not an
+# HTTP API).
+#
+# Version-pinned to the exact installed `playwright` npm package version
+# (confirmed via `node -e "console.log(require('playwright/package.json').version)"`
+# — 1.61.0) — Playwright's own Docker images require an exact match
+# between the image tag and the npm package version, a mismatch is a
+# real, common source of "browser executable doesn't exist" failures.
+FROM mcr.microsoft.com/playwright:v1.61.0-jammy
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY frontend/scripts ./scripts
+
+# headless:false is a deliberate, evidence-based choice this script
+# already makes (see ws-live-events.js's own comment) — switching it to
+# save on needing a display would trade a proven-working anti-Cloudflare
+# posture for an unverified one. Run under a virtual framebuffer instead.
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# ws-live-events.js launches with `channel: 'chrome'`, not the base
+# Chromium build the Playwright image ships by default — a deliberate
+# part of the existing anti-Cloudflare posture (real Chrome's fingerprint,
+# not the open-source Chromium one), not something to drop to simplify
+# this image. Confirmed by direct local `docker run` testing: without
+# this, launch fails outright with "Chromium distribution 'chrome' is
+# not found at /opt/google/chrome/chrome".
+RUN npx playwright install chrome
+
+# The persistent Chrome profile (session cookies, part of the anti-
+# detection strategy) must survive restarts/redeploys — mount it as a
+# volume, never bake it into the image (it's git-ignored locally for the
+# same reason: it can contain session state). `launchPersistentContext`
+# in ws-live-events.js uses the relative path `.chrome-profile`, which
+# resolves against WORKDIR (/app) here.
+VOLUME ["/app/.chrome-profile"]
+
+# /health is served on WS_HEALTH_PORT (default 8787) — see docs/DEPLOYMENT.md § 6d.
+EXPOSE 8787
+
+# tini as PID 1 — correct zombie reaping and signal forwarding to its
+# direct child, confirmed necessary by direct local testing (without it,
+# exec-form CMD leaves the container running forever after node exits).
+#
+# Do NOT run this via `xvfb-run` in the CMD, despite that being the
+# simpler-looking one-liner — confirmed by direct local `docker stop`
+# testing that it silently defeats ws-live-events.js's own graceful-
+# shutdown handling: `xvfb-run` is a shell script, so `node` runs as its
+# *grandchild*, and SIGTERM sent to `xvfb-run` does not reach `node`'s
+# own registered handler — the container exits (143 = 128+SIGTERM) but
+# `[shutdown] Received SIGTERM...`/`[shutdown] Clean exit.` never log,
+# meaning the browser context never gets a chance to close cleanly.
+# Starting Xvfb directly and `exec`-ing into node instead makes node
+# tini's direct child (the shell that started it is replaced in place,
+# not left as an intermediary), so SIGTERM reaches its own handler.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 >/dev/null 2>&1 & export DISPLAY=:99; sleep 1; exec node scripts/ws-live-events.js"]

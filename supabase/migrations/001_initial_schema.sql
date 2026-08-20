@@ -1,3 +1,31 @@
+-- Superseded fix, kept as history: an earlier version of this comment
+-- pinned this extension to `WITH SCHEMA public`, on the theory that a
+-- fresh `db push` connection's search_path didn't include `extensions`.
+-- Directly disproven against the real remote production project
+-- (rgohuoooujqclcfkoaht): `uuid-ossp` is pre-installed by Supabase's
+-- own project bootstrap into the `extensions` schema BEFORE this
+-- migration ever runs, so `CREATE EXTENSION IF NOT EXISTS ... WITH
+-- SCHEMA public` is a guaranteed no-op there (`IF NOT EXISTS` skips
+-- the whole statement, schema clause included, once an extension of
+-- that name exists anywhere) — confirmed live: `uuid-ossp` still sits
+-- in `extensions`, not `public`, after that fix was in place. Separately
+-- confirmed the connecting role's `search_path` genuinely does include
+-- `extensions` (`"$user", public, extensions"`), and that running this
+-- entire file as one continuous multi-statement session (via
+-- `supabase db query --linked --file`, wrapped in a rolled-back
+-- transaction — nothing persisted) succeeds end-to-end, including the
+-- exact `create table public.pots (... uuid_generate_v4() ...)`
+-- statement `db push` fails on. That rules out the SQL, the schema
+-- placement, and the role's search_path as the cause — the failure is
+-- specific to `supabase db push`'s own migration-execution path, not
+-- reproducible via a normal session. Rather than depend on that CLI
+-- behavior being search_path-safe, `uuid_generate_v4()` is now called
+-- schema-qualified (`extensions.uuid_generate_v4()`, see below) at
+-- both call sites, matching the schema this extension is actually
+-- installed into on both this project's local dev database and the
+-- real hosted project — removing the dependency on search_path/session
+-- continuity entirely, regardless of how `db push` executes statements
+-- internally.
 create extension if not exists "uuid-ossp";
 create extension if not exists "pg_cron";
 create extension if not exists "pg_trgm";
@@ -159,7 +187,7 @@ create index idx_fixture_events_fixture on public.fixture_events(fixture_id);
 create index idx_fixture_events_player on public.fixture_events(player_id);
 
 create table public.pots (
-  id uuid primary key default uuid_generate_v4(),
+  id uuid primary key default extensions.uuid_generate_v4(),
   name text not null check (length(name) between 1 and 80),
   description text,
   status pot_status not null default 'active',
@@ -199,7 +227,7 @@ create table public.entry_payments (
 );
 
 create table public.user_entries (
-  id uuid primary key default uuid_generate_v4(),
+  id uuid primary key default extensions.uuid_generate_v4(),
   pot_id uuid not null references public.pots(id) on delete cascade,
   user_id uuid not null references public.profiles(id) on delete cascade,
   gameweek_id bigint not null references public.gameweeks(id) on delete cascade,
