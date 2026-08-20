@@ -43,7 +43,7 @@ RUN npx playwright install chrome
 # same reason: it can contain session state). `launchPersistentContext`
 # in ws-live-events.js uses the relative path `.chrome-profile`, which
 # resolves against WORKDIR (/app) here.
-VOLUME ["/app/.chrome-profile"]
+#VOLUME ["/app/.chrome-profile"]
 
 # /health is served on WS_HEALTH_PORT (default 8787) — see docs/DEPLOYMENT.md § 6d.
 EXPOSE 8787
