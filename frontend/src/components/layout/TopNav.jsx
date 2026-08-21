@@ -1,4 +1,4 @@
-import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { Home, Trophy, Users, User, Settings, LogOut, Bell, ShieldCheck } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUiStore } from '../../store/uiStore'
@@ -10,7 +10,6 @@ import { resolveDisplayName } from '../../utils/format'
 
 export default function TopNav() {
   const { profile, signOut } = useAuthStore()
-  const location = useLocation()
   const navigate = useNavigate()
 
   // Phase 10B, Part 16 — was leaving the user on /sign-in, which
@@ -104,29 +103,29 @@ export default function TopNav() {
           </button>
 
           {/* Phase 8D, Part 16 — min-w-0 + truncate fixes a real overflow
-              found live at 768px: a long identity value plus a long
-              pathname like /super-admin/users had no width bound at all,
-              so this cluster forced the whole page wider than the viewport
-              instead of the header's own flex row absorbing it. Confirmed
-              via getBoundingClientRect() before this fix, not assumed —
-              the wide Super Admin Users table itself was not the cause
-              (its own overflow-x-auto card correctly contained it).
+              found live at 768px: a long identity value had no width bound
+              at all, so this cluster forced the whole page wider than the
+              viewport instead of the header's own flex row absorbing it.
               Phase 25 — resolveDisplayName() (utils/format.js) replaces
               the naive `display_name || username` fallback here: some
               accounts have `display_name` equal to their email (the
               signup default before one is explicitly set), which this
-              header would otherwise show verbatim on every route,
-              including inside a pot (`/pot/<uuid>/...`) — the URL itself
-              never affects what identity renders, this component is the
-              same one everywhere. */}
+              header would otherwise show verbatim on every route.
+              Phase 25 (live review) — the second line here used to render
+              `location.pathname` as a lightweight "current page" indicator
+              (e.g. "/super-admin/users"). Removed: on any pot route that's
+              literally `/pot/<uuid>/...` — a raw UUID surfacing in the one
+              piece of UI whose whole job is showing the user's identity,
+              exactly the "ID shown where a name belongs" bug this phase is
+              fixing, even though it sat next to (not instead of) the real
+              resolved name. Nothing else in the app depended on this route
+              breadcrumb (confirmed by grep — TopNav was the only consumer
+              of `location`/`location.pathname` in the whole frontend). */}
           <Link to="/profile" className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1 hover:bg-white/5">
             <Avatar user={profile} />
             <div className="hidden min-w-0 sm:block">
               <div className="max-w-[160px] truncate text-sm text-white">
                 {resolveDisplayName(profile) || 'User'}
-              </div>
-              <div className="max-w-[160px] truncate text-xs text-white/35">
-                {location.pathname}
               </div>
             </div>
           </Link>

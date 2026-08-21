@@ -1,11 +1,19 @@
-import { Eye, Lock, Radar, ShieldCheck, Trophy, Zap } from 'lucide-react'
+import { Eye, Lock, Radar, ShieldCheck, Trophy, RefreshCw } from 'lucide-react'
 import Reveal from './Reveal'
+
+// Phase 25 (live review) — was Zap: lucide's lightning-bolt glyph is a
+// jagged, asymmetric path that visually stands out among this row's other
+// icons (Lock/ShieldCheck/Radar/Eye/Trophy — all solid, optically-centered
+// shapes). Also a real, separate inconsistency: WhyUseIt.jsx already makes
+// this exact same "Automated scoring" point using RefreshCw — this just
+// matches it, rather than the app making the identical claim with two
+// different icons on the same landing page.
 
 const POINTS = [
   { icon: Lock, title: 'Private competitions', text: 'Every pot is invite-only — nothing you play is ever public.' },
   { icon: ShieldCheck, title: 'Secure accounts', text: 'Standard email/password auth with row-level security on every table.' },
   { icon: Radar, title: 'Live Premier League data', text: 'Real fixtures, real results, synced automatically every gameweek.' },
-  { icon: Zap, title: 'Automatic scoring', text: 'Every pick is scored the moment results come in — no manual step.' },
+  { icon: RefreshCw, title: 'Automatic scoring', text: 'Every pick is scored the moment results come in — no manual step.' },
   { icon: Eye, title: 'Transparent standings', text: 'Every member sees the same live leaderboard, ranked the same way.' },
   { icon: Trophy, title: 'Reliable prize tracking', text: 'Payouts are calculated and recorded automatically once a pot settles.' },
 ]

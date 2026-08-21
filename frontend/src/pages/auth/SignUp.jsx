@@ -43,6 +43,23 @@ export default function SignUp() {
           data: {
             display_name: form.display_name.trim(),
           },
+          // Live-review fix: this was never set, so the confirmation
+          // email's link fell back to whatever the Supabase project's own
+          // Auth "Site URL" happens to be configured to — on this project
+          // that produced a 404 in production (root-caused: Site URL isn't
+          // the live custom domain). Setting it explicitly to this app's
+          // own current origin means the link is correct regardless of
+          // that dashboard setting, PROVIDED this origin is also in
+          // Supabase's Redirect URLs allow-list (Supabase rejects a
+          // redirect_to that isn't allow-listed even when the client
+          // supplies it — a real, separate dashboard setting, not
+          // something this code change can satisfy on its own).
+          // `/verify-email` already auto-navigates to the pending
+          // `redirect` destination once `email_confirmed_at` appears on
+          // the session (see that page's own effect) — the correct
+          // landing spot whether the link is opened in the original
+          // signup tab or a completely different one (e.g. on a phone).
+          emailRedirectTo: `${window.location.origin}/verify-email${redirectQuery}`,
         },
       })
 

@@ -1,6 +1,12 @@
-import { Trophy, UserPlus, Zap } from 'lucide-react'
+import { Trophy, UserPlus, ListChecks } from 'lucide-react'
 import Reveal from './Reveal'
 
+// Phase 25 (live review) — step 2's icon was Zap; replaced for the same
+// reason as TrustSection.jsx's own identical fix (lucide's lightning-bolt
+// glyph reads as visually off among this row's cleaner, more symmetric
+// icons). ListChecks matches Dashboard.jsx's own "Your next pick" summary
+// card, which represents the exact same "make your picks" concept this
+// step describes.
 const STEPS = [
   {
     icon: UserPlus,
@@ -8,7 +14,7 @@ const STEPS = [
     text: 'Set up a pot in seconds and invite people by link or username — or join one you’ve been invited to.',
   },
   {
-    icon: Zap,
+    icon: ListChecks,
     title: 'Submit your predictions before kickoff',
     text: 'Pick five goalscorers, choose a team to survive the gameweek, or predict exact scorelines — picks lock automatically at deadline.',
   },
