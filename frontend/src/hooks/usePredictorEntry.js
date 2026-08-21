@@ -80,6 +80,30 @@ export function usePlayersForFixture(homeTeamId, awayTeamId) {
   })
 }
 
+// Phase 25 — Starting XI / Bench / Not in squad (item 8). Same "best-
+// effort, gracefully empty" pattern useMatchCentre.js's own
+// fixture_player_status read already established: this table has zero
+// rows in production today (no ingestion job populates it yet — a real,
+// pre-existing, documented gap, ISSUE-2 — not something this UI pass
+// fixes), so this correctly resolves to an empty map and every player
+// renders with no lineup badge until that data genuinely exists — never
+// a fabricated/implied status. Returns a Map keyed by player_id for O(1)
+// lookup while rendering a fixture's player list.
+export function useFixturePlayerStatus(fixtureId) {
+  return useQuery({
+    queryKey: ['fixture-player-status', fixtureId],
+    enabled: !!fixtureId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('fixture_player_status')
+        .select('player_id, status')
+        .eq('fixture_id', fixtureId)
+      if (error) throw error
+      return new Map((data ?? []).map((row) => [String(row.player_id), row.status]))
+    },
+  })
+}
+
 // Phase 9 — Predictor prediction-screen polish. Pot-wide participation for
 // one gameweek: "N of M pot members have predicted this gameweek" — a
 // social/progress stat, distinct from the viewer's own single prediction

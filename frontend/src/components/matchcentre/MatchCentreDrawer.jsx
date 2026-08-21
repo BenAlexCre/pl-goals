@@ -6,7 +6,7 @@ import PlayerDrawer from './PlayerDrawer'
 import PlayerCard from './PlayerCard'
 import TeamCrest from '../ui/TeamCrest'
 import { useTeamHomeAwayRecord, useHeadToHead, fixtureDifficultyFromStanding } from '../../hooks/useMatchCentre'
-import { usePlayersForFixture } from '../../hooks/usePredictorEntry'
+import { usePlayersForFixture, useFixturePlayerStatus } from '../../hooks/usePredictorEntry'
 import { toLocalTimeShort, formatFixtureKickoff } from '../../utils/time'
 import { formatTeamName } from '../../utils/format'
 
@@ -62,6 +62,14 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
   const { data: awayRecord } = useTeamHomeAwayRecord(fixture?.away_team?.id, leagueId, seasonId)
   const { data: meetings = [] } = useHeadToHead(fixture?.home_team?.id, fixture?.away_team?.id)
   const { data: squad = [] } = usePlayersForFixture(fixture?.home_team?.id, fixture?.away_team?.id)
+  // Phase 25 (lineup status) — the Lineups tab previously showed the full
+  // club roster with no distinction of who's actually in today's matchday
+  // squad. Same canonical source (fixture_player_status) the Score
+  // Predictor goalscorer picker already reads via PredictorFixtureCard.jsx
+  // — undefined/empty map (not an error) whenever official lineups
+  // haven't been received yet for this fixture, which PlayerCard already
+  // renders as "no badge" rather than a false status.
+  const { data: lineupStatusByPlayer } = useFixturePlayerStatus(fixture?.id)
 
   // Re-open should always land back on Overview, not wherever a previous
   // fixture's drawer was left — each open is a fresh fixture, not a
@@ -254,13 +262,25 @@ export default function MatchCentreDrawer({ open, onClose, fixture, leagueId, se
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-white/40">{fixture.home_team?.short_name}</p>
                     {homeSquad.map((p) => (
-                      <PlayerCard key={p.id} player={{ ...p, player_id: p.id }} seasonId={seasonId} size="sm" />
+                      <PlayerCard
+                        key={p.id}
+                        player={{ ...p, player_id: p.id }}
+                        seasonId={seasonId}
+                        size="sm"
+                        lineupStatus={lineupStatusByPlayer?.get(String(p.id)) ?? null}
+                      />
                     ))}
                   </div>
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-white/40">{fixture.away_team?.short_name}</p>
                     {awaySquad.map((p) => (
-                      <PlayerCard key={p.id} player={{ ...p, player_id: p.id }} seasonId={seasonId} size="sm" />
+                      <PlayerCard
+                        key={p.id}
+                        player={{ ...p, player_id: p.id }}
+                        seasonId={seasonId}
+                        size="sm"
+                        lineupStatus={lineupStatusByPlayer?.get(String(p.id)) ?? null}
+                      />
                     ))}
                   </div>
                 </section>

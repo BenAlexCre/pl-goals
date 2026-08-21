@@ -101,6 +101,37 @@ in the schema constrains this, so the value space is whatever the ingestion code
 decides to write. `unique (fixture_id, provider_id)` enables idempotent upserts from
 scrapers/syncs.
 
+### `fixture_player_status` (migration 037)
+Phase 25 (lineup status). One row per `(fixture_id, player_id)` — that player's
+lineup classification for the fixture. `status` (enum `player_match_status`:
+`starting`/`bench`/`sub_on`/`sub_off`/`not_in_squad`) starting/bench are the
+STABLE lineup classification, never regressed by a later substitution; `sub_on`/
+`sub_off` are event-state overlays (used as-is by Pick 5's own live pick display,
+`GameweekPage.jsx`'s `AppearanceBadge`) — `started` (boolean) is the durable
+"was this player in the Starting XI" fact lineup-classification consumers
+(`PlayerCard.jsx`, Score Predictor's goalscorer picker, Match Centre's Lineups
+tab) actually read. Populated by `ws-live-events.js`'s `parseLineup()`/
+`applySubstitutionUpdates()`. `unique (fixture_id, player_id)`. Also carries
+`shots`/`shots_on_target`/`current_rating`/`stats_synced_at` — live, unused
+scaffolding captured as-is (not this phase's own ingestion; see
+`fixture_player_match_stats` below for where match stats actually live).
+**Ownership note**: this table was found owned by `supabase_admin` rather than
+`postgres` on this project's database — required a one-time `alter table ...
+owner to postgres` before migration 037 could apply; see
+[decisions.md § Phase 25 (lineup status)](./decisions.md#phase-25-lineup-status--fixture_player_status-ingestion).
+
+### `fixture_player_match_stats` (migration 036)
+Phase 25 (review pass). One row per `(fixture_id, player_id)` — that match's final
+WhoScored per-player stat line (rating, shots, passes, tackles, aerials, GK saves),
+parsed from `matchCentreData.home/away.players[].stats` by `ws-live-events.js`
+(the same response `fixture_events` was already reading `incidentEvents` out of —
+no new provider). `raw_stats jsonb` keeps the full scraped stats object; typed
+columns are the subset the Standings/Statistics page's Opta-style categories
+actually use. Does not duplicate `fixture_player_status` (appearances/starts/
+minutes, still empty everywhere — ISSUE-2). `unique (fixture_id, player_id)`.
+Season-level aggregate: `player_season_match_stats` (view) — same
+sum-then-recompute-percentages pattern as `player_season_stats`.
+
 ### `pots`
 A private group. `invite_code text unique` exists on the table but is currently
 unused by any frontend code — see
@@ -254,18 +285,10 @@ any migration file. Either the deployed database has manually-applied changes no
 captured in `supabase/migrations/`, or these code paths are unfinished/broken — see
 [current-state.md](./current-state.md) for live-verification status on each.
 
-- **Table `fixture_player_status`** — columns implied by usage: `player_id`,
-  `fixture_id`, `status` (`starting`/`bench`/`sub_on`/`sub_off`/`not_in_squad`),
-  `started`, `came_on_minute`, `went_off_minute`. Read by
-  `hooks/useEntry.js:useFixturePlayerStatuses`, subscribed to by
-  `hooks/useLiveScores.js`, rendered by `GameweekPage.jsx` — this is live, reachable
-  frontend code, not dead code. See
-  [current-state.md ISSUE-2](./current-state.md#issue-2--fixture_player_status-table-missing-from-migrations).
-- **Column `fixtures.whoscored_fixture_id`** — read by `frontend/src/lib/whoScored.js`
-  / `frontend/scripts/ws-live-events.js` to map a WhoScored match ID to a local
-  fixture.
-- **Column `teams.whoscoredteamid`** (or similar) — written by
-  `frontend/scripts/sync-whoscored-teamids.js`.
+- ~~**Table `fixture_player_status`**~~ — **resolved, migration 037** (see its own
+  entry above, near `fixture_events`).
+- ~~**Column `fixtures.whoscored_fixture_id`**, `teams.whoscoredteamid`,
+  `players.whoscoredplayerid`~~ — **resolved, migration 032.**
 - **RPC `get_or_create_entry(p_pot_id, p_gameweek_id)`** and **RPC
   `save_entry_picks(p_entry_id, p_player_ids)`** — called from
   `frontend/src/lib/gameAPI.js`, which is dead code (only imported by the also-dead

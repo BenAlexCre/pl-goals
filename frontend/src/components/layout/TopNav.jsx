@@ -6,6 +6,7 @@ import { useNotifications } from '../../hooks/useNotifications'
 import { useOwnsAnyPot, useIsSuperAdmin } from '../../hooks/useAdmin'
 import Avatar from '../ui/Avatar'
 import NotificationPanel from '../notifications/NotificationPanel'
+import { resolveDisplayName } from '../../utils/format'
 
 export default function TopNav() {
   const { profile, signOut } = useAuthStore()
@@ -103,19 +104,26 @@ export default function TopNav() {
           </button>
 
           {/* Phase 8D, Part 16 — min-w-0 + truncate fixes a real overflow
-              found live at 768px: an email-as-display-name (the default
-              for an account created before display_name was required) plus
-              a long pathname like /super-admin/users had no width bound at
-              all, so this cluster forced the whole page wider than the
-              viewport instead of the header's own flex row absorbing it.
-              Confirmed via getBoundingClientRect() before this fix, not
-              assumed — the wide Super Admin Users table itself was not the
-              cause (its own overflow-x-auto card correctly contained it). */}
+              found live at 768px: a long identity value plus a long
+              pathname like /super-admin/users had no width bound at all,
+              so this cluster forced the whole page wider than the viewport
+              instead of the header's own flex row absorbing it. Confirmed
+              via getBoundingClientRect() before this fix, not assumed —
+              the wide Super Admin Users table itself was not the cause
+              (its own overflow-x-auto card correctly contained it).
+              Phase 25 — resolveDisplayName() (utils/format.js) replaces
+              the naive `display_name || username` fallback here: some
+              accounts have `display_name` equal to their email (the
+              signup default before one is explicitly set), which this
+              header would otherwise show verbatim on every route,
+              including inside a pot (`/pot/<uuid>/...`) — the URL itself
+              never affects what identity renders, this component is the
+              same one everywhere. */}
           <Link to="/profile" className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1 hover:bg-white/5">
-            <Avatar name={profile?.display_name || profile?.username || 'User'} />
+            <Avatar user={profile} />
             <div className="hidden min-w-0 sm:block">
               <div className="max-w-[160px] truncate text-sm text-white">
-                {profile?.display_name || profile?.username || 'User'}
+                {resolveDisplayName(profile) || 'User'}
               </div>
               <div className="max-w-[160px] truncate text-xs text-white/35">
                 {location.pathname}

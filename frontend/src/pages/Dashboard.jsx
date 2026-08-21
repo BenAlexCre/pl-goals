@@ -19,7 +19,7 @@ import {
   ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { isPastDeadline, toLocalTimeShort, toLocalDateTimeLong } from '../utils/time'
-import { formatSeasonName } from '../utils/format'
+import { formatSeasonName, resolveFirstName, resolveDisplayName } from '../utils/format'
 
 const GAME_TYPE_LABELS = {
   pick5: 'Pick 5',
@@ -117,7 +117,6 @@ function resolveGameweekState(gw) {
     detail: startsAt ? `Starts ${toLocalTimeShort(startsAt)}` : 'Time TBC',
     startsAt,
     deadlinePassed,
-    countdownTarget: startsAt ?? gw.deadline_utc ?? null,
   }
 }
 
@@ -189,7 +188,7 @@ function LeaderboardRow({ row, unit, highlight }) {
     <div className={`flex items-center gap-2.5 rounded-lg px-1.5 py-1 ${highlight ? 'bg-accent/10' : ''}`}>
       <span className="w-4 shrink-0 text-center text-xs tabular text-white/35">{row.rank}</span>
       <Avatar user={row.profiles} size="xs" />
-      <span className="min-w-0 flex-1 truncate text-xs text-white/70">{row.profiles?.display_name ?? 'Unknown'}</span>
+      <span className="min-w-0 flex-1 truncate text-xs text-white/70">{resolveDisplayName(row.profiles) ?? 'Unknown'}</span>
       <span className="shrink-0 text-xs font-medium text-white/50 tabular">{row.score}{unit}</span>
     </div>
   )
@@ -223,37 +222,38 @@ function RankedLeaderboardBody({ rows, userId, unit }) {
 
 // Phase 12, Part 6 — LMS is deliberately NOT the same "ranked by score"
 // shape: business-rules.md's own Standings section says every alive
-// entrant ties for first, so a numeric rank is the wrong headline. Leads
-// with survival counts and the viewer's own status instead, then a short
-// list of who else is still alive.
-function LmsLeaderboardBody({ rows, userId }) {
-  if (rows.length === 0) return <p className="text-xs text-white/35">No standings yet.</p>
-
-  const alive = rows.filter((r) => (r.meta?.competitiveStatus ?? 'alive') !== 'eliminated')
-  const eliminatedCount = rows.length - alive.length
+// entrant ties for first, so a numeric rank is the wrong headline.
+//
+// Phase 25 — replaced the "top 3 still-alive names" list (an arbitrary,
+// not-very-useful slice for a competition with no numeric rank) with real
+// competition-state stats: remaining/eliminated/total entrants and the
+// current round. Survival counts now come from `potStatus.lmsSurvival`
+// (useDashboardPotStatus, usePots.js) rather than re-deriving them from
+// `rows` (pot_standings_snapshots) a second way — that source excludes
+// voided entries, so it was never a trustworthy "total entrants" anyway,
+// and this way there's exactly one place LMS survival counts are computed
+// for the whole Dashboard (the pot cards above already trust the same
+// field). `rows`/`userId` still used for the viewer's own alive/eliminated
+// badge, the one thing this component's own leaderboard query answers that
+// lmsSurvival doesn't (identifies the fact for *this specific user*).
+function LmsLeaderboardBody({ rows, userId, survival, currentRound }) {
   const myRow = rows.find((r) => r.user_id === userId)
   const myStatus = myRow?.meta?.competitiveStatus ?? 'alive'
 
+  if (!survival) return <p className="text-xs text-white/35">No standings yet.</p>
+
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-3 text-xs">
-        <span className="font-medium text-accent">{alive.length} remaining</span>
-        {eliminatedCount > 0 && <span className="text-white/40">{eliminatedCount} eliminated</span>}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <span className="font-medium text-accent">{survival.alive} remaining</span>
+        {survival.eliminated > 0 && <span className="text-white/40">{survival.eliminated} eliminated</span>}
+        <span className="text-white/35">{survival.total} entrant{survival.total === 1 ? '' : 's'}</span>
+        {currentRound != null && <span className="text-white/35">Round {currentRound}</span>}
       </div>
       {myRow && (
         <div className="flex items-center gap-2 rounded-lg bg-white/5 px-1.5 py-1">
           <Badge status={myStatus} />
           <span className="text-xs text-white/60">{myStatus === 'eliminated' ? 'You were eliminated' : "You're still in it"}</span>
-        </div>
-      )}
-      {alive.length > 0 && (
-        <div className="space-y-1">
-          {alive.slice(0, 3).map((row) => (
-            <div key={row.user_id} className="flex items-center gap-2.5">
-              <Avatar user={row.profiles} size="xs" />
-              <span className="min-w-0 flex-1 truncate text-xs text-white/70">{row.profiles?.display_name ?? 'Unknown'}</span>
-            </div>
-          ))}
         </div>
       )}
     </div>
@@ -270,13 +270,14 @@ function LmsLeaderboardBody({ rows, userId }) {
 // only changes this block's own local state, so nothing else on the page
 // moves. Still just useLeaderboard() under the hood — no new leaderboard
 // concept, no cross-pot aggregation.
-function ModeLeaderboardBlock({ gameType, pots, userId }) {
+function ModeLeaderboardBlock({ gameType, pots, userId, potStatus }) {
   const [index, setIndex] = useState(0)
   const safeIndex = Math.min(index, pots.length - 1)
   const pot = pots[safeIndex]
   const { data: rows = [], isLoading } = useLeaderboard(pot.id, null)
   const Icon = GAME_TYPE_ICONS[gameType] || Trophy
   const label = GAME_TYPE_LABELS[gameType] || gameType
+  const status = potStatus?.get(pot.id)
 
   return (
     <div>
@@ -308,7 +309,7 @@ function ModeLeaderboardBlock({ gameType, pots, userId }) {
           <div className="h-6 animate-pulse rounded-lg bg-white/5" />
         </div>
       ) : gameType === 'last_man_standing' ? (
-        <LmsLeaderboardBody rows={rows} userId={userId} />
+        <LmsLeaderboardBody rows={rows} userId={userId} survival={status?.lmsSurvival} currentRound={status?.nextGameweek?.number} />
       ) : (
         <RankedLeaderboardBody rows={rows} userId={userId} unit={gameType === 'score_predictor' ? ' pts' : '/5'} />
       )}
@@ -382,12 +383,6 @@ export default function Dashboard() {
   })
   const liveFixtures = gwState?.status === 'live' ? sortedFixtures.filter((f) => f.status === 'live') : []
 
-  // A real destination for "View all fixtures" — one of the viewer's own
-  // pots that's actually on this gameweek's league/season, if any (never
-  // a fabricated route). GameweekPage already renders this gameweek's
-  // full fixture list plus standings for that pot.
-  const matchingPot = displayGw ? pots.find((p) => p.season_id === displayGw.season_id && p.league_id === displayGw.league_id) : null
-
   const enteredCount = pots.filter((p) => potStatus?.get(p.id)?.hasEntry).length
   // Bug found live: an eliminated LMS entrant has `pickSubmitted: false`
   // (they never will submit again) and was being surfaced as "needs a
@@ -407,35 +402,35 @@ export default function Dashboard() {
   }, [pots])
 
   const showAdminAction = ownsAnyPot || isSuperAdmin
-  // Bug found live verifying this page (real, existing data — 5 of 57
-  // profiles, including this account): the signup flow's own default
-  // leaves `display_name` equal to the account's email until someone
-  // explicitly changes it, so "Welcome back, {display_name}" rendered a
-  // raw email address. `username` (always a short handle, never an email)
-  // is the better greeting name whenever `display_name` looks like a bare
-  // email — never a hard-coded name, still driven entirely by this
-  // account's own real profile row.
-  const rawDisplayName = profile?.display_name?.trim()
-  const looksLikeEmail = !!rawDisplayName && rawDisplayName.includes('@') && !rawDisplayName.includes(' ')
-  const rawUsername = profile?.username?.trim()
-  // handle_new_user() (001_initial_schema.sql) falls back to exactly this
-  // shape — `'user_' || substr(id, 1, 8)` — when no real username was
-  // ever set either. Neither auto-generated value reads as a name a
-  // human would recognise, so a genuinely nameless account (confirmed
-  // live: some real test accounts have both) gets a plain, honest
-  // greeting instead of one of them — never a fabricated name.
-  const usernameLooksAutoGenerated = !!rawUsername && /^user_[0-9a-f]{8}$/i.test(rawUsername)
-  const greetingSource = looksLikeEmail
-    ? (usernameLooksAutoGenerated ? null : rawUsername)
-    : (rawDisplayName || (usernameLooksAutoGenerated ? null : rawUsername))
-  const firstName = greetingSource?.trim().split(/\s+/)[0] || 'there'
+  // Phase 25 — this used to be ~20 lines of inline email-detection logic;
+  // extracted into utils/format.js's resolveFirstName() (same behaviour,
+  // unchanged) so every place showing user identity (TopNav, Avatar, here)
+  // shares one implementation instead of Dashboard alone knowing to guard
+  // against display_name being an email.
+  const firstName = resolveFirstName(profile) || 'there'
   // Before any gameweek is selected yet, "loading" means resolving the
   // smart default (old behaviour, unchanged); once a selection exists,
-  // it means fetching THAT gameweek's own full fixture data.
-  const loadingHero = selectedGameweekId === null
+  // it means fetching THAT gameweek's own full fixture data. Drives the
+  // "Live now" tile and the browsable fixture section below — both of
+  // those are genuinely about whichever gameweek the user is currently
+  // looking at.
+  const loadingBrowsedGw = selectedGameweekId === null
     ? (gwLoading || (nextGwLoading && !currentGw))
     : selectedGwLoading
   const statusMeta = gwState ? GAMEWEEK_STATUS_META[gwState.status] : null
+
+  // Part 17 — the "Next gameweek" summary tile is a global dashboard fact
+  // ("what's coming up next"), not a view onto whatever the user happens
+  // to be browsing in the Prev/Next navigation below (section C). It used
+  // to read `gwState` (derived from `selectedGwFull`, the BROWSED
+  // gameweek) — found live: paging Prev/Next there changed this tile too,
+  // since both shared the same derived state. Recomputed here from
+  // `defaultGw` (`currentGw ?? nextGw`) directly, completely independent
+  // of `selectedGameweekId` — this is exactly what the tile already
+  // showed before the user ever touched the browser below, now held
+  // fixed regardless of what they do down there.
+  const nextGwState = resolveGameweekState(defaultGw)
+  const loadingNextGwTile = gwLoading || (nextGwLoading && !currentGw)
 
   // Phase 14, Part 12 — this root used to also carry `max-w-[1400px]
   // mx-auto`, which was dead code: AppShell's own shared container (then
@@ -446,25 +441,40 @@ export default function Dashboard() {
   // just fills it like every other page, rather than layering a second,
   // silently inert container on top.
   return (
-    <div className="space-y-8 lg:grid lg:grid-cols-[1fr_380px] lg:items-start lg:gap-8 lg:space-y-0">
-      <div className="space-y-8 min-w-0">
-        {/* A. Welcome header */}
-        <section>
-          <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">Welcome back, {firstName}</h1>
-          <p className="mt-1 text-sm text-white/45">Here&apos;s what&apos;s happening in your competitions.</p>
-        </section>
+    <div className="space-y-8">
+      {/* A. Welcome header — deliberately OUTSIDE the two-column grid below
+          (a full-width sibling above it, not the grid's left-column child
+          it used to be). With `items-start`, a CSS grid aligns its columns'
+          top edges to the grid's own top row — as long as the header lived
+          inside only the left column, the sidebar (the right column, with
+          nothing above it) started a header's-height higher than the
+          summary-tile row. Moving the header above the grid entirely means
+          both columns now genuinely start at the same row with no fixed
+          height/spacer needed — the fix holds regardless of how tall the
+          header wraps to at any width. */}
+      <section>
+        <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">Welcome back, {firstName}</h1>
+        <p className="mt-1 text-sm text-white/45">Here&apos;s what&apos;s happening in your competitions.</p>
+      </section>
 
+      <div className="space-y-8 lg:grid lg:grid-cols-[1fr_380px] lg:items-start lg:gap-8 lg:space-y-0">
+      <div className="space-y-8 min-w-0">
         {/* B. Summary cards */}
         <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <SummaryCard icon={CalendarClock} label="Next gameweek">
-            {loadingHero ? (
+            {loadingNextGwTile ? (
               <div className="h-10 animate-pulse rounded-lg bg-white/5" />
-            ) : gwState ? (
+            ) : nextGwState ? (
               <>
-                <p className="font-semibold text-white">Gameweek {gwState.gw.number}</p>
-                <p className="mt-0.5 text-xs text-white/45">{gwState.detail}</p>
-                {gwState.status === 'upcoming' && gwState.countdownTarget && (
-                  <CountdownTimer deadlineUtc={gwState.countdownTarget} showSeconds={false} className="mt-1 text-xs" />
+                <p className="font-semibold text-white">Gameweek {nextGwState.gw.number}</p>
+                <p className="mt-0.5 text-xs text-white/45">{nextGwState.detail}</p>
+                {/* Counts down to the picks-lock deadline (deadline_utc, the
+                    same single-source-of-truth field every pot page's own
+                    canPick check already gates on), never gameweek/kickoff
+                    start — a countdown to "starts" would still read a
+                    positive number after picks had already locked. */}
+                {nextGwState.status === 'upcoming' && nextGwState.gw.deadline_utc && !nextGwState.deadlinePassed && (
+                  <CountdownTimer deadlineUtc={nextGwState.gw.deadline_utc} showSeconds={false} className="mt-1 text-xs" />
                 )}
               </>
             ) : (
@@ -473,7 +483,7 @@ export default function Dashboard() {
           </SummaryCard>
 
           <SummaryCard icon={Radio} label="Live now">
-            {loadingHero ? (
+            {loadingBrowsedGw ? (
               <div className="h-10 animate-pulse rounded-lg bg-white/5" />
             ) : liveFixtures.length > 0 ? (
               <>
@@ -641,16 +651,21 @@ export default function Dashboard() {
                 </p>
               )}
             </div>
-            {matchingPot && sortedFixtures.length > 0 && (
+            {displayGw && (
               <Link
-                to={`/pot/${matchingPot.id}/gameweek/${displayGw.id}`}
+                to="/standings"
+                state={{
+                  leagueId: displayGw.league_id,
+                  seasonId: displayGw.season_id,
+                  leagueName: displayGw.leagues?.name,
+                }}
                 className="shrink-0 text-sm font-medium text-accent hover:underline"
               >
-                View all fixtures
+                View standings
               </Link>
             )}
           </div>
-          {loadingHero ? (
+          {loadingBrowsedGw ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
             </div>
@@ -757,51 +772,21 @@ export default function Dashboard() {
       </div>
 
       {/* F. Desktop sidebar — hidden below lg, so nothing here is ever
-          the only place a piece of information lives. */}
+          the only place a piece of information lives.
+          The former "Gameweek status" card was removed here (Phase 25) —
+          every fact it showed (gameweek number/status badge, live/completed
+          detail, picks-lock countdown) was already shown, with equal or
+          greater detail, in the main gameweek header above (section
+          C/D) — a pure duplicate, not a second source of truth. Leaderboards
+          now gets the reclaimed space at the top of the sidebar instead of
+          second. */}
       <div className="hidden lg:block lg:space-y-5">
-        <div className="rounded-2xl border border-white/8 bg-surface-1 p-5">
-          <h3 className="mb-3 text-sm font-semibold text-white">Gameweek status</h3>
-          {loadingHero ? (
-            <div className="h-16 animate-pulse rounded-lg bg-white/5" />
-          ) : gwState ? (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-white">Gameweek {gwState.gw.number}</span>
-                <Badge status={statusMeta?.badge ?? 'upcoming'}>{statusMeta?.label ?? gwState.status}</Badge>
-              </div>
-              {(gwState.status === 'live' || gwState.status === 'completed') && (
-                <p className="text-xs text-white/45">{gwState.detail}</p>
-              )}
-              {/* Phase 18/19 — same picks-lock fact as the main header
-                  above, never a second, independently-computed deadline.
-                  "Time TBC" (never a fabricated countdown) whenever this
-                  gameweek's fixtures don't have confirmed kickoff times
-                  yet — refresh_gameweek_deadlines() (migration 030)
-                  already leaves deadline_utc null for exactly that case. */}
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-white/40">{gwState.deadlinePassed ? 'Picks locked' : 'Picks lock'}</span>
-                {displayGw?.deadline_utc ? (
-                  gwState.deadlinePassed ? (
-                    <span className="text-white/60">{toLocalTimeShort(displayGw.deadline_utc)}</span>
-                  ) : (
-                    <CountdownTimer deadlineUtc={displayGw.deadline_utc} showSeconds={false} className="text-xs" />
-                  )
-                ) : (
-                  <span className="text-white/40">Time TBC</span>
-                )}
-              </div>
-            </div>
-          ) : (
-            <p className="text-xs text-white/35">No gameweek data available yet.</p>
-          )}
-        </div>
-
         {pots.length > 0 && (
           <div className="rounded-2xl border border-white/8 bg-surface-1 p-5">
             <h3 className="mb-3 text-sm font-semibold text-white">Leaderboards</h3>
             <div className="space-y-5">
               {MODE_ORDER.filter((mode) => potsByMode.has(mode)).map((mode) => (
-                <ModeLeaderboardBlock key={mode} gameType={mode} pots={potsByMode.get(mode)} userId={user?.id} />
+                <ModeLeaderboardBlock key={mode} gameType={mode} pots={potsByMode.get(mode)} userId={user?.id} potStatus={potStatus} />
               ))}
             </div>
           </div>
@@ -810,7 +795,7 @@ export default function Dashboard() {
         <div className="rounded-2xl border border-white/8 bg-surface-1 p-5">
           <h3 className="mb-3 text-sm font-semibold text-white">Quick actions</h3>
           <div className="space-y-1.5">
-            <Link to="/pots" className="flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm text-white/70 transition-colors hover:bg-white/5 hover:text-white">
+            <Link to="/pots?create=true" className="flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm text-white/70 transition-colors hover:bg-white/5 hover:text-white">
               <PlusCircle size={15} className="text-white/35" /> Create a competition
             </Link>
             <Link to="/join" state={{ from: '/dashboard' }} className="flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-sm text-white/70 transition-colors hover:bg-white/5 hover:text-white">
@@ -827,6 +812,7 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+    </div>
     </div>
   )
 }

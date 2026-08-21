@@ -6958,3 +6958,289 @@ and the exact `/Matches/{id}/Live` URL pattern the real scraper uses)
 present. Graceful-shutdown code path reviewed and is standard/correct
 Node.js practice; live signal delivery could not be tested on this
 Windows dev machine (documented above, not silently skipped).
+
+## Phase 25 — UX refinement pass (Dashboard/Pots/Profile/Admin/Score
+Predictor identity + selection UX, Standings page, create-pot deep link)
+
+**What**: a frontend-only refinement pass, no schema/RLS/Edge Function
+changes. Covers (a) an earlier part of this same session — collapsed
+Score Predictor prediction visibility, Dashboard layout cleanup, LMS
+dashboard stats, pick-lock countdown correctness, Pots page
+restructuring (`PotManager.jsx`, collapsed-by-default Create Pot),
+`resolveDisplayName()`/`resolveFirstName()` (`utils/format.js`) as the
+one place user identity is resolved without ever surfacing an email as
+a name, and lineup-status wiring in `PredictorFixtureCard.jsx` off the
+existing (empty in this environment) `fixture_player_status` table —
+and (b) this turn's continuation, documented in full below.
+
+**Score Predictor selection UX (item 15)** — replaced the old
+bottom-of-list Save button with a persistent "Your predictions" panel
+(`PredictorSummaryPanel.jsx`), mirroring Pick 5's own established
+`PicksSummaryPanel.jsx` pattern rather than duplicating it: desktop/
+tablet gets a sticky sidebar (`md:grid md:grid-cols-[1fr_320px]`,
+`md:sticky md:top-4`); mobile gets a fixed bottom sheet
+(`fixed inset-x-0 bottom-16`, tap-to-expand). Selecting a prediction in
+`PredictorFixtureCard.jsx` no longer saves to the network directly — it
+stages a local `draft` object in `PredictorPotDetail.jsx` and collapses
+the card; the real `submitPicks` network call now only fires from the
+panel's own Save button. The panel shows scoreline + goalscorer
+together (never bare team names), frames a gameweek-wide pot's
+prediction as "Gameweek N" rather than fixture-specific, and
+distinguishes Unsaved (amber) vs. Saved (accent) state by comparing the
+draft against the server-saved pick. Every underlying business rule —
+one prediction per gameweek (`predictor_fixture_picks`'
+`UNIQUE(game_entry_id, gameweek_id)`), `predictor_scorer_scope` only
+ever affecting scoring-time bonus eligibility (never the picker's
+player list, which stays fixture-scoped in both modes), the submit
+mutation's inputs/validation — is unchanged; only *when* the save fires
+moved. **Investigated and explicitly NOT changed**: team-uniqueness/
+goalscorer-uniqueness "across a season half" and the
+`predictor_cycle_mode='two_halves'`-linked "double" exception some
+requirements referenced — `017_predictor_picks.sql`'s own migration
+comment confirms this was left undecided when that migration was
+written and remains unimplemented today (no "half" column, no backend
+validation, no frontend check, no test). Treated as a genuinely open
+product question, not a bug, and not invented here.
+
+**Standings page (item 14)** — new `/standings` route
+(`pages/Standings.jsx`): a real League Table (position/team/P/W/D/L/
+GF/GA/GD/Pts, official order) and Player Statistics (player/team/goals/
+assists, sortable), both derived entirely from data already synced
+into this app. Reuses `useLeagueStandings` unchanged; adds
+`useLeagueTeams` (team id -> name/crest, since
+`league_team_standings` deliberately only carries `team_id`) and
+`useLeaguePlayerStats` (bulk per-league equivalent of
+`usePlayerSeasonStats`, joining `player_team_history`/
+`player_season_stats`) to `hooks/useMatchCentre.js`. Deliberately has
+**no "rating" column or tab** — no such stat exists anywhere in this
+schema (confirmed against `player_season_stats`' own view definition,
+migration 025); fabricating one would contradict the same "never invent
+a stat" principle `usePlayerSeasonStats` already follows for
+appearances. "Appearances" is included but hides itself (column and
+sort button) whenever `fixture_player_status` has no rows for the
+league/season in question — true in every environment today, a
+pre-existing, documented gap, not new. Dashboard's "View all fixtures"
+link is now "View standings", linking to `/standings` with the
+currently-viewed gameweek's league/season passed as router state;
+opening `/standings` directly falls back to the viewer's own first pot.
+
+**Create-pot deep link (item 16)** — Dashboard's "Create a competition"
+quick action now links to `/pots?create=true`; `PotManager.jsx` reads
+that query param to pre-expand the (still collapsed-by-default on a
+plain `/pots` visit) Create Pot section and scroll it into view. No
+change to the form itself or to plain `/pots` behaviour.
+
+**Verification**: `npm run build` clean; full Deno suite 347/347,
+unchanged. Every new/changed Supabase query (`useLeagueTeams`,
+`useLeaguePlayerStats`'s roster/appearances joins, the double-nested
+`fixtures!inner(gameweeks!inner(...))` filter) was hand-verified via
+direct PostgREST requests against the local dev database (valid
+syntax, correct joins, `[]` for tables genuinely empty in this
+environment — no query errors). Live-browser verification of the new
+Score Predictor panel flow and the Standings/create-pot pages was
+attempted via background agents but could not complete — the session
+hit its usage limit before either finished. Not yet independently
+confirmed by an actual browser session; recommended as the next step
+once available.
+
+## Phase 25 (review pass) — WhoScored player stats already available, not yet ingested
+
+**What was found**: a live Playwright inspection of a real WhoScored
+match page's `matchCentreData` (`https://www.whoscored.com/Matches/<id>/Live`,
+same URL pattern `ws-live-events.js` already uses) confirms the payload
+carries, per player, a `stats` object keyed by minute for: `ratings`
+(WhoScored's own match rating — the last minute key is the end-of-match
+value), `passesTotal`/`passesAccurate`/`passSuccess`, `shotsTotal`/
+`shotsOffTarget` (and, per the WhoScored site, `shotsOnTarget` for
+players who register one), `tacklesTotal`/`tackleSuccessful`/
+`tackleSuccess`, `aerialsTotal`/`aerialsWon`, `clearances`, `touches`,
+`dribbledPast`, `foulsCommited`, `throwInsTotal`, `possession`, plus
+goalkeeper-specific `totalSaves`/`parriedSafe`/`parriedDanger`. Each
+team object also carries an equivalent team-level aggregate (`shotsOnTarget`,
+`interceptions`, `cornersTotal`, `dribblesWon`, `dispossessed`, `errors`,
+etc.). None of this is new data acquisition — it's already present in the
+exact same HTTP response `ws-live-events.js` fetches every scrape cycle;
+the script simply never reads anything but `matchData.incidentEvents`.
+
+**What this means for item 19**: the "Passing/Defending/Goalkeeping/
+Ratings not available" panels shown on the Standings page today are
+correct for what's currently *ingested*, but not a hard ceiling on what
+this app's *existing* data source (WhoScored, already paid for in
+scraping cost/complexity) can provide. A real player-rating column and
+full Opta-style category set are technically reachable without a new
+provider.
+
+**Update — implemented, same session, after explicit user approval**:
+the user chose "implement now" when asked. Built:
+- Migration `036_fixture_player_match_stats.sql` — new table
+  `fixture_player_match_stats` (one row per fixture/player, typed columns
+  for the Opta categories item 19 asked for, `raw_stats jsonb` for
+  everything else scraped, `reference_data_read_*`-style RLS matching
+  every other reference table) plus a `player_season_match_stats` view
+  (same sum-then-recompute-percentages pattern as `player_season_stats`,
+  never averaging per-match percentages).
+- `ws-live-events.js` — new `finalValue()`/`parsePlayerStats()`/
+  `upsertPlayerStats()`, reading `matchData.home/away.players[].stats`
+  (the same already-fetched response `parseEvents()` was already reading
+  `incidentEvents` out of) and upserting into the new table every poll
+  cycle, right alongside the existing `fixture_events` upsert. Also calls
+  `markFixtureStatsSynced()`, which finally gives real purpose to
+  `fixtures.stats_status`/`stats_last_synced_at` — columns migration 032
+  found already live and unused ("scaffolding for a stats-sync lifecycle
+  that was never finished").
+- `hooks/useMatchCentre.js`'s `useLeaguePlayerStats` now also reads
+  `player_season_match_stats`, merging rating/shots/passes/tackles/
+  aerials/saves in — null (never a fabricated 0) whenever a player has no
+  rows there yet, same convention as appearances.
+- `pages/Standings.jsx` — Passing/Defending/Goalkeeping/Ratings
+  categories are no longer permanently "unavailable": each now checks
+  real data presence at render time and switches to live numbers the
+  moment `ws-live-events.js` has actually scraped a fixture. Goalkeeping
+  is filtered to goalkeepers only.
+
+**Verified**: migration applied locally (`supabase migration up`); the
+new table/view/RLS policy directly queried via PostgREST. Since no
+Premier League fixture has been played yet this season, the real live
+scraper couldn't be exercised against genuine match data — instead, the
+exact output shape `parsePlayerStats()` produces was validated by
+inserting a real WhoScored player's real captured stat line (fetched
+live via Playwright from an actual finished WhoScored match) under a
+resolvable fixture/player/team id, confirming: the row inserts cleanly
+against every column's type/constraint, `player_season_match_stats`
+correctly aggregates it (avg_rating, recomputed pass_success), and
+`Standings.jsx` correctly renders it — headline Overview column, full
+Passing tab, goalkeeper-filtered Goalkeeping tab — then deleting the
+test row afterward (not real match data). `npm run build` clean; Deno
+suite 347/347 (this script isn't part of that suite — no Node test
+runner exists in this repo, same accepted gap as the frontend).
+
+**Deliberately not done**: no backfill of `fixture_player_status`
+(appearances/starts/minutes, ISSUE-2) even though `isFirstEleven` was
+visible on the same scraped player object — that's a separate,
+already-designed mechanism with its own status/timing semantics that
+would need cross-referencing substitution events too; flagged as a
+related follow-up opportunity, not folded into this change.
+
+## Phase 25 (lineup status) — fixture_player_status ingestion
+
+**What**: completed the previously-unpopulated `fixture_player_status`
+table (ISSUE-2) — the one remaining piece of the WhoScored data pipeline
+that had UI code and even schema scaffolding waiting for it, but zero
+rows in every environment. Full audit before writing any code:
+`frontend/src/hooks/useEntry.js` (`useFixturePlayerStatuses`, Pick 5's
+live "who's subbed on/off" view, with its own `sub_on > sub_off >
+starting > bench > not_in_squad` priority reducer), `usePredictorEntry.js`
+(`useFixturePlayerStatus`, raw per-fixture status map), `useMatchCentre.js`
+(best-effort appearances/starts/minutes derivation), `PlayerCard.jsx`/
+`Badge.jsx` (existing lineup-badge rendering, built in an earlier phase
+against zero real data), `GameweekPage.jsx`'s `AppearanceBadge`
+(Pick 5's separate live-event display, "Sub on 65'"/"Off 72'").
+
+**The real design tension, resolved without a schema change**: the
+table's own `status` enum already has 5 values —
+`starting|bench|sub_on|sub_off|not_in_squad` — and existing consumer
+code (`AppearanceBadge`) already legitimately depends on `sub_on`/
+`sub_off` as real, distinct EVENT-state values (Pick 5's live view wants
+"came on 65'", not a static "Bench"). The NEW requirement (Score
+Predictor/Match Centre) wants a STABLE lineup classification that a
+substitution never changes. Both meanings already fit the existing
+schema without any new column: `status` carries the event-state value
+(and legitimately advances from starting→sub_off or bench→sub_on), while
+the already-existing, separate `started` boolean is the durable "was
+this player in the Starting XI" fact, set once and never flipped.
+Lineup-classification consumers derive their own stable group from
+`started` (+ `status === 'not_in_squad'`), rather than `status` alone —
+implemented at the one place that actually needed it,
+`PlayerCard.jsx`'s `badgeStatus`.
+
+**Real bug found in the process**: `PlayerCard.jsx` (built in an earlier
+phase, before any real lineup data existed to test against) collapsed
+BOTH `sub_on` and `sub_off` to a "Bench" badge. A starter who's later
+subbed off was therefore shown as Bench — directly contradicting this
+phase's own explicit requirement ("a starter substituted off remains
+STARTER"). Fixed: `sub_off` now collapses to `starting`, `sub_on` still
+collapses to `bench`.
+
+**Lineup-availability signal — evidence-based, not invented**: live
+Playwright-inspected a real, not-yet-played Premier League fixture's own
+WhoScored page directly. Its `matchCentreData` is the literal JSON
+`null` until official lineups are published — not a partially-populated
+object, not an empty `players` array, the WHOLE value is `null`.
+`ws-live-events.js`'s own `scrapeMatchCentreData()` already treats this
+as "no data" (its brace-matching only recognizes a `{`-shaped value),
+and `runOnce()` already skips the whole fixture for that cycle when that
+happens. This means "lineups not yet available" is already, for free,
+exactly "fixture_player_status has zero rows for this fixture" — no new
+fixture-level column needed. `parseLineup()` additionally requires each
+side's own `players` array to be non-empty (not just non-null) before
+treating that side's lineup as confirmed, and only computes
+`not_in_squad` for a team whose lineup was actually confirmed this
+cycle — never for a team with no data yet.
+
+**Idempotency**: `parseLineup()` upserts on `(fixture_id, player_id)`
+every cycle, but SKIPS any player whose existing row is already
+`sub_on`/`sub_off` — `isFirstEleven` never changes over a match, so
+re-running the plain starting/bench upsert unconditionally every 60s
+would otherwise silently overwrite an already-applied substitution back
+to its pre-substitution value. `applySubstitutionUpdates()` cross-
+references the SAME `events` array `parseEvents()` already parsed this
+cycle (no second scrape) and only ever `UPDATE`s an existing row, never
+inserts — a substitution can only happen to a player who already has a
+lineup row.
+
+**Migration required, and why** (`037_fixture_player_status.sql`) — the
+schema itself didn't need a new design, but the table had never been
+captured by any migration at all (ISSUE-2's own original finding), so a
+fresh deployment would be missing it entirely. **Real, live-blocking
+discovery while writing it**: the table was owned by `supabase_admin`,
+not `postgres` (confirmed via `pg_roles` — `postgres` has
+`rolsuper=false` in this Supabase image; only `supabase_admin` is a true
+superuser), so every DDL statement beyond the already-no-op `CREATE
+TABLE IF NOT EXISTS` failed with "must be owner" — the same class of
+out-of-band-creation issue already documented for the retired
+prototype's own `supabase_admin`-owned `predictor_picks` table. Fixed
+with a one-time `alter table fixture_player_status owner to postgres`
+run via a `supabase_admin` session (the only role that could reassign
+it), bringing this table in line with every other table in the schema
+— done ONCE, locally, before the migration itself could run; if this
+table exists with the same ownership anomaly on any other deployment,
+that environment needs the identical one-time fix first.
+
+**Frontend**: `MatchCentreDrawer.jsx`'s Lineups tab never consumed
+`fixture_player_status` at all before this phase (confirmed by grep —
+only `PredictorFixtureCard.jsx` did) — now wired to the same
+`useFixturePlayerStatus` hook Score Predictor's goalscorer picker
+already uses, so both surfaces read the identical canonical data. Pick 5
+deliberately untouched — `useEntry.js`/`GameweekPage.jsx` still own
+their existing, different (event-state, multi-fixture) use of this
+table; redesigning Pick 5's gameweek-wide picker around fixture-specific
+lineup data was explicitly out of scope and not attempted.
+
+**Verified**: migration applied locally; RLS policy/trigger/realtime-
+publication entry all confirmed present afterward via direct
+`pg_policies`/`pg_trigger`/`pg_publication_tables` queries. Full
+classification round-trip verified against the real database using a
+real fixture (Arsenal vs Coventry) and its real rosters (29 + 27
+players): 11 starters + 7 bench per team upserted, 20 remaining roster
+players correctly marked `not_in_squad`, a simulated sub-off (starter)
+and sub-on (bench player) applied, a simulated "next poll cycle"
+re-upsert confirmed row count stayed at 56 (no duplicates) and neither
+substituted player's classification regressed — then live-verified in
+the actual running app (Score Predictor's goalscorer picker AND Match
+Centre's Lineups tab both correctly showed "Starting XI" for the
+subbed-off starter and "Bench" for the substitute who came on), and
+confirmed a fixture with zero lineup rows shows no badge at all (never
+a false "Not in squad"). All test data removed afterward — confirmed
+via a final empty-table query. `npm run build` clean; Deno suite
+347/347 (this script has no Node test runner — same accepted gap as the
+frontend; the classification logic was instead verified via the direct
+database round-trip above, per the explicit instruction not to
+introduce a new test framework for this).
+
+**Not done**: no automated Node-level unit test (no test runner exists
+for `frontend/scripts/`, and one wasn't introduced, per explicit
+instruction) — covered by direct integration verification instead, as
+above. No backfill of `started`/appearances-derived minutes data beyond
+what this phase's own ingestion produces going forward — historical
+fixtures that were never scraped stay exactly as empty as they already
+were.

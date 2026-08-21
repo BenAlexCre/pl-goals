@@ -26,6 +26,29 @@ export function useLeagueStandings(leagueId, seasonId) {
   })
 }
 
+// Phase 25 — Standings page. `league_team_standings` only carries
+// `team_id` (a deliberate, minimal view — see its own migration comment);
+// this resolves those ids to real team names/crests for display, exactly
+// the same plain-query-not-a-view reasoning already used for
+// useTeamForm/useTeamHomeAwayRecord above (one league's ~20 teams is
+// cheap, no aggregation needed).
+export function useLeagueTeams(leagueId, seasonId) {
+  return useQuery({
+    queryKey: ['league-teams', leagueId, seasonId],
+    enabled: !!leagueId && !!seasonId,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('teams')
+        .select('id, name, short_name, crest_url')
+        .eq('league_id', leagueId)
+        .eq('season_id', seasonId)
+      if (error) throw error
+      return data ?? []
+    },
+  })
+}
+
 // Fixture difficulty — a plain, defensible heuristic over real league
 // position (top 6 / bottom 6), never an invented external rating. Pass
 // the OPPONENT's standings row (or null if the league has no completed
@@ -297,6 +320,156 @@ export function usePlayerRecentAppearances(playerId, limit = 5) {
       // condition worth surfacing to the user.
       if (error) return []
       return data ?? []
+    },
+  })
+}
+
+// Phase 25 — Standings page's "Player Statistics" table. Bulk equivalent
+// of usePlayerSeasonStats: one query per league/season (not one per
+// player) returning every player currently rostered to a team in this
+// league, with real goals/assists/cards from player_season_stats (0
+// where a player has recorded none — a real, legitimate zero, not a data
+// gap) joined in. Starts/minutesPlayed use the exact same derivation as
+// usePlayerSeasonStats (best-effort off fixture_player_status), just
+// computed once per league instead of once per player.
+//
+// Phase 25 (review pass) — shots/passes/tackles/aerials/rating now come
+// from `player_season_match_stats` (migration 036), aggregated from
+// WhoScored's own already-scraped per-player match stats
+// (`ws-live-events.js` now parses `matchData.home/away.players[].stats`,
+// not just `incidentEvents`). Same best-effort pattern as appearances:
+// every one of these fields is null (never a fabricated 0) whenever this
+// player has no rows there yet — true for every player before
+// `ws-live-events.js` has run against a fixture they played in (e.g. an
+// entire season with no matches played yet).
+export function useLeaguePlayerStats(leagueId, seasonId) {
+  return useQuery({
+    queryKey: ['league-player-stats', leagueId, seasonId],
+    enabled: !!leagueId && !!seasonId,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data: rosterRows, error: rosterError } = await supabase
+        .from('player_team_history')
+        .select(`
+          player_id, created_at,
+          players (id, display_name, position, photo_url),
+          team:teams!inner (id, name, short_name, crest_url, league_id, season_id)
+        `)
+        .eq('is_active', true)
+        .eq('team.league_id', leagueId)
+        .eq('team.season_id', seasonId)
+      if (rosterError) throw rosterError
+
+      // Found live: a handful of players have more than one
+      // `is_active = true` player_team_history row within the SAME
+      // league/season (e.g. a mid-season transfer whose old row was never
+      // retired) — a real data-hygiene gap, not something this hook can
+      // fix. Left undeduped, this produced two rows for the same player
+      // in the table (and a React duplicate-key warning). One row per
+      // player is kept — whichever is most recently created, on the
+      // assumption a later `player_team_history` row is more likely to
+      // reflect the player's current club after a transfer than an
+      // earlier, stale one.
+      const rosterByPlayer = new Map()
+      for (const row of rosterRows ?? []) {
+        const existing = rosterByPlayer.get(row.player_id)
+        if (!existing || new Date(row.created_at) > new Date(existing.created_at)) {
+          rosterByPlayer.set(row.player_id, row)
+        }
+      }
+      const roster = [...rosterByPlayer.values()]
+
+      const { data: statsRows, error: statsError } = await supabase
+        .from('player_season_stats')
+        .select('player_id, goals, assists, yellow_cards, red_cards')
+        .eq('season_id', seasonId)
+      if (statsError) throw statsError
+      const statsByPlayer = new Map((statsRows ?? []).map((r) => [r.player_id, r]))
+
+      // Best-effort — player_season_match_stats is empty until
+      // ws-live-events.js has scraped at least one fixture this player
+      // appeared in (e.g. the whole current season before matchday one).
+      // A failed/empty read must never block the reliable goals/assists
+      // rows above.
+      const { data: matchStatsRows, error: matchStatsError } = await supabase
+        .from('player_season_match_stats')
+        .select('*')
+        .eq('season_id', seasonId)
+      const matchStatsByPlayer = new Map(
+        (!matchStatsError && matchStatsRows ? matchStatsRows : []).map((r) => [r.player_id, r])
+      )
+      const matchStatsAvailable = matchStatsByPlayer.size > 0
+
+      // Best-effort appearances/starts/minutes — same fixture_player_status
+      // caveat as usePlayerSeasonStats (empty table today, ISSUE-2). A
+      // failed/empty read must never block the reliable goals/assists
+      // rows above; an empty result leaves every player's fields at null
+      // so the UI can hide those columns entirely rather than show a
+      // false 0.
+      const { data: statusRows, error: statusError } = await supabase
+        .from('fixture_player_status')
+        .select(`
+          player_id, status, started, came_on_minute, went_off_minute,
+          fixtures!inner(minute, status, gameweeks!inner(league_id, season_id))
+        `)
+        .eq('fixtures.gameweeks.league_id', leagueId)
+        .eq('fixtures.gameweeks.season_id', seasonId)
+      const appearancesByPlayer = new Map()
+      const startsByPlayer = new Map()
+      const minutesByPlayer = new Map()
+      if (!statusError && statusRows && statusRows.length > 0) {
+        for (const row of statusRows) {
+          if (row.status === 'bench' || row.status === 'not_in_squad') continue
+          appearancesByPlayer.set(row.player_id, (appearancesByPlayer.get(row.player_id) ?? 0) + 1)
+          if (row.started) startsByPlayer.set(row.player_id, (startsByPlayer.get(row.player_id) ?? 0) + 1)
+
+          const fixtureFinalMinute = row.fixtures?.status === 'finished' ? 90 : (row.fixtures?.minute ?? 90)
+          let minutes = fixtureFinalMinute
+          if (row.status === 'sub_on') {
+            const off = row.went_off_minute ?? fixtureFinalMinute
+            minutes = Math.max(0, off - (row.came_on_minute ?? 0))
+          } else if (row.status === 'sub_off') {
+            minutes = row.went_off_minute ?? 0
+          }
+          minutesByPlayer.set(row.player_id, (minutesByPlayer.get(row.player_id) ?? 0) + minutes)
+        }
+      }
+      const appearancesAvailable = appearancesByPlayer.size > 0
+
+      return (roster ?? []).map((row) => {
+        const stats = statsByPlayer.get(row.player_id)
+        const ms = matchStatsByPlayer.get(row.player_id)
+        return {
+          playerId: row.player_id,
+          displayName: row.players?.display_name ?? 'Unknown',
+          position: row.players?.position ?? null,
+          photoUrl: row.players?.photo_url ?? null,
+          team: row.team,
+          goals: stats?.goals ?? 0,
+          assists: stats?.assists ?? 0,
+          yellowCards: stats?.yellow_cards ?? 0,
+          redCards: stats?.red_cards ?? 0,
+          appearances: appearancesAvailable ? (appearancesByPlayer.get(row.player_id) ?? 0) : null,
+          starts: appearancesAvailable ? (startsByPlayer.get(row.player_id) ?? 0) : null,
+          minutesPlayed: appearancesAvailable ? (minutesByPlayer.get(row.player_id) ?? 0) : null,
+          rating: matchStatsAvailable ? (ms?.avg_rating ?? null) : null,
+          shotsTotal: matchStatsAvailable ? (ms?.shots_total ?? 0) : null,
+          shotsOnTarget: matchStatsAvailable ? (ms?.shots_on_target ?? 0) : null,
+          keyPasses: matchStatsAvailable ? (ms?.key_passes ?? 0) : null,
+          passesTotal: matchStatsAvailable ? (ms?.passes_total ?? 0) : null,
+          passesAccurate: matchStatsAvailable ? (ms?.passes_accurate ?? 0) : null,
+          passSuccess: matchStatsAvailable ? (ms?.pass_success ?? null) : null,
+          foulsCommitted: matchStatsAvailable ? (ms?.fouls_committed ?? 0) : null,
+          offsides: matchStatsAvailable ? (ms?.offsides_caught ?? 0) : null,
+          tacklesTotal: matchStatsAvailable ? (ms?.tackles_total ?? 0) : null,
+          tacklesWon: matchStatsAvailable ? (ms?.tackles_won ?? 0) : null,
+          interceptions: matchStatsAvailable ? (ms?.interceptions ?? 0) : null,
+          clearances: matchStatsAvailable ? (ms?.clearances ?? 0) : null,
+          aerialsTotal: matchStatsAvailable ? (ms?.aerials_total ?? 0) : null,
+          aerialsWon: matchStatsAvailable ? (ms?.aerials_won ?? 0) : null,
+          totalSaves: matchStatsAvailable ? (ms?.total_saves ?? 0) : null,
+        }
+      })
     },
   })
 }

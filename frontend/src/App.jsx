@@ -22,6 +22,7 @@ import SuperAdminUsers from './pages/super-admin/Users'
 import SuperAdminUserDetail from './pages/super-admin/UserDetail'
 import SuperAdminRoles from './pages/super-admin/Roles'
 import SuperAdminAuditLog from './pages/super-admin/AuditLog'
+import Standings from './pages/Standings'
 import Profile from './pages/Profile'
 import NotFound from './pages/NotFound'
 import NotAuthorized from './pages/NotAuthorized'
@@ -133,6 +134,7 @@ export default function App() {
           <Route path="/pot/:potId/manage" element={<PotManage />} />
           <Route path="/pot/:potId/gameweek/:gameweekId" element={<GameweekPage />} />
           <Route path="/pot/:potId/picks" element={<PicksPage />} />
+          <Route path="/standings" element={<Standings />} />
           <Route element={<AdminRoute />}>
             <Route path="/admin" element={<AdminDashboard />} />
             <Route path="/admin/payments" element={<AdminPayments />} />

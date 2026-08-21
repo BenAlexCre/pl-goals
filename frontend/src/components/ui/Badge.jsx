@@ -16,6 +16,14 @@ const configs = {
   member:   'bg-white/8 text-white/50 border-white/10',
   alive:      'bg-accent/15 text-accent border-accent/30',
   eliminated: 'bg-red-goal/15 text-red-goal border-red-goal/30',
+  // Phase 25 — official lineup status (fixture_player_status.status).
+  // sub_on/sub_off both read as "bench" here (a player who came off the
+  // bench or was substituted out is, for selection purposes, not part of
+  // the starting XI) — the raw distinction is preserved in the data,
+  // just not worth a 4th visual style for this use.
+  starting:    'bg-accent/15 text-accent border-accent/30',
+  bench:       'bg-amber/15 text-amber border-amber/30',
+  not_in_squad:'bg-white/5 text-white/30 border-white/8',
 }
 
 const defaultLabels = {
@@ -24,6 +32,7 @@ const defaultLabels = {
   paid: '✓ Paid', unpaid: '✗ Unpaid', live: '● Live', upcoming: 'Upcoming',
   completed: 'Final', admin: 'Admin', member: 'Member',
   alive: '● Alive', eliminated: '✗ Eliminated',
+  starting: 'Starting XI', bench: 'Bench', not_in_squad: 'Not in squad',
 }
 
 export default function Badge({ status, children, className = '' }) {

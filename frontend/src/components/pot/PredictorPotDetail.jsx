@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Target, Lock, Trophy, Star, Settings, Check, Clock } from 'lucide-react'
+import { Target, Lock, Trophy, Star, Settings, Check, Clock, ChevronUp } from 'lucide-react'
 import Card from '../ui/Card'
 import Button from '../ui/Button'
 import Badge from '../ui/Badge'
@@ -10,6 +10,7 @@ import CountdownTimer from '../ui/CountdownTimer'
 import Toast from '../ui/Toast'
 import LeaderboardTable from '../leaderboard/LeaderboardTable'
 import PredictorFixtureCard from './predictor/PredictorFixtureCard'
+import PredictorSummaryPanel from './predictor/PredictorSummaryPanel'
 import { useGameweeksForPot } from '../../hooks/useAdmin'
 import {
   usePredictorEntry,
@@ -57,6 +58,15 @@ export default function PredictorPotDetail({ pot, potId }) {
   const [expandedFixtureId, setExpandedFixtureId] = useState('')
   const [message, setMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
+  // Phase 25 — the locally-staged, not-yet-saved prediction (set when a
+  // fixture card's own "Use this prediction"/"Update selection" is
+  // clicked). The persistent PredictorSummaryPanel is what actually saves
+  // it now — this is the same "select first, review + save in one place"
+  // flow Pick 5's own picker already uses (PicksSummaryPanel.jsx), not a
+  // new interaction concept. `{ fixtureId, homeScore, awayScore,
+  // goalscorerId, goalscorerName }`, or null when nothing is staged.
+  const [draft, setDraft] = useState(null)
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false)
 
   useEffect(() => {
     if (!gameweeks.length || selectedGameweekId) return
@@ -67,8 +77,11 @@ export default function PredictorPotDetail({ pot, potId }) {
   // Switching gameweeks always starts collapsed — the collapsed view
   // already shows the saved prediction clearly (Part 3), so there's
   // nothing to gain by force-opening the editor on every navigation.
+  // Any staged-but-unsaved draft belonged to the previous gameweek's
+  // fixtures and must not leak into the next one.
   useEffect(() => {
     setExpandedFixtureId('')
+    setDraft(null)
   }, [selectedGameweekId])
 
   const { data: fixtures = [], isLoading: fixturesLoading } = useFixturesForGameweek(
@@ -104,26 +117,45 @@ export default function PredictorPotDetail({ pot, potId }) {
     }
   }
 
-  async function handleSave({ fixtureId, homeScore, awayScore, goalscorerId }) {
+  // Phase 25 — stages a selection from a fixture card into the persistent
+  // panel; does NOT touch the network. Collapses the card immediately
+  // (the panel is now the one place showing "what would be saved"),
+  // matching Pick 5's own "tap to add, review + save in the panel" flow.
+  function handleStage(draftPayload) {
+    setDraft(draftPayload)
+    setExpandedFixtureId('')
+  }
+
+  // The real save — now triggered by PredictorSummaryPanel's own button,
+  // reading from whatever is currently staged in `draft`. Business logic
+  // (the submit-predictor-picks call, its inputs) is byte-for-byte
+  // unchanged from before this phase — only when it fires moved.
+  async function handleSave() {
+    if (!draft) return
     try {
       setErrorMessage('')
       setMessage('')
       await submitPicks.mutateAsync({
         gameEntryId: entry.id,
         gameweekId: Number(selectedGameweekId),
-        fixtureId,
-        predictedHomeScore: homeScore,
-        predictedAwayScore: awayScore,
-        goalscorerPlayerId: goalscorerId,
+        fixtureId: draft.fixtureId,
+        predictedHomeScore: draft.homeScore,
+        predictedAwayScore: draft.awayScore,
+        goalscorerPlayerId: draft.goalscorerId,
         potId,
       })
       setMessage('Prediction saved')
-      // Collapse back to the compact view so the just-saved score is
-      // immediately visible without a second click (Part 10).
-      setExpandedFixtureId('')
+      setDraft(null)
+      setMobilePanelOpen(false)
     } catch (err) {
       setErrorMessage(err.message || 'Failed to save prediction')
     }
+  }
+
+  function handleEditFromPanel() {
+    const fixtureId = draft?.fixtureId ?? currentPick?.fixture_id
+    if (fixtureId) setExpandedFixtureId(String(fixtureId))
+    setMobilePanelOpen(false)
   }
 
   return (
@@ -297,34 +329,93 @@ export default function PredictorPotDetail({ pot, potId }) {
               ) : fixtures.length === 0 ? (
                 <EmptyState icon={Target} title="No fixtures" description="This gameweek has no fixtures yet." />
               ) : (
-                <div className="space-y-3">
-                  {fixtures.map((fixture) => {
-                    const isYourPick = !!currentPick && String(currentPick.fixture_id) === String(fixture.id)
-                    return (
-                      <PredictorFixtureCard
-                        key={fixture.id}
-                        fixture={fixture}
-                        leagueId={pot.league_id}
-                        seasonId={pot.season_id}
-                        competitionName={pot.leagues?.name}
-                        isYourPick={isYourPick}
-                        savedPick={isYourPick ? currentPick : null}
-                        expanded={String(fixture.id) === expandedFixtureId}
-                        onToggleExpand={() =>
-                          setExpandedFixtureId((current) => (current === String(fixture.id) ? '' : String(fixture.id)))
-                        }
-                        canPick={canPick}
-                        saving={submitPicks.isPending}
+                // Phase 25 — same md:grid + sticky-sidebar scaffold Pick 5's
+                // own picker uses (PotDetail.jsx), so the persistent
+                // PredictorSummaryPanel stays visible alongside the fixture
+                // list on desktop/tablet without a second, parallel layout
+                // system. Mobile gets the sticky bottom sheet below instead
+                // (same md breakpoint, same reasoning, see there for why).
+                <div className="md:grid md:grid-cols-[1fr_320px] md:items-start md:gap-5">
+                  <div className="space-y-3">
+                    {fixtures.map((fixture) => {
+                      const isYourPick = !!currentPick && String(currentPick.fixture_id) === String(fixture.id)
+                      return (
+                        <PredictorFixtureCard
+                          key={fixture.id}
+                          fixture={fixture}
+                          leagueId={pot.league_id}
+                          seasonId={pot.season_id}
+                          competitionName={pot.leagues?.name}
+                          isYourPick={isYourPick}
+                          savedPick={isYourPick ? currentPick : null}
+                          expanded={String(fixture.id) === expandedFixtureId}
+                          onToggleExpand={() =>
+                            setExpandedFixtureId((current) => (current === String(fixture.id) ? '' : String(fixture.id)))
+                          }
+                          canPick={canPick}
+                          onSave={handleStage}
+                        />
+                      )
+                    })}
+                  </div>
+
+                  <div className="mt-5 hidden md:sticky md:top-4 md:mt-0 md:block">
+                    <Card className="p-4">
+                      <PredictorSummaryPanel
+                        draft={draft}
+                        savedPick={currentPick}
+                        fixture={draft ? fixtures.find((f) => String(f.id) === String(draft.fixtureId)) : currentPick?.fixtures}
+                        gameweekNumber={selectedGameweek?.number}
+                        gameweekWide={pot.predictor_scorer_scope === 'gameweek_wide'}
+                        goalscorerName={draft ? draft.goalscorerName : currentPick?.goalscorer?.display_name}
+                        onEdit={handleEditFromPanel}
                         onSave={handleSave}
+                        saving={submitPicks.isPending}
+                        deadlineClosed={deadlinePassed}
                       />
-                    )
-                  })}
+                    </Card>
+                  </div>
                 </div>
               )}
             </div>
           </Card>
         </section>
       ) : null}
+
+      {/* Mobile sticky bottom sheet — same PredictorSummaryPanel as the
+          desktop sidebar, collapsed to a tap-to-expand bar, matching
+          Pick 5's own PotDetail.jsx pattern exactly (same md:hidden
+          breakpoint, sits directly above BottomNav). Only relevant once
+          fixtures are actually being shown for editing. */}
+      {entry && !deadlinePassed && !currentPick?.locked_at && fixtures.length > 0 && (
+        <div className="fixed inset-x-0 bottom-16 z-40 px-4 md:hidden">
+          {mobilePanelOpen && (
+            <div className="mb-2 max-h-[55vh] overflow-y-auto rounded-2xl border border-white/10 bg-pitch-950/95 p-4 shadow-card backdrop-blur-lg">
+              <PredictorSummaryPanel
+                draft={draft}
+                savedPick={currentPick}
+                fixture={draft ? fixtures.find((f) => String(f.id) === String(draft.fixtureId)) : currentPick?.fixtures}
+                gameweekNumber={selectedGameweek?.number}
+                gameweekWide={pot.predictor_scorer_scope === 'gameweek_wide'}
+                goalscorerName={draft ? draft.goalscorerName : currentPick?.goalscorer?.display_name}
+                onEdit={handleEditFromPanel}
+                onSave={handleSave}
+                saving={submitPicks.isPending}
+                deadlineClosed={deadlinePassed}
+              />
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setMobilePanelOpen((v) => !v)}
+            aria-expanded={mobilePanelOpen}
+            className="flex w-full items-center justify-between rounded-2xl border border-accent/30 bg-pitch-950/95 px-4 py-3 text-sm font-semibold text-accent shadow-card backdrop-blur-lg"
+          >
+            <span>{(draft ?? currentPick) ? 1 : 0} / 1 selected</span>
+            <ChevronUp size={16} className={`transition-transform ${mobilePanelOpen ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+      )}
 
       {/* Deliberately labeled "Live fixtures", not "& standings" — see
           LmsPotDetail.jsx's identical note: PredictorEngine.generateStandings()

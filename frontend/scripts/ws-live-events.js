@@ -280,6 +280,264 @@ async function upsertEvents(events) {
   return events.length;
 }
 
+// ─── Step 5b: player stats (Phase 25, review pass) ───────────────────────────
+// `matchCentreData.home/away.players[].stats` is the SAME response
+// `parseEvents()` above already reads — this only reads MORE of it. Each
+// stat is a per-minute-keyed object (WhoScored's live-progress
+// representation); only the value at the highest minute key is a real
+// match total once stored, so `finalValue()` is the one place that
+// collapses "progress over time" into "the match stat."
+
+function finalValue(perMinuteObj) {
+  if (!perMinuteObj || typeof perMinuteObj !== 'object') return null;
+  const minutes = Object.keys(perMinuteObj)
+    .map(Number)
+    .filter((n) => !Number.isNaN(n));
+  if (minutes.length === 0) return null;
+  const last = Math.max(...minutes);
+  const value = perMinuteObj[String(last)];
+  return typeof value === 'number' ? value : null;
+}
+
+function parsePlayerStats(matchData, dbFixtureId, playerMap, teamMap) {
+  const rows = [];
+
+  for (const side of ['home', 'away']) {
+    const teamData = matchData?.[side];
+    if (!teamData) continue;
+
+    const wsTeamId = teamData.teamId ? String(teamData.teamId) : null;
+    const dbTeamId = wsTeamId ? (teamMap.get(wsTeamId) ?? null) : null;
+    if (!dbTeamId) continue; // unmapped team — skip rather than guess
+
+    for (const p of teamData.players ?? []) {
+      const wsPlayerId = p.playerId ? String(p.playerId) : null;
+      const dbPlayerId = wsPlayerId ? (playerMap.get(wsPlayerId) ?? null) : null;
+      if (!dbPlayerId) continue; // unmapped player — skip rather than guess
+
+      const s = p.stats ?? {};
+      rows.push({
+        fixture_id: dbFixtureId,
+        player_id: dbPlayerId,
+        team_id: dbTeamId,
+        rating: finalValue(s.ratings),
+        is_first_eleven: !!p.isFirstEleven,
+        is_man_of_the_match: !!p.isManOfTheMatch,
+        shots_total: finalValue(s.shotsTotal),
+        shots_on_target: finalValue(s.shotsOnTarget),
+        shots_off_target: finalValue(s.shotsOffTarget),
+        shots_blocked: finalValue(s.shotsBlocked),
+        key_passes: finalValue(s.passesKey),
+        dribbles_won: finalValue(s.dribblesWon),
+        dribbles_attempted: finalValue(s.dribblesAttempted),
+        dribble_success: finalValue(s.dribbleSuccess),
+        dispossessed: finalValue(s.dispossessed),
+        passes_total: finalValue(s.passesTotal),
+        passes_accurate: finalValue(s.passesAccurate),
+        pass_success: finalValue(s.passSuccess),
+        fouls_committed: finalValue(s.foulsCommited),
+        offsides_caught: finalValue(s.offsidesCaught),
+        tackles_total: finalValue(s.tacklesTotal),
+        tackles_won: finalValue(s.tackleSuccessful),
+        tackle_success: finalValue(s.tackleSuccess),
+        interceptions: finalValue(s.interceptions),
+        clearances: finalValue(s.clearances),
+        dribbled_past: finalValue(s.dribbledPast),
+        aerials_total: finalValue(s.aerialsTotal),
+        aerials_won: finalValue(s.aerialsWon),
+        aerial_success: finalValue(s.aerialSuccess),
+        touches: finalValue(s.touches),
+        errors: finalValue(s.errors),
+        total_saves: finalValue(s.totalSaves),
+        parried_safe: finalValue(s.parriedSafe),
+        parried_danger: finalValue(s.parriedDanger),
+        raw_stats: s,
+        synced_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  return rows;
+}
+
+async function upsertPlayerStats(rows) {
+  if (!rows.length) return 0;
+
+  const { error } = await supabase
+    .from('fixture_player_match_stats')
+    .upsert(rows, { onConflict: 'fixture_id,player_id', ignoreDuplicates: false });
+
+  if (error) {
+    console.error(`    Player-stats upsert error: ${error.message}`);
+    return 0;
+  }
+  return rows.length;
+}
+
+// Marks a fixture's stats as synced — gives real purpose to the
+// stats_status/stats_last_synced_at columns migration 032 found already
+// live on `fixtures` but unused by any application code ("scaffolding for
+// a stats-sync lifecycle that was never finished"). Best-effort: a
+// failure here must never fail the actual stats upsert above.
+async function markFixtureStatsSynced(dbFixtureId) {
+  const { error } = await supabase
+    .from('fixtures')
+    .update({ stats_status: 'synced', stats_last_synced_at: new Date().toISOString() })
+    .eq('id', dbFixtureId);
+  if (error) console.warn(`    Could not update fixtures.stats_status: ${error.message}`);
+}
+
+// ─── Step 6: lineup status (Phase 25, lineup status) ─────────────────────────
+//
+// A real, live-verified signal (not an assumption): for a fixture whose
+// official lineups haven't been published yet, `matchCentreData` itself is
+// the JSON literal `null` — confirmed by inspecting a real, not-yet-played
+// Premier League fixture's own WhoScored page directly. `scrapeMatchCentreData()`
+// already returns `null` for that (its own brace-matching only recognizes
+// a `{`-shaped value right after the `matchCentreData:` key), and runOnce()
+// already skips the whole fixture for that poll cycle when that happens —
+// so by the time this function ever runs, `matchData` is guaranteed
+// non-null. This function additionally requires each side's own `players`
+// array to be non-empty before treating THAT side's lineup as "confirmed"
+// — defensive, not just an "at least 11 players" headcount: an empty/
+// missing array simply means this side isn't confirmed yet, no status is
+// written for it, and no player is called Not in Squad on the strength of
+// an incomplete response.
+//
+// Lineup CLASSIFICATION (`status: starting | bench`, and the `started`
+// boolean) is written once and never regressed by a later substitution —
+// a starter who's later subbed off keeps `status: starting`/`started:
+// true` forever. This function skips any player whose EXISTING row is
+// already 'sub_on'/'sub_off' (set by applySubstitutionUpdates() in a
+// previous cycle) rather than re-asserting 'starting'/'bench' over it —
+// `matchData.players[].isFirstEleven` doesn't change over the match, so
+// re-running this upsert every poll cycle would otherwise silently
+// overwrite an already-applied substitution back to its pre-substitution
+// value.
+function parseLineup(matchData, dbFixtureId, playerMap, teamMap, existingStatusByPlayer) {
+  const rows = [];
+  const confirmedTeamDbIds = new Set();
+  const seenPlayerDbIds = new Set();
+
+  for (const side of ['home', 'away']) {
+    const teamData = matchData?.[side];
+    const players = teamData?.players;
+    if (!Array.isArray(players) || players.length === 0) continue; // not confirmed yet for this side
+
+    const wsTeamId = teamData.teamId ? String(teamData.teamId) : null;
+    const dbTeamId = wsTeamId ? (teamMap.get(wsTeamId) ?? null) : null;
+    if (!dbTeamId) continue; // unmapped team — skip rather than guess
+
+    confirmedTeamDbIds.add(dbTeamId);
+
+    for (const p of players) {
+      const wsPlayerId = p.playerId ? String(p.playerId) : null;
+      const dbPlayerId = wsPlayerId ? (playerMap.get(wsPlayerId) ?? null) : null;
+      if (!dbPlayerId) continue; // unmapped player — skip rather than guess
+
+      seenPlayerDbIds.add(dbPlayerId);
+
+      const existing = existingStatusByPlayer.get(dbPlayerId);
+      if (existing === 'sub_on' || existing === 'sub_off') continue; // never regress an already-advanced status
+
+      rows.push({
+        fixture_id: dbFixtureId,
+        player_id: dbPlayerId,
+        team_id: dbTeamId,
+        status: p.isFirstEleven ? 'starting' : 'bench',
+        started: !!p.isFirstEleven,
+      });
+    }
+  }
+
+  return { rows, confirmedTeamDbIds, seenPlayerDbIds };
+}
+
+async function getExistingLineupStatuses(dbFixtureId) {
+  const { data, error } = await supabase
+    .from('fixture_player_status')
+    .select('player_id, status')
+    .eq('fixture_id', dbFixtureId);
+  if (error) {
+    console.warn(`    Could not read existing fixture_player_status: ${error.message}`);
+    return new Map();
+  }
+  return new Map((data ?? []).map((r) => [r.player_id, r.status]));
+}
+
+// A roster player (player_team_history, active) for a CONFIRMED team who
+// wasn't named anywhere in that team's own confirmed squad list this
+// cycle is genuinely not in today's matchday squad — never applied to a
+// team whose lineup isn't confirmed yet (confirmedTeamDbIds only contains
+// teams parseLineup() actually saw a non-empty players array for).
+async function computeNotInSquadRows(dbFixtureId, confirmedTeamDbIds, seenPlayerDbIds, existingStatusByPlayer) {
+  if (confirmedTeamDbIds.size === 0) return [];
+
+  const { data, error } = await supabase
+    .from('player_team_history')
+    .select('player_id, team_id')
+    .eq('is_active', true)
+    .in('team_id', [...confirmedTeamDbIds]);
+  if (error) {
+    console.warn(`    Could not read roster for not-in-squad check: ${error.message}`);
+    return [];
+  }
+
+  const rows = [];
+  for (const row of data ?? []) {
+    if (seenPlayerDbIds.has(row.player_id)) continue;
+    if (existingStatusByPlayer.get(row.player_id) === 'not_in_squad') continue; // already recorded, no-op
+    rows.push({
+      fixture_id: dbFixtureId,
+      player_id: row.player_id,
+      team_id: row.team_id,
+      status: 'not_in_squad',
+      started: false,
+    });
+  }
+  return rows;
+}
+
+async function upsertLineupRows(rows) {
+  if (!rows.length) return 0;
+  const { error } = await supabase
+    .from('fixture_player_status')
+    .upsert(rows, { onConflict: 'fixture_id,player_id', ignoreDuplicates: false });
+  if (error) {
+    console.error(`    Lineup upsert error: ${error.message}`);
+    return 0;
+  }
+  return rows.length;
+}
+
+// Cross-references the SAME `events` this cycle already parsed via
+// parseEvents() above (no second scrape/query) — sub_on/sub_off events
+// UPDATE the player's existing row (never insert; a substitution can only
+// happen to a player who already has a lineup row) with the event-state
+// overlay + minute, deliberately NOT touching `started` (the durable
+// lineup fact) either direction.
+async function applySubstitutionUpdates(events, dbFixtureId) {
+  let updated = 0;
+  for (const ev of events) {
+    if (ev.event_type !== 'sub_on' && ev.event_type !== 'sub_off') continue;
+    if (!ev.player_id) continue;
+
+    const minuteColumn = ev.event_type === 'sub_on' ? 'came_on_minute' : 'went_off_minute';
+    const { error, count } = await supabase
+      .from('fixture_player_status')
+      .update({ status: ev.event_type, [minuteColumn]: ev.minute }, { count: 'exact' })
+      .eq('fixture_id', dbFixtureId)
+      .eq('player_id', ev.player_id);
+
+    if (error) {
+      console.warn(`    Could not apply substitution update for player ${ev.player_id}: ${error.message}`);
+      continue;
+    }
+    if (count > 0) updated += count;
+  }
+  return updated;
+}
+
 // ─── Step 3b: scrape with one retry — a single failed page load/network blip
 // shouldn't cost this fixture an entire 1-minute cycle ────────────────────────
 
@@ -333,6 +591,34 @@ async function runOnce(page, playerMap, teamMap) {
       const upserted = await upsertEvents(events);
       console.log(`    Upserted ${upserted} rows into fixture_events`);
       if (upserted > 0) health.lastDbWriteAt = new Date().toISOString();
+
+      // Lineup status is intentionally isolated in its own try/catch,
+      // separate from events/player-stats above and below — a lineup
+      // parsing problem for this fixture must not prevent the (already
+      // proven, unrelated) events/stats ingestion from completing for the
+      // exact same fixture this same cycle.
+      try {
+        const existingStatusByPlayer = await getExistingLineupStatuses(dbId);
+        const { rows: lineupRows, confirmedTeamDbIds, seenPlayerDbIds } =
+          parseLineup(matchData, dbId, playerMap, teamMap, existingStatusByPlayer);
+        const notInSquadRows = await computeNotInSquadRows(dbId, confirmedTeamDbIds, seenPlayerDbIds, existingStatusByPlayer);
+        const lineupUpserted = await upsertLineupRows([...lineupRows, ...notInSquadRows]);
+        const subUpdated = await applySubstitutionUpdates(events, dbId);
+        if (lineupUpserted > 0 || subUpdated > 0) {
+          console.log(`    Lineup: ${lineupUpserted} row(s) upserted, ${subUpdated} substitution update(s)`);
+          health.lastDbWriteAt = new Date().toISOString();
+        }
+      } catch (lineupErr) {
+        console.error(`    ERROR processing lineup status for WS ${wsId}: ${lineupErr.message}`);
+      }
+
+      const playerStatsRows = parsePlayerStats(matchData, dbId, playerMap, teamMap);
+      const statsUpserted = await upsertPlayerStats(playerStatsRows);
+      console.log(`    Upserted ${statsUpserted} player-stat rows`);
+      if (statsUpserted > 0) {
+        health.lastDbWriteAt = new Date().toISOString();
+        await markFixtureStatsSynced(dbId);
+      }
 
       await randomDelay(2000, 4000);
     } catch (err) {

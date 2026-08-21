@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Users, PlusCircle, ChevronDown } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { useCreatePot } from '../../hooks/usePots'
@@ -190,12 +190,51 @@ const FIELD_ORDER = [
 export default function PotManager() {
   const { user } = useAuthStore()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [pots, setPots] = useState([])
   const [leagues, setLeagues] = useState([])
   const [gameweeksForLeague, setGameweeksForLeague] = useState([])
   const [gameweeksLoading, setGameweeksLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState('')
+  // Phase 25 — the create-pot form used to render unconditionally, ahead
+  // of "Your pots", meaning every visit to /pots opened on a ~400-line
+  // form instead of the pots the user already belongs to. Collapsed by
+  // default; same local-boolean + rotating-chevron disclosure pattern
+  // already established in PredictorFixtureCard.jsx, not a new UI concept.
+  // Item 16 — a direct `?create=true` link (Dashboard's own "Create a
+  // competition" quick action) opens it pre-expanded instead of making the
+  // user find and click the disclosure themselves; plain `/pots` still
+  // lands collapsed, unchanged.
+  const wantsCreateExpanded = searchParams.get('create') === 'true'
+  const [showCreateForm, setShowCreateForm] = useState(wantsCreateExpanded)
+  const createFormRef = useRef(null)
+
+  useEffect(() => {
+    if (!wantsCreateExpanded) return
+    setShowCreateForm(true)
+    // Deferred one frame so this measures the section's position AFTER
+    // the expanded form has actually painted, not the collapsed layout
+    // from the render that's still in flight. A plain `scrollIntoView`
+    // (block: 'start') was found live to align the section's top edge to
+    // viewport y=0 — exactly where TopNav's own `sticky top-0` header
+    // sits, so the "Create pot" heading landed hidden behind it. This
+    // scrolls to that same top edge minus TopNav's real height (h-16 =
+    // 64px) plus a little breathing room, so the heading and the Pot
+    // name field are both visible just below the nav bar, never cut off.
+    const frame = requestAnimationFrame(() => {
+      const el = createFormRef.current
+      if (!el) return
+      const TOP_NAV_OFFSET = 80
+      const top = el.getBoundingClientRect().top + window.scrollY - TOP_NAV_OFFSET
+      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+    })
+    return () => cancelAnimationFrame(frame)
+    // Only ever reacts to the query param itself — never re-collapses a
+    // form the user has already opened manually, and never re-fires on
+    // unrelated re-renders (pots/leagues finishing their own load, etc.).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsCreateExpanded])
 
   // Basics
   const [name, setName] = useState('')
@@ -704,10 +743,72 @@ export default function PotManager() {
       </section>
 
       <section>
-        <Card className="p-5">
-          <h2 className="mb-4 text-lg font-semibold text-white">Create pot</h2>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">Your pots</h2>
+          <span className="text-sm text-white/45">{pots.length} total</span>
+        </div>
 
-          <form onSubmit={handleCreatePot} noValidate className="space-y-6">
+        {loading ? (
+          <div className="flex justify-center py-8">
+            <Spinner />
+          </div>
+        ) : pots.length === 0 ? (
+          <EmptyState
+            icon={Users}
+            title="No pots yet"
+            description="Create your first pot to get started."
+          />
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {pots.map((row) => (
+              <Link key={row.pot_id} to={`/pot/${row.pot_id}`}>
+                <Card hover className="h-full p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-semibold text-white">
+                        {row.pots?.name || 'Unnamed pot'}
+                      </h3>
+                      <p className="mt-1 text-sm text-white/35">Role: {row.role}</p>
+                    </div>
+                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-white/70">
+                      {row.pots?.status || 'unknown'}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap items-center gap-2 text-sm text-white/40">
+                    <Badge status={undefined}>
+                      {GAME_TYPES.find((gt) => gt.value === row.pots?.game_type)?.label || row.pots?.game_type || 'Pick 5'}
+                    </Badge>
+                  </div>
+
+                  <div className="mt-3 space-y-1 text-sm text-white/40">
+                    <div>League / tournament: {row.pots?.leagues?.name || '-'}</div>
+                    <div>Season: {formatSeasonName(row.pots?.seasons)}</div>
+                  </div>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section ref={createFormRef}>
+        <Card className="p-5">
+          <button
+            type="button"
+            onClick={() => setShowCreateForm((v) => !v)}
+            aria-expanded={showCreateForm}
+            className="flex w-full items-center justify-between gap-3 text-left"
+          >
+            <span className="flex items-center gap-2.5">
+              <PlusCircle size={18} className="text-accent" />
+              <span className="text-lg font-semibold text-white">Create pot</span>
+            </span>
+            <ChevronDown size={16} className={`text-white/40 transition-transform ${showCreateForm ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showCreateForm && (
+          <form onSubmit={handleCreatePot} noValidate className="mt-6 space-y-6">
             {/* Competition — identity and format. Nothing here ever locks. */}
             <div className={sectionCardClass}>
               <h3 className={sectionHeadingClass}>Competition</h3>
@@ -1095,57 +1196,8 @@ export default function PotManager() {
               {saving ? 'Creating...' : 'Create pot'}
             </Button>
           </form>
+          )}
         </Card>
-      </section>
-
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Your pots</h2>
-          <span className="text-sm text-white/45">{pots.length} total</span>
-        </div>
-
-        {loading ? (
-          <div className="flex justify-center py-8">
-            <Spinner />
-          </div>
-        ) : pots.length === 0 ? (
-          <EmptyState
-            icon={Users}
-            title="No pots yet"
-            description="Create your first pot to get started."
-          />
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            {pots.map((row) => (
-              <Link key={row.pot_id} to={`/pot/${row.pot_id}`}>
-                <Card hover className="h-full p-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="font-semibold text-white">
-                        {row.pots?.name || 'Unnamed pot'}
-                      </h3>
-                      <p className="mt-1 text-sm text-white/35">Role: {row.role}</p>
-                    </div>
-                    <span className="rounded-full bg-white/10 px-3 py-1 text-xs text-white/70">
-                      {row.pots?.status || 'unknown'}
-                    </span>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap items-center gap-2 text-sm text-white/40">
-                    <Badge status={undefined}>
-                      {GAME_TYPES.find((gt) => gt.value === row.pots?.game_type)?.label || row.pots?.game_type || 'Pick 5'}
-                    </Badge>
-                  </div>
-
-                  <div className="mt-3 space-y-1 text-sm text-white/40">
-                    <div>League / tournament: {row.pots?.leagues?.name || '-'}</div>
-                    <div>Season: {formatSeasonName(row.pots?.seasons)}</div>
-                  </div>
-                </Card>
-              </Link>
-            ))}
-          </div>
-        )}
       </section>
 
       {errorMessage ? <Toast message={errorMessage} type="error" /> : null}

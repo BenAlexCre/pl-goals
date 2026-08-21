@@ -3,6 +3,7 @@ import { Info, Lock, Shield } from 'lucide-react'
 import { usePlayerSeasonStats } from '../../hooks/useMatchCentre'
 import PlayerDrawer from './PlayerDrawer'
 import TeamForm from './TeamForm'
+import Badge from '../ui/Badge'
 import { initials } from '../../utils/format'
 
 // Phase 8B — the one reusable player card used everywhere a player is
@@ -38,6 +39,17 @@ export default function PlayerCard({
   disabledReason,
   onSelect,
   size = 'md',
+  // Phase 25 — 'starting' | 'bench' | 'sub_on' | 'sub_off' | 'not_in_squad'
+  // (fixture_player_status.status, now populated by ws-live-events.js
+  // once WhoScored publishes official lineups for a fixture — see that
+  // file's own parseLineup()) or undefined/null whenever lineup data
+  // genuinely isn't available yet for this fixture (no rows exist there
+  // yet — true for every fixture before kickoff) or doesn't apply to this
+  // player (no per-player fixture context, e.g. Pick 5's gameweek-wide
+  // picker). Deliberately renders nothing rather than implying a status
+  // before real data exists — optional, backward-compatible for every
+  // existing caller that doesn't pass it.
+  lineupStatus,
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const playerId = player.player_id ?? player.id
@@ -45,6 +57,21 @@ export default function PlayerCard({
 
   const selected = selectedCount > 0
   const compact = size === 'sm'
+  const notInSquad = lineupStatus === 'not_in_squad'
+  // Lineup CLASSIFICATION is stable across a substitution — a starter who
+  // is later subbed off is still a starter; a substitute who comes on is
+  // still, for squad-selection purposes, a bench player. `sub_on`/
+  // `sub_off` are event-state values (used as-is by Pick 5's own live
+  // pick display, GameweekPage.jsx's AppearanceBadge, which deliberately
+  // wants "came on 65'"/"went off 72'" — untouched), not a different
+  // lineup group, so they collapse back to their ORIGINAL group here
+  // rather than both flattening to "bench" (a real bug found live: a
+  // subbed-off starter was showing as Bench, contradicting their actual
+  // Starting XI status).
+  const badgeStatus =
+    lineupStatus === 'sub_on' ? 'bench' :
+    lineupStatus === 'sub_off' ? 'starting' :
+    lineupStatus
 
   function handlePrimaryClick() {
     if (onSelect) onSelect()
@@ -59,10 +86,11 @@ export default function PlayerCard({
         disabled={disabled}
         title={disabled ? disabledReason : undefined}
         aria-pressed={onSelect ? selected : undefined}
-        aria-label={`${player.display_name}${selected ? `, selected${selectedCount > 1 ? ` ${selectedCount} times` : ''}` : ''}${locked ? ', locked' : ''}${disabled && disabledReason ? `, unavailable: ${disabledReason}` : ''}`}
+        aria-label={`${player.display_name}${selected ? `, selected${selectedCount > 1 ? ` ${selectedCount} times` : ''}` : ''}${locked ? ', locked' : ''}${disabled && disabledReason ? `, unavailable: ${disabledReason}` : ''}${badgeStatus ? `, ${badgeStatus.replace('_', ' ')}` : ''}`}
         className={`
           w-full rounded-2xl border p-3 text-left transition-all
           ${selected ? 'border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(0,230,118,0.4)]' : 'border-white/8 bg-surface-1 hover:border-white/20 hover:bg-surface-2'}
+          ${notInSquad ? 'opacity-50' : ''}
           disabled:cursor-not-allowed disabled:opacity-40
         `}
       >
@@ -93,9 +121,12 @@ export default function PlayerCard({
           </div>
 
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <p className={`truncate font-semibold text-white ${compact ? 'text-xs' : 'text-sm'}`}>{player.display_name}</p>
               {locked && <Lock size={11} className="shrink-0 text-white/30" />}
+              {badgeStatus && (
+                <Badge status={badgeStatus} className={compact ? '!px-1.5 !py-0 !text-[9px]' : undefined} />
+              )}
             </div>
             <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-white/40">
               {player.crest_url ? (

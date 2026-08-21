@@ -1,4 +1,4 @@
-import { initials } from '../../utils/format'
+import { initials, resolveDisplayName } from '../../utils/format'
 
 export default function Avatar({ user, size = 'md', className = '' }) {
   const sizes = {
@@ -7,13 +7,18 @@ export default function Avatar({ user, size = 'md', className = '' }) {
     md:  'w-10 h-10 text-sm',
     lg:  'w-14 h-14 text-lg',
   }
-  const letters = initials(user?.display_name ?? user?.username ?? '?')
+  // Phase 25 — resolveDisplayName() guards against display_name being an
+  // email (the signup default until one's explicitly set) so initials
+  // never come out as e.g. "B" from "benalexcre@gmail.com" 's first
+  // letter when a real username exists to use instead.
+  const name = resolveDisplayName(user) ?? '?'
+  const letters = initials(name)
 
   if (user?.avatar_url) {
     return (
       <img
         src={user.avatar_url}
-        alt={user.display_name ?? 'Avatar'}
+        alt={name !== '?' ? name : 'Avatar'}
         className={`rounded-full object-cover flex-shrink-0 ${sizes[size]} ${className}`}
         loading="lazy"
       />

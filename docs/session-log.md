@@ -13,6 +13,149 @@ from here.
 
 ---
 
+## 2026-08-21 (81) — Phase 25: lineup status (fixture_player_status ingestion)
+
+**Goal:** complete the last outstanding piece of the WhoScored pipeline —
+`fixture_player_status` (ISSUE-2), which had frontend consumer code and
+even schema scaffolding waiting for it but zero rows in every
+environment. Full detail —
+[decisions.md § Phase 25 (lineup status)](./decisions.md#phase-25-lineup-status--fixture_player_status-ingestion).
+
+**What was done:** `ws-live-events.js` now parses
+`matchData.home/away.players[].isFirstEleven` into a stable STARTER/
+BENCH/NOT-IN-SQUAD classification (new `parseLineup()`/
+`computeNotInSquadRows()`/`upsertLineupRows()`), cross-references its own
+already-parsed substitution events (`applySubstitutionUpdates()`) without
+ever regressing that stable classification. New migration
+`037_fixture_player_status.sql` captures the table's already-live schema
+(ISSUE-2's own gap). `MatchCentreDrawer.jsx`'s Lineups tab — which never
+consumed this data before — now does, via the same hook Score Predictor's
+goalscorer picker already used.
+
+**Real, live-blocking infrastructure finding**: the table was owned by
+`supabase_admin`, not `postgres` (confirmed `postgres` has
+`rolsuper=false` in this Supabase image) — every DDL statement in the
+migration failed with "must be owner" until a one-time `alter table ...
+owner to postgres` was run via a `supabase_admin` session. Any other
+deployment of this project with the same anomaly will need the identical
+fix before this migration applies there.
+
+**Real frontend bug fixed**: `PlayerCard.jsx` collapsed both `sub_on` AND
+`sub_off` to a "Bench" badge — a starter subbed off was shown as Bench,
+directly contradicting this task's own core requirement. Fixed:
+`sub_off` now correctly collapses to "Starting XI".
+
+**Verification:** full classification round-trip against the real
+database using a real fixture and its real rosters (56 rows: 22
+starters, 14 bench, 20 not-in-squad across two 29/27-player rosters),
+including a simulated substitution in both directions and a repeated
+"next poll cycle" upsert proving no duplicates and no status regression
+— then live-verified in the actual running app (goalscorer picker, Match
+Centre Lineups tab, and confirmed zero false "Not in squad" badges on a
+fixture with no lineup data yet). All test data removed afterward. `npm
+run build` clean; Deno suite 347/347. No Node test runner exists for
+`frontend/scripts/` — not introduced, per explicit instruction; covered
+by the direct database verification above instead. Pick 5 untouched
+(gameweek-wide picker, no per-fixture lineup context applies).
+
+---
+
+## 2026-08-21 (80) — Phase 25: post-implementation review pass (items 16-20)
+
+**Goal:** verify items 16-20 (Create Pot deep link, Dashboard tile
+decoupling, Standings zero-state/ordering, statistics categories, Score
+Predictor editing fix) actually hold up live, not just on paper — full
+checklist across Dashboard/Pots/Score Predictor/Standings/identity/
+admin/responsive/build/tests. Reused the real local dev database and a
+real magic-link session (no new test data created) rather than
+delegating to a background browser-verification agent, since those hit
+the account's usage limit in the previous session.
+
+**Live-verified working correctly, no changes needed:** item 17 (Next
+gameweek tile held at "Gameweek 1" across two Prev/Next clicks in the
+lower browser), item 18 (Standings League Table renders all 20 real
+Premier League teams alphabetically, all-zero, with the correct
+pre-season notice), item 16 (`/pots` stays collapsed; `/pots?create=true`
+expands and scrolls with the heading and Pot name field both clear of
+the sticky nav), item 20's full round trip (CREATE → EDIT SCORE → SAVE →
+RELOAD → EDIT GOALSCORER → SAVE → RELOAD → REPLACE FIXTURE → SAVE →
+RELOAD, confirmed via both direct REST calls and the real UI — same
+`predictor_fixture_picks` row (id 617) throughout, never duplicated),
+Dashboard's sidebar/summary-tile alignment (still holds after this
+session's later edits).
+
+**One real bug found and fixed**: `useLeaguePlayerStats`
+(`hooks/useMatchCentre.js`) produced duplicate rows for any player with
+more than one `is_active = true` `player_team_history` row inside the
+same league/season — a real, pre-existing data-hygiene gap (at least one
+player had stale active rows at both Aston Villa and Chelsea
+simultaneously), not something this hook previously defended against.
+Surfaced live as a React duplicate-key warning on the Standings page's
+Player Statistics tab. Fixed by deduping the roster to one row per
+player (most recently created `player_team_history` row wins).
+
+**Significant finding, not yet implemented**: live-inspected a real
+WhoScored match page's `matchCentreData` directly (Playwright) and
+confirmed it carries a full Opta-style per-player `stats` object
+(ratings, shots, passes, tackles, aerials, dribbles, fouls — far beyond
+goal/assist/card) plus equivalent per-team aggregates — none of which
+`ws-live-events.js` currently parses (it only ever reads
+`matchData.incidentEvents`). This is genuinely already-fetched data
+sitting unused, not a reason to add a new provider — see
+[decisions.md § Phase 25 (review pass)](./decisions.md#phase-25-review-pass--whoscored-player-stats-already-available-not-yet-ingested)
+for the full shape and the scope question raised back to the user before
+touching the production live-ingestion script.
+
+**Verification:** `npm run build` clean; Deno suite 347/347. Live browser
+pass at 375px/1440px on Dashboard/Pots/Standings/Score Predictor — no
+horizontal overflow, 0 console errors after the dedup fix.
+
+---
+
+## 2026-08-21 (79) — Phase 25: UX refinement pass (continued) — Score Predictor selection panel, Standings page, create-pot deep link
+
+**Goal:** continue the Phase 25 UX refinement pass (identity resolution,
+lineup status, Pots restructure, Dashboard layout — completed earlier in
+this same session) with three remaining items: redesign Score
+Predictor's selection UX around a persistent "Your predictions" panel
+matching Pick 5's existing pattern; build a new `/standings` page
+(real league table + player statistics); make Dashboard's "Create a
+competition" link deep-link into an already-expanded Create Pot section.
+Full detail — see
+[decisions.md § Phase 25](./decisions.md#phase-25--ux-refinement-pass-dashboardpotsprofileadminscore-predictor-identity--selection-ux-standings-page-create-pot-deep-link).
+
+**What was done:** new `PredictorSummaryPanel.jsx` (sticky sidebar
+desktop, bottom sheet mobile); `PredictorFixtureCard.jsx`/
+`PredictorPotDetail.jsx` reworked so a fixture selection stages a local
+draft instead of saving immediately, with the panel now owning the real
+save. New `pages/Standings.jsx` plus two small additions to
+`hooks/useMatchCentre.js` (`useLeagueTeams`, `useLeaguePlayerStats`);
+Dashboard's fixture-section link changed from "View all fixtures" to
+"View standings". `PotManager.jsx` now honours `/pots?create=true` to
+pre-expand and scroll to the Create Pot section; Dashboard's "Create a
+competition" quick action updated to use it. One real, small bug fixed
+along the way: `PotDetail.jsx`'s pot query was missing
+`predictor_scorer_scope` from its explicit column list, so
+`PredictorPotDetail` could never actually see it.
+
+**Explicitly investigated, not implemented:** team/goalscorer
+uniqueness "across a season half" and the two-halves "double"
+exception some requirements assumed existed — confirmed via
+`017_predictor_picks.sql`'s own comment that this was left undecided
+when written and remains unimplemented; treated as an open product
+question, not built speculatively.
+
+**Verification:** `npm run build` clean; Deno suite 347/347 unchanged.
+New Supabase queries hand-verified via direct PostgREST calls against
+the local dev database (correct joins/syntax, empty results where the
+underlying tables are genuinely empty in this environment — not a
+bug). Live-browser verification of all three changes was attempted via
+background agents but did not complete — the session hit its usage
+limit before either agent finished; **not yet independently confirmed
+in an actual browser**, recommended as the next step.
+
+---
+
 ## 2026-08-19 (78) — Phase 22: Production Live-Match Event Pipeline
 
 **Goal:** make the existing WhoScored live-event pipeline

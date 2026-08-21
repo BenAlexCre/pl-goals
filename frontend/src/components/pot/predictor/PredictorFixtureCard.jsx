@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { BarChart3, ChevronDown, Check, Minus, Plus, Goal } from 'lucide-react'
 import { useLeagueStandings, useTeamForm, fixtureDifficultyFromStanding } from '../../../hooks/useMatchCentre'
-import { usePlayersForFixture } from '../../../hooks/usePredictorEntry'
+import { usePlayersForFixture, useFixturePlayerStatus } from '../../../hooks/usePredictorEntry'
 import MatchCentreDrawer from '../../matchcentre/MatchCentreDrawer'
 import PlayerCard from '../../matchcentre/PlayerCard'
 import TeamForm from '../../matchcentre/TeamForm'
@@ -153,7 +153,6 @@ export default function PredictorFixtureCard({
   expanded,
   onToggleExpand,
   canPick,
-  saving,
   onSave,
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -189,9 +188,17 @@ export default function PredictorFixtureCard({
       : (fixtureDifficultyFromStanding(homeStanding) || fixtureDifficultyFromStanding(awayStanding))
 
   const { data: eligiblePlayers = [] } = usePlayersForFixture(fixture.home_team?.id, fixture.away_team?.id)
+  const { data: lineupStatusByPlayer } = useFixturePlayerStatus(fixture.id)
   const eligiblePlayersWithTeam = eligiblePlayers.map((p) => {
     const team = p.team_id === fixture.home_team?.id ? fixture.home_team : fixture.away_team
-    return { ...p, player_id: p.id, team_name: team?.name, team_short_name: team?.short_name, crest_url: team?.crest_url }
+    return {
+      ...p,
+      player_id: p.id,
+      team_name: team?.name,
+      team_short_name: team?.short_name,
+      crest_url: team?.crest_url,
+      lineup_status: lineupStatusByPlayer?.get(String(p.id)) ?? null,
+    }
   })
   const goalscorerGroups = useMemo(
     () => groupPlayersByTeamAndPosition(eligiblePlayersWithTeam, fixture.home_team, fixture.away_team),
@@ -209,11 +216,20 @@ export default function PredictorFixtureCard({
       return
     }
     setLocalError('')
+    // Phase 25 — this no longer hits the network directly: onSave now
+    // stages the draft in PredictorPotDetail's own state, which the
+    // persistent PredictorSummaryPanel shows and actually saves from (same
+    // "select here, review + save in the panel" flow Pick 5's picker
+    // already uses) — goalscorerName travels with it since this component
+    // is the one place the fixture-scoped player list is already fetched;
+    // the panel would otherwise need a second, duplicate query for a name
+    // it could just be told.
     onSave({
       fixtureId: fixture.id,
       homeScore: Number(homeScore),
       awayScore: Number(awayScore),
       goalscorerId: goalscorerId === '' ? null : Number(goalscorerId),
+      goalscorerName: selectedGoalscorer?.display_name ?? null,
     })
   }
 
@@ -373,6 +389,7 @@ export default function PredictorFixtureCard({
                               seasonId={seasonId}
                               size="sm"
                               selectedCount={String(p.id) === goalscorerId ? 1 : 0}
+                              lineupStatus={p.lineup_status}
                               onSelect={() => setGoalscorerId((current) => (current === String(p.id) ? '' : String(p.id)))}
                             />
                           ))}
@@ -386,8 +403,12 @@ export default function PredictorFixtureCard({
           </div>
 
           <div className="flex items-center gap-3">
-            <Button onClick={handleSave} loading={saving} disabled={saving || !canPick} className="flex-1 sm:flex-none">
-              {isYourPick ? 'Save changes' : 'Save prediction'}
+            {/* Phase 25 — no longer a network save (that moved to the
+                persistent PredictorSummaryPanel) — this stages the
+                selection there and collapses, so the label/disabled state
+                reflects "use this" rather than a loading network call. */}
+            <Button onClick={handleSave} disabled={!canPick} className="flex-1 sm:flex-none">
+              {isYourPick ? 'Update selection' : 'Use this prediction'}
             </Button>
             <button type="button" onClick={onToggleExpand} className="text-sm text-white/40 hover:text-white">
               Cancel

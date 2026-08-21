@@ -142,6 +142,7 @@ export default function PotDetailPage() {
         league_id,
         entry_fee,
         created_by,
+        predictor_scorer_scope,
         seasons (
           id,
           name,

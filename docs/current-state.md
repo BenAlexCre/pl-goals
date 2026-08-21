@@ -329,17 +329,11 @@ touch) and could not be removed by `postgres`. Low severity — it just keeps fa
 on its pre-existing Vault error every 5 minutes, no data or security impact — but
 folded into Track B's scope rather than treated as a separate issue.
 
-#### ISSUE-2 — `fixture_player_status` table missing from migrations
-Live, reachable frontend code (`hooks/useEntry.js:useFixturePlayerStatuses`,
-`hooks/useLiveScores.js`, `pages/GameweekPage.jsx`) reads from and subscribes to a
-`fixture_player_status` table that is not defined in any file under
-`supabase/migrations/`. Full column-level detail:
-[database.md § Schema drift](./database.md#schema-drift). **Status: unverified.**
-Either the deployed database has this table from an unversioned/manual change, in
-which case a migration should be written to capture its current shape, or the
-gameweek page's player-appearance UI (starting/bench/subbed badges) is currently
-broken against a from-migrations-only database. Plan:
-[roadmap.md § P0](./roadmap.md#p0--verify-or-fix-before-building-further-on-potsscoring).
+#### ISSUE-2 — `fixture_player_status` table missing from migrations — **RESOLVED, see [Resolved issues](#resolved-issues)**
+Migration `037_fixture_player_status.sql` (Phase 25, lineup status) now captures
+this table's schema, and `ws-live-events.js` now actually populates it. Kept here,
+struck through in spirit, per this doc's own "never delete resolved issues" rule —
+full writeup in the Resolved section below.
 
 #### ISSUE-4 — `sync-live-events` edge function is referenced but doesn't exist
 `supabase/migrations/003_cron_jobs.sql` schedules a call to
@@ -772,6 +766,54 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-2 — `fixture_player_status` table missing from migrations
+**Discovered 2026-08-03, resolved 2026-08-21, Phase 25 (lineup status).**
+Migration `037_fixture_player_status.sql` captures the table as it already
+lived on this project's database (confirmed column-for-column via the
+PostgREST OpenAPI schema and live insert/upsert probes before writing a
+single line — the `player_match_status` enum and `unique(fixture_id,
+player_id)` constraint the whole ingestion strategy depends on both
+already existed). **Real, live-blocking finding along the way**: the
+table was owned by `supabase_admin`, not `postgres` (the role every
+normal migration — this one included — runs as; confirmed `postgres` has
+`rolsuper=false` in this image, only `supabase_admin` is a true
+superuser), so `CREATE INDEX`/`ENABLE ROW LEVEL SECURITY`/`CREATE
+POLICY`/`CREATE TRIGGER` all failed with "must be owner" until a one-time
+`alter table ... owner to postgres` was run via a `supabase_admin`
+session — the same out-of-band-ownership class of issue this project
+already hit once with the retired prototype's own `supabase_admin`-owned
+`predictor_picks` table. **If this table exists with the same anomaly on
+any other deployment of this project, that environment needs the
+identical one-time ownership fix before this migration will apply
+there.** Ingestion: `ws-live-events.js`'s new `parseLineup()` reads
+`matchData.home/away.players[].isFirstEleven` (real WhoScored data,
+confirmed live-verified `matchCentreData` is the literal JSON `null`
+until official lineups are published — already handled by this script's
+own existing null-check, so lineup rows are never written before
+lineups are genuinely confirmed) to set the STABLE `status`
+(starting/bench)/`started` fields, never regressing a player already
+advanced to `sub_on`/`sub_off` by `applySubstitutionUpdates()` (which
+cross-references the same `fixture_events` this script already parses,
+touching only `came_on_minute`/`went_off_minute` + the event-state
+`status` value, never `started`). `computeNotInSquadRows()` marks any
+active `player_team_history` roster player missing from a CONFIRMED
+team's squad list as `not_in_squad` — never applied to a team whose
+lineup isn't confirmed yet. Full detail:
+[decisions.md § Phase 25 (lineup status)](./decisions.md#phase-25-lineup-status--fixture_player_status-ingestion).
+Real, previously-unnoticed frontend bug fixed in the same phase:
+`PlayerCard.jsx` collapsed BOTH `sub_on` and `sub_off` to a "Bench" badge
+— a starter subbed off was shown as Bench, contradicting their actual
+Starting XI status. Now `sub_off` correctly collapses to "Starting XI".
+Live-verified end to end (Score Predictor goalscorer picker AND Match
+Centre's Lineups tab, which had never consumed this data at all before
+this phase) via a real simulated lineup (36 starters/bench + 20
+not-in-squad across both teams of a real fixture, a simulated
+substitution in both directions, and a repeated "next poll cycle" upsert
+proving no duplicate rows and no status regression) — test data fully
+removed afterward.
+
+---
 
 #### ISSUE-69 — `ws-live-events.js` wrote `event_type` in the wrong case, silently guaranteeing zero Pick 5 goals ever
 **Discovered and resolved 2026-08-19, Phase 22 (Production Live-Match
