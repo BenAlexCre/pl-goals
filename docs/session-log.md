@@ -13,6 +13,18 @@ from here.
 
 ---
 
+## 2026-08-21 (82) — Vercel Production deployment: env var recreation + fresh deploy trigger
+
+Production was throwing "Missing Supabase env vars" (a real, pre-existing
+`frontend/src/lib/supabase.js` guard, unchanged) because the live deployment
+predated the last edit to `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` in
+Vercel's dashboard — confirmed via `vercel ls`/`vercel inspect`, no code
+change involved. Both variables were recreated in Vercel's Production
+environment; this commit is a harmless, no-behavior-change trigger to force
+a genuinely new Vercel deployment so the rebuild picks them up.
+
+---
+
 ## 2026-08-21 (81) — Phase 25: lineup status (fixture_player_status ingestion)
 
 **Goal:** complete the last outstanding piece of the WhoScored pipeline —
