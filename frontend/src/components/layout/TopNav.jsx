@@ -45,7 +45,20 @@ export default function TopNav() {
   ]
 
   return (
-    <header className="sticky top-0 z-40 border-b border-white/8 bg-black/30 backdrop-blur-xl">
+    // Mobile nav/header audit — was `bg-black/30 backdrop-blur-xl`: Tailwind's
+    // backdrop-blur-* utility only emits the unprefixed `backdrop-filter`,
+    // with no `-webkit-backdrop-filter` fallback. On any real mobile
+    // browser/WebView where the unprefixed property isn't supported (older
+    // Android WebViews, some Samsung Internet configurations/data-saver
+    // modes) — exactly the devices that would need the prefix — the blur
+    // silently never applies, leaving only a 30%-opaque black tint over an
+    // already near-black page background: visually indistinguishable from
+    // the header not rendering at all. BottomNav.jsx already solved this
+    // exact problem with its own `.glass` utility (index.css) — 75% base
+    // opacity plus both the prefixed and unprefixed backdrop-filter — this
+    // just reuses that same, already-correct utility instead of TopNav's
+    // separate, lower-opacity, unprefixed-only styling.
+    <header className="glass sticky top-0 z-40 border-b border-white/8">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
         <Link to="/dashboard" className="flex items-center gap-2">
           <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white/10">

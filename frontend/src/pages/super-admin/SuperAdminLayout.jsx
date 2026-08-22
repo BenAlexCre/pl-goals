@@ -28,7 +28,13 @@ export default function SuperAdminLayout() {
         </Link>
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto border-b border-white/8 pb-px">
+      {/* Mobile nav/header audit — overflow-x-auto was already here (tabs
+          scroll rather than clip on narrow screens); adds .no-scrollbar
+          (index.css, already used elsewhere in the app) purely to hide the
+          scrollbar chrome, and shrink-0 on each tab so flex doesn't
+          compress labels down to unreadable widths before scrolling
+          kicks in. */}
+      <nav className="no-scrollbar flex gap-1 overflow-x-auto border-b border-white/8 pb-px">
         {TABS.map((tab) => (
           <NavLink
             key={tab.to}
@@ -36,7 +42,7 @@ export default function SuperAdminLayout() {
             end={tab.end}
             className={({ isActive }) =>
               [
-                'inline-flex items-center gap-2 whitespace-nowrap rounded-t-lg px-4 py-2.5 text-sm transition',
+                'inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-lg px-4 py-2.5 text-sm transition',
                 isActive ? 'border-b-2 border-accent text-white' : 'text-white/50 hover:text-white',
               ].join(' ')
             }
