@@ -6,6 +6,7 @@ import Landing from './pages/Landing'
 import SignIn from './pages/auth/SignIn'
 import SignUp from './pages/auth/SignUp'
 import ForgotPassword from './pages/auth/ForgotPassword'
+import ResetPassword from './pages/auth/ResetPassword'
 import VerifyEmail from './pages/auth/VerifyEmail'
 import Dashboard from './pages/Dashboard'
 import PotDetail from './pages/PotDetail'
@@ -110,6 +111,11 @@ export default function App() {
         <Route path="/sign-in" element={<SignIn />} />
         <Route path="/sign-up" element={<SignUp />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+        {/* Live-review fix (item 14) — recovery-link landing page.
+            resetPasswordForEmail()'s redirectTo now points here (was
+            /sign-in, where a recovering user had a live session but no
+            way to actually set a new password). */}
+        <Route path="/reset-password" element={<ResetPassword />} />
         {/* Public — enable_confirmations = true (config.toml) means signUp()
             never returns a session, so a freshly-registered visitor lands
             here signed out. Also reachable while signed in (the

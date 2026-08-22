@@ -20,8 +20,12 @@ export default function ForgotPassword() {
     setLoading(true)
     setError('')
     try {
+      // Live-review fix (item 14) — was /sign-in, which has no password
+      // form at all; a recovering user landed there fully signed in (the
+      // recovery link's own token) with no way to actually change their
+      // password. /reset-password is the dedicated page for that.
       const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-        redirectTo: `${window.location.origin}/sign-in`,
+        redirectTo: `${window.location.origin}/reset-password`,
       })
       if (resetError) {
         setError(humanizeAuthError(resetError))
