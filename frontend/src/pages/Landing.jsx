@@ -34,16 +34,12 @@ export default function Landing() {
               Free to play, free to organise. Create a private pot in under a minute.
             </p>
             <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
-              <Link to="/sign-up">
-                <Button size="lg" fullWidth className="sm:w-auto">
-                  Start a competition <ArrowRight size={17} />
-                </Button>
-              </Link>
-              <Link to="/sign-in">
-                <Button size="lg" variant="secondary" fullWidth className="sm:w-auto">
-                  Sign in
-                </Button>
-              </Link>
+              <Button as={Link} to="/sign-up" size="lg" fullWidth className="sm:w-auto">
+                Start a competition <ArrowRight size={17} />
+              </Button>
+              <Button as={Link} to="/sign-in" size="lg" variant="secondary" fullWidth className="sm:w-auto">
+                Sign in
+              </Button>
             </div>
           </Reveal>
         </section>

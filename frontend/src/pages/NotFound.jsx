@@ -10,7 +10,7 @@ export default function NotFound() {
         icon={SearchX}
         title="Page not found"
         description="The page you tried to open doesn’t exist."
-        action={<Link to="/dashboard"><Button>Go to dashboard</Button></Link>}
+        action={<Button as={Link} to="/dashboard">Go to dashboard</Button>}
       />
     </div>
   )

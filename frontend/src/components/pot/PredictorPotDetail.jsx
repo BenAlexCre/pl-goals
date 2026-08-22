@@ -132,6 +132,13 @@ export default function PredictorPotDetail({ pot, potId }) {
   // unchanged from before this phase — only when it fires moved.
   async function handleSave() {
     if (!draft) return
+    // Red-team audit — same re-entrancy gap as PotManager.jsx's
+    // handleCreatePot, found via the same rapid-double-click test. The DB's
+    // unique(game_entry_id, gameweek_id) constraint means this can't
+    // actually create a duplicate row (upserts onto the same row either
+    // way), but a same-tick double-click still fires two redundant network
+    // requests before React re-renders the disabled button.
+    if (submitPicks.isPending) return
     try {
       setErrorMessage('')
       setMessage('')

@@ -742,6 +742,12 @@ export default function PotDetailPage() {
   }
 
   async function handleSaveEntry() {
+    // Red-team audit — same re-entrancy gap as PotManager.jsx's
+    // handleCreatePot and PredictorPotDetail.jsx's handleSave, found via
+    // the same rapid-double-click test: `saving` only blocks the button
+    // once React re-renders, which is strictly later than a same-tick
+    // second click.
+    if (saving) return
     try {
       setSaving(true)
       setMessage('')

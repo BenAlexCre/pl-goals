@@ -30,16 +30,12 @@ export default function Hero() {
           </p>
 
           <div className="mt-9 flex flex-col gap-3 sm:flex-row">
-            <Link to="/sign-up">
-              <Button size="lg" fullWidth className="sm:w-auto">
-                Create free account <ArrowRight size={17} />
-              </Button>
-            </Link>
-            <Link to="/sign-in">
-              <Button size="lg" variant="secondary" fullWidth className="sm:w-auto">
-                Sign in
-              </Button>
-            </Link>
+            <Button as={Link} to="/sign-up" size="lg" fullWidth className="sm:w-auto">
+              Create free account <ArrowRight size={17} />
+            </Button>
+            <Button as={Link} to="/sign-in" size="lg" variant="secondary" fullWidth className="sm:w-auto">
+              Sign in
+            </Button>
           </div>
 
           <div className="mt-10 flex items-center gap-4">

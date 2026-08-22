@@ -101,12 +101,10 @@ export default function DemoCentre() {
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <Link to="/admin/demo/gameweek">
-              <Button variant="primary">
-                <PlayCircle size={16} />
-                Open Demo Gameweek
-              </Button>
-            </Link>
+            <Button as={Link} to="/admin/demo/gameweek" variant="primary">
+              <PlayCircle size={16} />
+              Open Demo Gameweek
+            </Button>
             <Button variant="secondary" loading={teardown.isPending} onClick={handleReset}>
               <RotateCcw size={16} />
               Reset demo

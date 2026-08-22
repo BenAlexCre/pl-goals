@@ -146,6 +146,7 @@ export default function TopNav() {
           <button
             type="button"
             onClick={handleSignOut}
+            aria-label="Sign out"
             className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-white/65 hover:bg-white/5 hover:text-white"
           >
             <LogOut size={16} />

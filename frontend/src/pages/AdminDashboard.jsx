@@ -51,35 +51,29 @@ export default function AdminDashboard() {
         <Card className="p-4 space-y-3">
           <h2 className="text-sm font-semibold text-white">Payment verification</h2>
           <p className="text-xs text-white/40">Mark entries paid/unpaid, single or via CSV import.</p>
-          <Link to="/admin/payments">
-            <Button fullWidth variant="secondary">
-              <CreditCard size={16} />
-              Open payment verification
-            </Button>
-          </Link>
+          <Button as={Link} to="/admin/payments" fullWidth variant="secondary">
+            <CreditCard size={16} />
+            Open payment verification
+          </Button>
         </Card>
 
         <Card className="p-4 space-y-3">
           <h2 className="text-sm font-semibold text-white">Rollover management</h2>
           <p className="text-xs text-white/40">Review, rename, and activate draft pots created after an unclaimed jackpot or wipeout.</p>
-          <Link to="/admin/rollovers">
-            <Button fullWidth variant="secondary">
-              <RefreshCw size={16} />
-              Manage rollover pots
-            </Button>
-          </Link>
+          <Button as={Link} to="/admin/rollovers" fullWidth variant="secondary">
+            <RefreshCw size={16} />
+            Manage rollover pots
+          </Button>
         </Card>
 
         {isSuperAdmin && (
           <Card className="p-4 space-y-3">
             <h2 className="text-sm font-semibold text-white">Demo Centre</h2>
             <p className="text-xs text-white/40">Generate an isolated demo environment and run a live one-hour Demo Gameweek.</p>
-            <Link to="/admin/demo">
-              <Button fullWidth variant="secondary">
-                <Sparkles size={16} />
-                Open Demo Centre
-              </Button>
-            </Link>
+            <Button as={Link} to="/admin/demo" fullWidth variant="secondary">
+              <Sparkles size={16} />
+              Open Demo Centre
+            </Button>
           </Card>
         )}
 

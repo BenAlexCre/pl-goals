@@ -1,30 +1,74 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 import { useUiStore } from '../../store/uiStore'
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export default function Drawer() {
   const { drawerOpen, drawerContent, closeDrawer } = useUiStore()
+  const panelRef = useRef(null)
 
+  // Static accessibility review — same focus-trap gap as Modal.jsx (see
+  // that file's own note): Escape/backdrop/scroll-lock already worked, but
+  // nothing moved focus in on open, trapped Tab within the drawer, or
+  // restored focus on close. This is the global notification drawer
+  // (mounted once in AppShell, content swapped via useUiStore), so it gets
+  // the same fix independently rather than sharing Modal's implementation.
   useEffect(() => {
     if (!drawerOpen) return
-    const handleKey = (e) => { if (e.key === 'Escape') closeDrawer() }
+
+    const previouslyFocused = document.activeElement
+    const focusables = () => [...panelRef.current?.querySelectorAll(FOCUSABLE_SELECTOR) ?? []]
+    const first = focusables()[0]
+    ;(first ?? panelRef.current)?.focus()
+
+    function handleKey(e) {
+      if (e.key === 'Escape') {
+        closeDrawer()
+        return
+      }
+      if (e.key !== 'Tab') return
+
+      const els = focusables()
+      if (!els.length) {
+        e.preventDefault()
+        return
+      }
+
+      const firstEl = els[0]
+      const lastEl = els[els.length - 1]
+
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault()
+        lastEl.focus()
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault()
+        firstEl.focus()
+      }
+    }
+
     document.addEventListener('keydown', handleKey)
     document.body.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', handleKey)
       document.body.style.overflow = ''
+      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus()
     }
   }, [drawerOpen, closeDrawer])
 
   if (!drawerOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center">
+    <div className="fixed inset-0 z-50 flex items-end justify-center" role="dialog" aria-modal="true" aria-label="Notifications">
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
         onClick={closeDrawer}
       />
-      <div className={`
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        className={`
         relative z-10 w-full max-w-lg
         glass rounded-t-2xl border-t border-x border-white/8
         animate-slide-up max-h-[85dvh] flex flex-col

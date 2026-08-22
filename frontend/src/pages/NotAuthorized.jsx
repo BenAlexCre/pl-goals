@@ -10,7 +10,7 @@ export default function NotAuthorized() {
         icon={ShieldAlert}
         title="Not authorised"
         description="You don't have admin access to this page. If you think this is a mistake, ask a pot organiser to add you as an admin."
-        action={<Link to="/dashboard"><Button>Go to dashboard</Button></Link>}
+        action={<Button as={Link} to="/dashboard">Go to dashboard</Button>}
       />
     </div>
   )

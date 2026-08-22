@@ -317,7 +317,21 @@ export function useCreatePot() {
         .insert(row)
         .select()
         .single()
-      if (error) throw error
+      if (error) {
+        // Remediation (D1, red-team audit) — maxLength={80} on the pot-name
+        // input (PotManager.jsx) is a DOM attribute only, trivially bypassed
+        // (devtools, or any direct call to this mutation), so an 81+ char
+        // name can still reach pots_name_check and, before this fix,
+        // surfaced its raw Postgres message ('new row for relation "pots"
+        // violates check constraint "pots_name_check"') verbatim in the
+        // create-pot toast. Humanizes only this one known, identifiable
+        // constraint — every other error still passes through unchanged,
+        // deliberately not a general Postgres-error parser.
+        if (error.code === '23514' && error.message?.includes('pots_name_check')) {
+          throw new Error('Pot name must be between 1 and 80 characters.')
+        }
+        throw error
+      }
 
       const { error: memberError } = await supabase.from('pot_members').insert({
         pot_id: pot.id,

@@ -15,6 +15,7 @@ const sizes = {
 }
 
 export default function Button({
+  as: Component = 'button',
   children,
   variant  = 'primary',
   size     = 'md',
@@ -24,9 +25,20 @@ export default function Button({
   className = '',
   ...props
 }) {
+  // Remediation (Phase 11 accessibility audit) — every `<Link to="..."><Button>`
+  // call site nested a real <button> inside a real <a>, which is invalid
+  // HTML content model (interactive content inside interactive content) and
+  // confirmed live to produce two separate, redundant Tab stops for what
+  // reads as one control. `as` lets a call site render Button's styling on
+  // react-router's <Link> directly instead — one element, one tab stop,
+  // valid semantics. Defaults to 'button' so every existing plain-button
+  // usage (the vast majority) is unaffected. `disabled` only makes sense on
+  // an actual <button>; a Link has no disabled semantics of its own.
+  const isPlainButton = Component === 'button'
+
   return (
-    <button
-      disabled={disabled || loading}
+    <Component
+      {...(isPlainButton ? { disabled: disabled || loading } : {})}
       className={`
         inline-flex items-center justify-center gap-2
         transition-all duration-150
@@ -40,6 +52,6 @@ export default function Button({
     >
       {loading && <Spinner size="sm" />}
       {children}
-    </button>
+    </Component>
   )
 }

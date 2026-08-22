@@ -1,17 +1,62 @@
 import { useEffect, useRef } from 'react'
 import { X } from 'lucide-react'
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export default function Modal({ open, onClose, title, children, size = 'md' }) {
   const ref = useRef(null)
 
+  // Phase 11 (accessibility audit) — CONFIRMED live via keyboard-only
+  // testing: this dialog had role="dialog"/aria-modal="true" and Escape
+  // already worked, but nothing moved focus INTO it on open, trapped Tab
+  // WITHIN it while open, or restored focus on close. A keyboard user
+  // tabbing past an open modal reached whatever was behind the backdrop
+  // instead of the modal's own controls, and closing it (e.g. after
+  // "Remove member") dropped focus back to the top of the document —
+  // both violate the standard dialog pattern (WAI-ARIA APG) every
+  // Modal instance in this app relies on (RenameModal, ActivateModal,
+  // "Remove member" confirm, etc.).
   useEffect(() => {
     if (!open) return
-    const handleKey = (e) => { if (e.key === 'Escape') onClose() }
+
+    const previouslyFocused = document.activeElement
+
+    const focusables = () => [...ref.current?.querySelectorAll(FOCUSABLE_SELECTOR) ?? []]
+    const first = focusables()[0]
+    ;(first ?? ref.current)?.focus()
+
+    function handleKey(e) {
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+
+      const els = focusables()
+      if (!els.length) {
+        e.preventDefault()
+        return
+      }
+
+      const firstEl = els[0]
+      const lastEl = els[els.length - 1]
+
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault()
+        lastEl.focus()
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault()
+        firstEl.focus()
+      }
+    }
+
     document.addEventListener('keydown', handleKey)
     document.body.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', handleKey)
       document.body.style.overflow = ''
+      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus()
     }
   }, [open, onClose])
 
@@ -38,6 +83,7 @@ export default function Modal({ open, onClose, title, children, size = 'md' }) {
       {/* Panel */}
       <div
         ref={ref}
+        tabIndex={-1}
         className={`
           relative z-10 w-full ${sizes[size]}
           glass rounded-2xl border border-white/8

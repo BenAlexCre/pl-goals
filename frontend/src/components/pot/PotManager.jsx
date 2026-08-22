@@ -663,6 +663,17 @@ export default function PotManager() {
   async function handleCreatePot(e) {
     e.preventDefault()
 
+    // Red-team audit — CONFIRMED live: a rapid double-click (synchronous,
+    // before React commits the re-render that sets the submit button's
+    // `disabled` attribute) fired this handler twice and created two
+    // separate duplicate pots in the same fraction of a second. The
+    // `disabled={saving}` attribute alone is provably insufficient —
+    // `saving` only becomes true once React Query's mutation state
+    // updates and a render commits, which is strictly later than a
+    // same-tick second click. This synchronous guard closes that window
+    // regardless of render timing.
+    if (createPot.isPending) return
+
     // Not a field the organiser can fix by editing the form — the submit
     // button is already disabled in this state; this is defense-in-depth
     // only. An environment/data problem, not a validation failure, so it
@@ -822,6 +833,15 @@ export default function PotManager() {
                   value={name}
                   onChange={(e) => { setName(e.target.value); clearError('name') }}
                   placeholder="Office pool"
+                  // Red-team audit — pots_name_check (DB) already enforces
+                  // length(name) <= 80, correctly, but nothing client-side
+                  // stopped a longer name from reaching that constraint —
+                  // confirmed live: the resulting rejection surfaced the
+                  // raw Postgres error text ("violates check constraint
+                  // pots_name_check") directly to the user. This closes
+                  // the common case at the input itself, matching the DB's
+                  // own limit exactly.
+                  maxLength={80}
                   className={inputClassFor(!!errors.name)}
                 />
                 <FieldError message={errors.name} />
