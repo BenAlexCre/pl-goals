@@ -89,16 +89,14 @@ function randomDelay(min = 1500, max = 3500) {
 // uppercase 'GOAL' row would never match that filter, so even a fully
 // working, unblocked, correctly-deduplicated scrape would have silently
 // scored zero goals for every player, forever, with no error anywhere.
-function mapEventType(type, satisfier) {
+function mapEventType(type, cardQualifier) {
   if (type === 'Goal') {
-    if (satisfier === 'goalOwn')       return 'goal';
-    if (satisfier === 'penaltyScored') return 'goal';
     return 'goal';
   }
   if (type === 'Card') {
-    if (satisfier === 'yellowCard')  return 'yellow_card';
-    if (satisfier === 'secondYellow') return 'second_yellow';
-    if (satisfier === 'redCard')     return 'red_card';
+    if (cardQualifier === 'SecondYellow') return 'second_yellow';
+    if (cardQualifier === 'YellowCard')   return 'yellow_card';
+    if (cardQualifier === 'RedCard')      return 'red_card';
   }
   if (type === 'SubstitutionOn')  return 'sub_on';
   if (type === 'SubstitutionOff') return 'sub_off';
@@ -114,15 +112,36 @@ async function getLiveFixtures() {
   const windowStart = new Date(now.getTime() - 130 * 60 * 1000);
   const windowEnd   = new Date(now.getTime() +  10 * 60 * 1000);
 
-  const { data, error } = await supabase
+  const { data: windowRows, error: windowError } = await supabase
     .from('fixtures')
     .select('id, whoscored_fixture_id, home_team_id, away_team_id, kickoff_utc, status')
     .not('whoscored_fixture_id', 'is', null)
     .gte('kickoff_utc', windowStart.toISOString())
     .lte('kickoff_utc', windowEnd.toISOString());
 
-  if (error) throw new Error(`getLiveFixtures DB error: ${error.message}`);
-  return data ?? [];
+  if (windowError) throw new Error(`getLiveFixtures DB error: ${windowError.message}`);
+
+  // Remediation (C7, red-team audit) — same reconciliation gap fixed in
+  // sync-live-scores/index.ts, applied here too: a match that runs past
+  // 130 minutes from its own kickoff (extreme stoppage time, a
+  // suspension/resume, a provider outage during its live window) would
+  // otherwise silently drop out of this window and stop having its
+  // goals/events scraped even while sync-live-scores keeps its status
+  // correctly at 'live'. This second, unwindowed check only matches
+  // fixtures already marked 'live' with a whoscored_fixture_id — bounded
+  // and self-limiting, since a fixture leaves this set the moment its
+  // status is updated away from 'live' by the football-data.org sync.
+  const { data: stuckRows, error: stuckError } = await supabase
+    .from('fixtures')
+    .select('id, whoscored_fixture_id, home_team_id, away_team_id, kickoff_utc, status')
+    .not('whoscored_fixture_id', 'is', null)
+    .eq('status', 'live');
+
+  if (stuckError) throw new Error(`getLiveFixtures DB error: ${stuckError.message}`);
+
+  const byId = new Map();
+  for (const row of [...(windowRows ?? []), ...(stuckRows ?? [])]) byId.set(row.id, row);
+  return [...byId.values()];
 }
 
 // ─── Step 2: Build lookup maps from whoscored IDs → DB bigint IDs ─────────────
@@ -201,56 +220,93 @@ async function scrapeMatchCentreData(page, wsFixtureId) {
 //          isowngoal (bool default false), ispenalty (bool default false),
 //          providerid (text NULL), providerraw (jsonb NULL), createdat
 
+// Live-review fix — CRITICAL, previously-undiscovered bug: this read
+// `matchData.incidentEvents` (assumed shape: an object keyed by minute
+// string, each value an array of that minute's events). Confirmed by
+// inspecting a real, finished match's own matchCentreData response
+// (Arsenal 3-0 Coventry, WS fixture 1983546) that this field does not
+// exist at all on the actual API response — `incidentEvents` is
+// `undefined`. The real events live at `matchData.events`, a flat array
+// of ~1500 objects covering every touch/pass/tackle/etc., not just the
+// tracked subset — confirmed the 3 real goals (Havertz 14', Saka 22',
+// Ødegaard 48') and 18 real substitution events are present there with
+// `isGoal: true` / `type.displayName` fields. This means the previous
+// code's `Object.entries({})` loop always iterated zero minutes — even
+// with fixture/player mapping fully working, fixture_events would never
+// have been populated by this function, independent of the mapping gap.
 function parseEvents(matchData, dbFixtureId, playerMap, teamMap) {
-  // incidentEvents: object keyed by minute string, values are arrays
-  const incidents = matchData?.incidentEvents ?? {};
+  const allEvents = Array.isArray(matchData?.events) ? matchData.events : [];
   const tracked = new Set(['goal', 'yellow_card', 'second_yellow', 'red_card', 'sub_on', 'sub_off']);
   const events = [];
 
-  for (const [minuteStr, minuteEvents] of Object.entries(incidents)) {
-    if (!Array.isArray(minuteEvents)) continue;
-    const minute = parseInt(minuteStr, 10);
+  for (const ev of allEvents) {
+    const minute = Number.isInteger(ev.minute) ? ev.minute : parseInt(ev.minute, 10);
     if (isNaN(minute)) continue; // minute is NOT NULL — skip if unparseable
 
-    for (const ev of minuteEvents) {
-      const typeName      = ev.type?.displayName        ?? ev.type        ?? '';
-      const satisfierName = ev.satisfier?.displayName   ?? ev.satisfier   ?? '';
-      const eventtype     = mapEventType(typeName, satisfierName);
+    const typeName = ev.type?.displayName ?? ev.type ?? '';
+    const qualifierNames = new Set((ev.qualifiers ?? []).map(q => q.type?.displayName).filter(Boolean));
+    // Card colour lives as a qualifier on a `type.displayName === 'Card'`
+    // event on this real shape (not a separate `satisfier` field, which
+    // doesn't exist here either) — this branch is implemented per
+    // WhoScored's documented qualifier naming but UNVERIFIED against a
+    // live card event: this test fixture had zero cards.
+    const cardQualifier = ['SecondYellow', 'YellowCard', 'RedCard'].find(q => qualifierNames.has(q)) ?? null;
+    const eventtype = mapEventType(typeName, cardQualifier);
 
-      if (!tracked.has(eventtype)) continue;
+    if (!tracked.has(eventtype)) continue;
 
-      const wsPlayerId  = ev.playerId         ? String(ev.playerId)         : null;
-      const wsAssistId  = ev.assistPlayerId   ? String(ev.assistPlayerId)   : null;
-      const wsTeamId    = ev.teamId           ? String(ev.teamId)           : null;
+    const wsPlayerId = ev.playerId ? String(ev.playerId) : null;
+    // Assist: `relatedPlayerId` on a Goal event, only when WhoScored's own
+    // "Assisted"/"IntentionalAssist" qualifier is present — confirmed
+    // against both real assisted goals (Havertz assisted by 386519,
+    // Ødegaard assisted by 322036) and the one unassisted goal (Saka, no
+    // such qualifier, no relatedPlayerId to use anyway).
+    const wsAssistId = (eventtype === 'goal' && ev.relatedPlayerId &&
+      (qualifierNames.has('Assisted') || qualifierNames.has('IntentionalAssist')))
+      ? String(ev.relatedPlayerId) : null;
+    const wsTeamId = ev.teamId ? String(ev.teamId) : null;
 
-      // teamid is NOT NULL in schema — resolve from whoscoredteamid
-      const dbTeamId    = wsTeamId ? (teamMap.get(wsTeamId) ?? null) : null;
-      if (!dbTeamId) {
-        console.warn(`    WARN: Could not resolve teamid for WS teamId=${wsTeamId}, event type=${eventtype} minute=${minute} — skipping`);
-        continue;
-      }
-
-      events.push({
-        fixture_id:      dbFixtureId,
-        player_id:       wsPlayerId ? (playerMap.get(wsPlayerId) ?? null) : null,
-        team_id:         dbTeamId,
-        // FIX: was bare `event_type,` shorthand, which referenced a variable
-        // named `event_type` that does not exist anywhere in this scope —
-        // the actual variable holding the mapped value is `eventtype`
-        // (no underscore, from mapEventType() above). The shorthand form
-        // threw `ReferenceError: event_type is not defined` on every single
-        // tracked event, silently caught by the try/catch in runOnce(),
-        // meaning fixture_events was never actually populated.
-        event_type:      eventtype,
-        minute,
-        extra_minute:    ev.addedTime ?? null,
-        assist_player_id: wsAssistId ? (playerMap.get(wsAssistId) ?? null) : null,
-        is_own_goal:      satisfierName === 'goalOwn',
-        is_penalty:      satisfierName === 'penaltyScored',
-        provider_id:     'whoscored',
-        provider_raw:    ev,
-      });
+    // teamid is NOT NULL in schema — resolve from whoscoredteamid
+    const dbTeamId = wsTeamId ? (teamMap.get(wsTeamId) ?? null) : null;
+    if (!dbTeamId) {
+      console.warn(`    WARN: Could not resolve teamid for WS teamId=${wsTeamId}, event type=${eventtype} minute=${minute} — skipping`);
+      continue;
     }
+
+    // Remediation (C3, red-team audit) — CRITICAL fix: provider_id used to
+    // be the literal string 'whoscored' (the provider's NAME), and the
+    // upsert's conflict key was (fixture_id, event_type, minute, team_id,
+    // player_id) — which cannot distinguish two genuine events sharing a
+    // stoppage-time-bucketed minute (WhoScored buckets 45+2' as
+    // minute=45; two goals by the same player at 45' and 45+2' collided
+    // and the second silently overwrote the first). `ev.id` is
+    // WhoScored's own real per-event identity — confirmed present and
+    // genuinely distinct on every real event object inspected this
+    // session (including two goals in the same match). provider_id now
+    // holds that real identity, and (fixture_id, provider_id) — see
+    // migration 039 — is the new, correct natural key.
+    if (!ev.id) {
+      console.warn(`    WARN: Event has no id (type=${eventtype} minute=${minute}) — cannot establish stable identity, skipping`);
+      continue;
+    }
+
+    events.push({
+      fixture_id:      dbFixtureId,
+      player_id:       wsPlayerId ? (playerMap.get(wsPlayerId) ?? null) : null,
+      team_id:         dbTeamId,
+      event_type:      eventtype,
+      minute,
+      // No reliable stoppage-time field on this real shape (no `addedTime`)
+      // — left null (unavailable) rather than derived/guessed from
+      // expandedMinute, which uses a different, non-stoppage-specific
+      // numbering scheme.
+      extra_minute:    null,
+      assist_player_id: wsAssistId ? (playerMap.get(wsAssistId) ?? null) : null,
+      is_own_goal:      qualifierNames.has('OwnGoal'),
+      is_penalty:       qualifierNames.has('Penalty'),
+      provider_id:     String(ev.id),
+      provider_raw:    ev,
+    });
   }
   return events;
 }
@@ -260,16 +316,14 @@ function parseEvents(matchData, dbFixtureId, playerMap, teamMap) {
 async function upsertEvents(events) {
   if (!events.length) return 0;
 
-  // Upsert on the natural uniqueness of a fixture event. The required
-  // unique constraint (`fixtureevents_uniq`) previously existed only
-  // out-of-band on this project's own local database — formalized in
-  // `supabase/migrations/031_fixture_events_uniqueness.sql` (Phase 22),
-  // so a fresh deployment now actually gets it too, matching what this
-  // upsert has always assumed.
+  // Remediation (C3) — onConflict now targets provider_id, the real
+  // WhoScored event identity (migration 039's fixture_events_provider_uniq),
+  // not the old (event_type, minute, team_id, player_id) tuple that
+  // couldn't distinguish two genuine events sharing a bucketed minute.
   const { error } = await supabase
     .from('fixture_events')
     .upsert(events, {
-      onConflict:        'fixture_id,event_type,minute,team_id,player_id',
+      onConflict:        'fixture_id,provider_id',
       ignoreDuplicates:  false,
     });
 

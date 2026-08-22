@@ -56,16 +56,31 @@ const SUPABASE_URL =
   process.env.VITE_SUPABASE_URL ??
   process.env.SUPABASE_URL;
 
+// Remediation (D3, red-team audit) — this script performs privileged writes
+// (fixture_events, fixtures.ws_*_id) that RLS does not permit under the anon
+// key. VITE_SUPABASE_ANON_KEY used to sit in this fallback chain: if the real
+// service-role credential was ever missing/misnamed, the script would run
+// silently with anon-key privileges and every write would either fail with a
+// confusing RLS-denied error or, worse, quietly no-op — never a clear "wrong
+// credential" failure. A privileged script must fail loudly and immediately
+// if its privileged credential isn't available, not degrade to a lower one.
 const SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ??
-  process.env.VITE_SUPABASE_ANON_KEY ??
   process.env.SUPABASE_SERVICE_KEY ??
   process.env.SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  console.error('Missing Supabase env vars. Keys found:', Object.keys(process.env).filter(k =>
-    k.toLowerCase().includes('supabase')
-  ));
+if (!SUPABASE_URL) {
+  console.error('Missing Supabase URL. Set SUPABASE_URL or VITE_SUPABASE_URL.');
+  process.exit(1);
+}
+
+if (!SERVICE_ROLE_KEY) {
+  console.error(
+    'Missing service-role credential. This script performs privileged writes ' +
+    '(fixture_events, fixtures.ws_*_id) that require elevated privileges — ' +
+    'set SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY / SERVICE_ROLE_KEY). ' +
+    'Refusing to run with a lower-privilege key (e.g. the anon key).'
+  );
   process.exit(1);
 }
 
@@ -481,7 +496,16 @@ function findDbMatch(meta, dbFixtures) {
       })
     : dbFixtures;
 
-  return candidates.find((f) => {
+  // Remediation (C5, red-team audit) — this used to be `.find()`, which
+  // silently accepts the FIRST candidate whenever more than one DB fixture
+  // matches on team names within the kickoff window. Two fixtures involving
+  // teams with ambiguous/overlapping short names (or a kickoff-window edge
+  // case) could silently map a WS fixture's events to the WRONG DB fixture
+  // with no error anywhere. Ambiguous matches must never be silently
+  // accepted — 0 candidates is "no match" (handled by the caller), exactly
+  // 1 is a real match, >1 must be rejected with a diagnostic so an operator
+  // can resolve it manually.
+  const matches = candidates.filter((f) => {
     const homeMatch =
       namesMatch(f.home_team?.name, meta.homeName) ||
       namesMatch(f.home_team?.short_name, meta.homeName);
@@ -489,11 +513,40 @@ function findDbMatch(meta, dbFixtures) {
       namesMatch(f.away_team?.name, meta.awayName) ||
       namesMatch(f.away_team?.short_name, meta.awayName);
     return homeMatch && awayMatch;
-  }) ?? null;
+  });
+
+  if (matches.length === 0) return null;
+
+  if (matches.length > 1) {
+    const candidateList = matches
+      .map((f) => `DB ${f.id} (${f.home_team?.name} vs ${f.away_team?.name} @ ${f.kickoff_utc})`)
+      .join(', ');
+    throw new Error(
+      `Ambiguous match for WS "${meta.homeName} vs ${meta.awayName}" @ ${meta.kickoff_utc ?? 'unknown time'} — ` +
+      `${matches.length} candidates: ${candidateList}. Refusing to guess; resolve manually.`
+    );
+  }
+
+  return matches[0];
 }
 
 // ── Step 5: Write IDs back to DB ──────────────────────────────────────────────
 async function writeWsIds(dbFixtureId, wsFixtureId, homeTeamId, homeWsTeamId, awayTeamId, awayWsTeamId) {
+  // Remediation (C6, red-team audit) — writeWsIds already defensively
+  // guarded team-ID writes (`if (homeTeamId && homeWsTeamId)`) but not the
+  // fixture-ID write itself, even though this function can be called
+  // directly (not just from main()'s loop, which always supplies valid
+  // IDs). A null/undefined dbFixtureId would silently match zero rows via
+  // `.eq('id', null)`; a null wsFixtureId would write `whoscored_fixture_id
+  // = null`, silently clobbering a previously-mapped fixture back to
+  // unmapped. Both must fail loudly instead.
+  if (!dbFixtureId || !wsFixtureId) {
+    console.error(
+      `  [ERROR] writeWsIds called with invalid IDs (dbFixtureId=${dbFixtureId}, wsFixtureId=${wsFixtureId}) — refusing to write.`
+    );
+    return false;
+  }
+
   const { error: fxErr } = await supabase
     .from('fixtures')
     .update({ whoscored_fixture_id: wsFixtureId })

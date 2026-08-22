@@ -5,7 +5,20 @@ dotenv.config({ path: '.env.local' })
 const API_BASE = 'https://api.football-data.org/v4'
 const PROVIDER = 'football-data'
 const LEAGUE_PROVIDER_ID = process.env.FOOTBALL_COMPETITION_CODE ?? 'PL'
-const SEASON_ID = 26
+// Red-team audit — CONFIRMED live: this was hardcoded to 26, but
+// production's real season row is id=1 (year_start=year_end=2026). This
+// script has never been able to run successfully against production as
+// committed — a second, independent bug from the dead-code ReferenceError
+// already fixed this session (that fix made the script syntactically
+// runnable; this one made it functionally correct). sync-fixtures/index.ts
+// already solved the identical problem correctly (see its own
+// getSeason()-equivalent lookup) — this mirrors that exact pattern
+// (look up by year_start/year_end, matching football-data.org's own
+// season-year convention) instead of trusting `is_current` (ISSUE-39: no
+// season/gameweek combination in this project's real data has ever had
+// that flag reliably set) or a hardcoded PK that drifts the moment a new
+// season row is created.
+const SEASON_YEAR = Number(process.env.FOOTBALL_SEASON ?? new Date().getFullYear())
 const TEAM_FILTER = [] // leave empty [] to sync all teams
 const REQUEST_DELAY_MS = 6500
 const MAX_429_RETRIES = 6
@@ -147,11 +160,11 @@ async function finishSyncRun(id, patch) {
 
 async function getSeason() {
   const rows = await sb(
-    `/seasons?select=id,name,year_start,year_end,is_current&id=eq.${SEASON_ID}&limit=1`
+    `/seasons?select=id,name,year_start,year_end,is_current&year_start=eq.${SEASON_YEAR}&year_end=eq.${SEASON_YEAR}&limit=1`
   )
 
   if (!rows || !rows.length) {
-    throw new Error(`No season found for id=${SEASON_ID}`)
+    throw new Error(`No season found for year_start=year_end=${SEASON_YEAR}`)
   }
 
   return rows[0]
@@ -296,8 +309,6 @@ async function syncTeamSquad(team, season) {
     playersProcessed: historyRows.length,
     squadEmpty: false,
   }
-
-  console.log(`Synced ${players.length} players for team ${team.name} (${team.id})`);
 }
 
 async function main() {
@@ -356,8 +367,6 @@ async function main() {
   }
 }
 
-
-console.log(`fullSyncPlayers.js complete: ${totalPlayers} players synced across ${totalTeams} teams`);
 
 main().catch(err => {
   console.error(err)
