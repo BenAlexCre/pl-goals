@@ -15,13 +15,10 @@ import '../_shared/game-engine/lms/index.ts'
 import '../_shared/game-engine/predictor/index.ts'
 
 // Milestone 4, Slice 4 — docs/game-engine.md § GE-6 (calculateScore) / GE-8.3
-// (Scoring flow). The loop below and everything reading/writing
-// user_entries/user_entry_picks is the retired prototype's scoring logic,
-// unchanged by this slice (out of scope — "do not refactor unrelated
-// code"). The new game_engine dispatch block, added per gameweek alongside
-// it, is entirely independent: separate tables (game_entries/pick5_picks),
-// separate write path, no shared state with the old logic beyond the
-// gameweek id and its already-computed isLive flag.
+// (Scoring flow). The new game_engine dispatch block below is entirely
+// independent: separate tables (game_entries/pick5_picks), separate write
+// path, no shared state with anything else in this file beyond the
+// gameweek id.
 //
 // Revised, Milestone 5 Slice 4 (docs/decisions.md § LMS scoring and
 // elimination): this had the exact same bug compute-deadlines had before
@@ -30,6 +27,23 @@ import '../_shared/game-engine/predictor/index.ts'
 // row (always null, GE-4.5), so calculateScore() could never have been
 // reached for LMS. Replaced with the same fix: call every registered
 // mode's calculateScore() unconditionally, per gameweek.
+//
+// Remediation (red-team audit Priority 3, authorized) — this file used to
+// also contain the retired prototype's own scoring loop: read
+// user_entries/user_entry_picks for the gameweek, compute goals via
+// player_fixture_goals, write goals_scored/result/picks_won back onto
+// those same retired tables (isLive fed its 'winning'/'won'/'losing'/'lost'
+// result values). Removed entirely — proven dead first: docs/current-state.md
+// (2026-08-05 entry, ISSUE-33/-42) already documents no frontend code has
+// created a user_entries row since the Pick 5 Game Engine cutover, and
+// admin-actions/index.ts's mark_unpaid case independently confirms the same
+// (ISSUE-20 cross-reference — a DIFFERENT, unrelated prototype generation,
+// not this one). The retired loop shared nothing with the Game Engine
+// dispatch above beyond the gameweek id and a `liveFixture`/`isLive`
+// computation that existed only to feed the retired loop's own result
+// values — removed alongside it, since nothing else read `isLive`.
+// `processed` (the retired loop's own per-pick counter) is removed for the
+// same reason; `gameEngineDispatches` is now this function's only counter.
 const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predictor']
 
 Deno.serve(async (req) => {
@@ -55,7 +69,6 @@ Deno.serve(async (req) => {
     .single()
 
   const ctx = { supabase: sb, now: () => new Date() }
-  let processed = 0
   let gameEngineDispatches = 0
 
   try {
@@ -80,15 +93,6 @@ Deno.serve(async (req) => {
       .in('status', ['upcoming', 'live'])
 
     for (const gw of gameweeks ?? []) {
-      const { data: liveFixture } = await sb
-        .from('fixtures')
-        .select('id')
-        .eq('gameweek_id', gw.id)
-        .eq('status', 'live')
-        .limit(1)
-
-      const isLive = (liveFixture?.length ?? 0) > 0
-
       // Game Engine dispatch (GE-7/GE-8.3): call every registered mode's
       // calculateScore() unconditionally — see the header comment for why
       // this replaced a per-gameweek "discover which game types have
@@ -98,70 +102,15 @@ Deno.serve(async (req) => {
         await resolveEngine(gameType).calculateScore(ctx, gw.id)
         gameEngineDispatches++
       }
-
-      const { data: entries } = await sb
-        .from('user_entries')
-        .select('id, pot_id, user_id')
-        .eq('gameweek_id', gw.id)
-
-      for (const entry of entries ?? []) {
-        const { data: payment } = await sb
-          .from('entry_payments')
-          .select('is_paid')
-          .eq('pot_id', entry.pot_id)
-          .eq('user_id', entry.user_id)
-          .eq('gameweek_id', gw.id)
-          .maybeSingle()
-
-        if (!payment?.is_paid) {
-          await sb.from('user_entries').update({ is_void: true }).eq('id', entry.id)
-          await sb.from('user_entry_picks').update({ result: 'void' }).eq('entry_id', entry.id)
-          continue
-        }
-
-        const { data: picks } = await sb
-          .from('user_entry_picks')
-          .select('id, player_id, goal_threshold')
-          .eq('entry_id', entry.id)
-
-        let won = 0
-
-        for (const pick of picks ?? []) {
-          const { data: goals } = await sb
-            .from('player_fixture_goals')
-            .select('goals')
-            .eq('player_id', pick.player_id)
-            .eq('gameweek_id', gw.id)
-
-          const totalGoals = (goals ?? []).reduce((sum, g) => sum + (g.goals ?? 0), 0)
-          const met = totalGoals >= pick.goal_threshold
-
-          const result = met ? (isLive ? 'winning' : 'won') : (isLive ? 'losing' : 'lost')
-          if (met) won++
-
-          await sb.from('user_entry_picks').update({
-            goals_scored: totalGoals,
-            result,
-          }).eq('id', pick.id)
-
-          processed++
-        }
-
-        await sb.from('user_entries').update({
-          picks_won: won,
-          status: isLive ? 'locked' : 'settled',
-          is_void: false,
-        }).eq('id', entry.id)
-      }
     }
 
     await sb.from('sync_runs').update({
       status: 'success',
       finished_at: new Date().toISOString(),
-      records_processed: processed + gameEngineDispatches,
+      records_processed: gameEngineDispatches,
     }).eq('id', run.id)
 
-    return new Response(JSON.stringify({ success: true, processed, gameEngineDispatches }), {
+    return new Response(JSON.stringify({ success: true, gameEngineDispatches }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   } catch (error) {

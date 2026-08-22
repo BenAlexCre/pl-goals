@@ -15,12 +15,11 @@ import '../_shared/game-engine/lms/index.ts'
 import '../_shared/game-engine/predictor/index.ts'
 
 // Milestone 4, Slice 5 — docs/game-engine.md § GE-6 (settle) / GE-8.4
-// (Settlement flow). The "all fixtures finished" check and everything
-// reading/writing user_entries/leaderboard_snapshots below it is the
-// retired prototype's settlement logic, unchanged by this slice (out of
-// scope). The new game_engine dispatch block, added once that same check
-// passes, is entirely independent: separate tables, separate write path,
-// no shared state with the old logic beyond the gameweek id.
+// (Settlement flow). The "all fixtures finished" check gates both the Game
+// Engine dispatch below and the gameweeks.status='completed' transition
+// after it — the new game_engine dispatch block is entirely independent of
+// that transition: separate tables, separate write path, no shared state
+// beyond the gameweek id.
 //
 // GE-19's Settlement sequence diagram doesn't show a sync_runs write for
 // this flow (unlike the Locking diagram, which explicitly called for one in
@@ -32,6 +31,23 @@ import '../_shared/game-engine/predictor/index.ts'
 // — the dispatch step queried game_entries.gameweek_id = <this gameweek>,
 // which can never match an LMS row (always null, GE-4.5). Replaced with the
 // same fix: call every registered mode's settle() unconditionally.
+//
+// Remediation (red-team audit Priority 3, authorized) — this file used to
+// also write the retired prototype's own settlement: mark user_entries
+// 'settled', then rank each pot's rows by picks_won and upsert
+// leaderboard_snapshots. Removed entirely — proven dead first (same
+// evidence as compute-scores/index.ts's own remediation note: docs/
+// current-state.md's 2026-08-05 entry, ISSUE-33/-42, confirms no frontend
+// code has created a user_entries row since the Pick 5 Game Engine
+// cutover). leaderboard_snapshots itself has had zero readers since that
+// same cutover — frontend/src/hooks/useLeaderboard.js's own header comment
+// documents it now reads pot_standings_snapshots exclusively, which the
+// Game Engine dispatch below already writes via each engine's own
+// settle() -> generateStandings() call. The gameweeks.status='completed'/
+// is_current=false transition immediately below is NOT part of the retired
+// path despite sitting among it — confirmed by repo-wide search that no
+// Game Engine code performs this transition itself, making it this
+// function's own genuinely-current responsibility. Preserved exactly.
 const ALL_GAME_TYPES: GameType[] = ['pick5', 'last_man_standing', 'score_predictor']
 
 Deno.serve(async (req) => {
@@ -101,50 +117,9 @@ Deno.serve(async (req) => {
         gameEngineDispatches++
       }
 
-      await sb.from('user_entries')
-        .update({ status: 'settled', settled_at: new Date().toISOString() })
-        .eq('gameweek_id', gw.id)
-        .neq('status', 'void')
-
       await sb.from('gameweeks')
         .update({ status: 'completed', is_current: false })
         .eq('id', gw.id)
-
-      const { data: potIds } = await sb
-        .from('user_entries')
-        .select('pot_id')
-        .eq('gameweek_id', gw.id)
-
-      const uniquePotIds = [...new Set((potIds ?? []).map((r) => r.pot_id))]
-
-      for (const potId of uniquePotIds) {
-        const { data: rows } = await sb
-          .from('user_entries')
-          .select('user_id, picks_won, picks_total, is_void')
-          .eq('pot_id', potId)
-          .eq('gameweek_id', gw.id)
-          .order('picks_won', { ascending: false })
-
-        const sorted = [...(rows ?? [])]
-          .filter((r) => !r.is_void)
-          .sort((a, b) => b.picks_won - a.picks_won)
-
-        for (let i = 0; i < sorted.length; i++) {
-          const row = sorted[i]
-          await sb.from('leaderboard_snapshots').upsert({
-            pot_id: potId,
-            gameweek_id: gw.id,
-            user_id: row.user_id,
-            rank: i + 1,
-            picks_won: row.picks_won,
-            picks_total: row.picks_total,
-            entries_count: 1,
-            strike_rate: row.picks_total > 0 ? Number(((row.picks_won / row.picks_total) * 100).toFixed(2)) : 0,
-            is_overall: false,
-            is_void: row.is_void,
-          }, { onConflict: 'pot_id,gameweek_id,user_id' })
-        }
-      }
     } catch (err) {
       errors.push({ gameweek_id: gw.id, message: err instanceof Error ? err.message : String(err) })
     }
