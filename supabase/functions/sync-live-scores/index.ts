@@ -95,7 +95,7 @@ Deno.serve(async (req) => {
   const windowStart = new Date(now.getTime() - 130 * 60 * 1000).toISOString()
   const windowEnd = new Date(now.getTime() + 10 * 60 * 1000).toISOString()
 
-  const { data: relevantFixtures, error: relevantError } = await sb
+  const { data: windowFixtures, error: windowError } = await sb
     .from('fixtures')
     .select('id')
     .gte('kickoff_utc', windowStart)
@@ -103,9 +103,36 @@ Deno.serve(async (req) => {
     .not('status', 'in', '(finished,postponed,cancelled)')
     .limit(1)
 
-  if (relevantError) {
-    return jsonResponse({ error: `DB check failed: ${relevantError.message}` }, 500)
+  if (windowError) {
+    return jsonResponse({ error: `DB check failed: ${windowError.message}` }, 500)
   }
+
+  // Remediation (C7, red-team audit) — the -130min side of the window
+  // above stops considering a fixture "relevant" 130 minutes after its
+  // OWN kickoff, regardless of whether it actually finished. A match that
+  // runs unusually long (extreme stoppage time, a weather/crowd-trouble
+  // suspension and resume, a provider outage during its live window) can
+  // still be sitting at status='live' in the DB when that happens. If no
+  // OTHER fixture is live that day, this function would then skip
+  // entirely and stop polling that stuck fixture — the only backstop
+  // would be sync-fixtures-daily at 05:00 UTC, which could leave a
+  // visibly frozen live score (read directly by FixtureCard.jsx and both
+  // Game Engines) for hours. This second, unwindowed check is bounded
+  // (only matches this function itself previously marked 'live') and
+  // self-limiting (a fixture leaves this set the moment football-data.org
+  // reports it FINISHED/POSTPONED/CANCELLED), so it reconciles genuinely
+  // stuck fixtures without polling anything indefinitely or unbounded.
+  const { data: stuckFixtures, error: stuckError } = await sb
+    .from('fixtures')
+    .select('id')
+    .eq('status', 'live')
+    .limit(1)
+
+  if (stuckError) {
+    return jsonResponse({ error: `DB check failed: ${stuckError.message}` }, 500)
+  }
+
+  const relevantFixtures = [...(windowFixtures ?? []), ...(stuckFixtures ?? [])]
 
   if (!relevantFixtures || relevantFixtures.length === 0) {
     return jsonResponse({ success: true, skipped: true, reason: 'no fixture in live window', updated: 0 })

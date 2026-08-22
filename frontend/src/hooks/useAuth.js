@@ -41,9 +41,31 @@ export function useAuth() {
       setLoading(false)
     })
 
+    // Remediation (D2, red-team audit) — app_metadata.role (super_admin/
+    // app_admin) is embedded in the access token at mint time; a role
+    // change made by an admin in a DIFFERENT browser session has no way to
+    // reach this tab except the access token's own natural expiry/refresh
+    // cycle (up to ~1hr). Server-side authorization is already correct and
+    // unaffected either way (every Edge Function re-validates against live
+    // DB state via getUser(), not a decoded claim) — this is purely a UI-
+    // freshness improvement: refreshing on tab-focus means a revoked/
+    // changed role is reflected in THIS tab's nav/route guards within one
+    // focus event instead of silently waiting out the rest of the token's
+    // lifetime, without polling or a new push channel.
+    function refreshOnFocus() {
+      if (document.visibilityState !== 'visible') return
+      supabase.auth.refreshSession().catch((err) => {
+        console.error('Session refresh on focus failed', err)
+      })
+    }
+    document.addEventListener('visibilitychange', refreshOnFocus)
+    window.addEventListener('focus', refreshOnFocus)
+
     return () => {
       mounted = false
       subscription.unsubscribe()
+      document.removeEventListener('visibilitychange', refreshOnFocus)
+      window.removeEventListener('focus', refreshOnFocus)
     }
   }, [setUser, setLoading])
 

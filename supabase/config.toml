@@ -151,9 +151,31 @@ enabled = true
 # match this project's real dev server (localhost:5173) — a stale confirmation
 # link would redirect to a dead port. Corrected so email verification links
 # actually land back in the app.
-site_url = "http://localhost:5173"
+# Live-review fix (email confirmation localhost redirect): this value is also
+# what `supabase config push` syncs to the LINKED PRODUCTION project's Auth
+# settings — production's Site URL had never been updated from this same
+# local-dev value, so any Supabase Auth flow that didn't get an explicit,
+# allow-listed `redirectTo`/`emailRedirectTo` fell back to this literal
+# localhost URL in production. Every real email-sending call in this app
+# (SignUp.jsx's signUp(), ForgotPassword.jsx's resetPasswordForEmail()) DOES
+# always pass an explicit `${window.location.origin}/...` redirect, so
+# switching this default to the production origin does not break local dev —
+# local dev's own explicit redirect is still honored via
+# additional_redirect_urls below, exactly as production's explicit redirect
+# already was. This value only matters as the fallback when no valid
+# explicit redirect is supplied.
+site_url = "https://premierleaguepredictor.ie"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Localhost entries kept for local dev's own explicit emailRedirectTo/redirectTo
+# calls (window.location.origin resolves to these when running `npm run dev`).
+# Both production hostnames included since Vercel serves the app on both the
+# apex and www domains (same deployment, both are real user-facing origins).
+additional_redirect_urls = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://premierleaguepredictor.ie/**",
+  "https://www.premierleaguepredictor.ie/**",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to the local API URL (http://127.0.0.1:<port>/auth/v1).
@@ -179,7 +201,12 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-email_sent = 2
+# Live-review fix (email delivery) — was 2 (Supabase's own testing-oriented
+# default), which blocked real signups project-wide once exhausted
+# regardless of mailer. Resend's own free-tier throughput is far higher
+# than this; 30/hour is a reasonable abuse-prevention ceiling for this
+# app's expected signup/reset volume, not a provider limit.
+email_sent = 30
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
 # Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
@@ -219,15 +246,24 @@ otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
 otp_expiry = 3600
 
-# Use a production-ready SMTP server
-# [auth.email.smtp]
-# enabled = true
-# host = "smtp.sendgrid.net"
-# port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# Live-review fix (email delivery) — replaces Supabase's built-in/shared
+# mailer (hard-capped at this project's own auth.rate_limit.email_sent = 2
+# per hour, confirmed live and directly reproduced as the root cause of
+# "no confirmation email" reports) with Resend as a real transactional
+# provider. `pass` is never committed — env(RESEND_API_KEY) resolves from
+# the invoking shell's environment at `supabase config push`/`start` time,
+# same substitution mechanism this file already uses for
+# auth.sms.twilio's auth_token above. admin_email requires
+# premierleaguepredictor.ie to be a *verified* sending domain in Resend
+# (SPF/DKIM DNS records) — sending will fail until that's done.
+[auth.email.smtp]
+enabled = true
+host = "smtp.resend.com"
+port = 587
+user = "resend"
+pass = "env(RESEND_API_KEY)"
+admin_email = "noreply@premierleaguepredictor.ie"
+sender_name = "PL Predictor"
 
 # Uncomment to customize email template
 # [auth.email.template.invite]
