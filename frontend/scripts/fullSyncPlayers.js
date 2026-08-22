@@ -1,5 +1,6 @@
 // scripts/fullSyncPlayers.js
 import * as dotenv from 'dotenv'
+import { fileURLToPath } from 'node:url'
 dotenv.config({ path: '.env.local' })
 
 const API_BASE = 'https://api.football-data.org/v4'
@@ -38,9 +39,16 @@ const FOOTBALL_DATA_KEY =
   process.env.VITE_FOOTBALL_DATA_KEY ??
   ''
 
-if (!SUPABASE_URL) throw new Error('Missing SUPABASE_URL or VITE_SUPABASE_URL')
-if (!SERVICE_ROLE_KEY) throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY')
-if (!FOOTBALL_DATA_KEY) throw new Error('Missing FOOTBALL_DATA_KEY or VITE_FOOTBALL_DATA_KEY')
+// Remediation (F5, red-team audit) — moved from unconditional top-level
+// throws to a guard that only runs when this file is executed directly
+// (`node scripts/fullSyncPlayers.js`), identical behavior for the real
+// script but now safe to `import` from a test for deactivateOtherActiveTeams
+// without needing real credentials or triggering main() as a side effect.
+function assertEnv() {
+  if (!SUPABASE_URL) throw new Error('Missing SUPABASE_URL or VITE_SUPABASE_URL')
+  if (!SERVICE_ROLE_KEY) throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY')
+  if (!FOOTBALL_DATA_KEY) throw new Error('Missing FOOTBALL_DATA_KEY or VITE_FOOTBALL_DATA_KEY')
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -249,6 +257,38 @@ async function markExistingTeamHistoryInactive(teamId, seasonId) {
   )
 }
 
+// Remediation (F5, red-team audit) — CONFIRMED root cause of 16 real
+// players (Garnacho, Johnson, Guimarães, and 13 others) ending up with
+// TWO simultaneously is_active=true rows in production: this script only
+// ever deactivated a player's OLD team row when that OLD team's own
+// syncTeamSquad() happened to run again (markExistingTeamHistoryInactive
+// above is scoped by team+season, not by player). A player who
+// transferred away from a team that wasn't re-synced in the same run
+// (TEAM_FILTER — see the header comment — is an explicitly supported
+// partial-sync mode) keeps their stale active row there forever, while
+// also gaining a new active row at their new team once THAT team is
+// synced. Deactivating by player (any team other than the one they're
+// about to be confirmed active at) closes this regardless of whether the
+// old team ever gets re-synced in the same run — batched per team-sync
+// call (one PATCH per team, not per player) to keep the request count
+// unchanged.
+export async function deactivateOtherActiveTeams(playerIds, currentTeamId, seasonId) {
+  if (!playerIds.length) return
+
+  const inList = playerIds.map(id => String(id)).join(',')
+  await sb(
+    `/player_team_history?player_id=in.(${inList})&team_id=neq.${currentTeamId}&season_id=eq.${seasonId}&is_active=eq.true`,
+    {
+      method: 'PATCH',
+      headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        is_active: false,
+        left_at: new Date().toISOString().slice(0, 10),
+      }),
+    }
+  )
+}
+
 async function upsertPlayerTeamHistory(rows) {
   if (!rows.length) return
 
@@ -281,6 +321,15 @@ async function syncTeamSquad(team, season) {
   const playerIdMap = new Map(
     fetchedPlayers.map(p => [String(p.provider_id), p.id])
   )
+
+  // Remediation (F5) — see deactivateOtherActiveTeams's own comment.
+  // Runs before this team's own roster refresh so a player transferring
+  // IN is never briefly active at two teams even within this single sync
+  // run's ordering.
+  const currentSquadPlayerIds = squad
+    .map(p => playerIdMap.get(String(p.id)))
+    .filter(Boolean)
+  await deactivateOtherActiveTeams(currentSquadPlayerIds, team.id, season.id)
 
   await markExistingTeamHistoryInactive(team.id, season.id)
 
@@ -368,7 +417,13 @@ async function main() {
 }
 
 
-main().catch(err => {
-  console.error(err)
-  process.exit(1)
-})
+// Remediation (F5, red-team audit) — see assertEnv()'s note. Only runs the
+// real sync when this file is the actual entrypoint, not when it's imported
+// (e.g. by fullSyncPlayers.test.js).
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  assertEnv()
+  main().catch(err => {
+    console.error(err)
+    process.exit(1)
+  })
+}

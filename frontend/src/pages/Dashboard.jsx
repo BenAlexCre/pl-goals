@@ -701,7 +701,7 @@ export default function Dashboard() {
           </div>
 
           {potsLoading ? (
-            <div className="grid md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <SkeletonCard />
               <SkeletonCard />
             </div>
@@ -713,7 +713,22 @@ export default function Dashboard() {
               action={<Link to="/pots" className="text-sm font-medium text-accent hover:underline">Create or join a pot</Link>}
             />
           ) : (
-            <div className="grid md:grid-cols-2 gap-4">
+            // Remediation (F1, red-team audit) — was `grid md:grid-cols-2`
+            // with no explicit column count below `md`. Tailwind's
+            // `grid-cols-N` utilities generate `minmax(0, 1fr)` tracks; with
+            // no base utility at all, the browser fell back to its own
+            // default single implicit column with unbounded auto-sizing,
+            // which grew to fit the widest card's max-content width (driven
+            // by the heading's `truncate` → `white-space: nowrap`) instead
+            // of the actual container width — confirmed live: computed
+            // `grid-template-columns` measured 429.75px against a 338px
+            // container. `grid-cols-1` makes the track bound to
+            // `minmax(0, 1fr)` at every breakpoint, and `min-w-0` on the
+            // grid item itself (the actual overflow anchor — grid items
+            // default to `min-width: auto`, confirmed live) is added as
+            // defense-in-depth so a future className change on Card can't
+            // silently reopen the same gap.
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {pots.map((pot) => {
                 const Icon = GAME_TYPE_ICONS[pot.game_type] || Trophy
                 const status = potStatus?.get(pot.id)
@@ -721,7 +736,7 @@ export default function Dashboard() {
                 const action = getPotAction(pot, status)
                 const progress = getPotProgress(pot, status)
                 return (
-                  <Link key={pot.id} to={`/pot/${pot.id}`}>
+                  <Link key={pot.id} to={`/pot/${pot.id}`} className="min-w-0">
                     <Card hover className="p-5 h-full">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
