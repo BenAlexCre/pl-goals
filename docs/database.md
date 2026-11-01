@@ -184,6 +184,14 @@ Audit log for both edge-function-driven and cron-driven sync jobs: `job_name`,
 
 ## Views
 
+**Security (migration 043):** `league_team_standings`, `player_season_stats`,
+`player_season_match_stats` and `available_players_by_gameweek` are
+`security_invoker = true`, so base-table RLS applies to the caller (before 043 they
+ran as owner and returned rows to the anon role). `player_fixture_goals`
+(materialized — cannot have RLS) has `select` revoked from `anon`/`public`; only
+service-role Edge Functions read it. Any future `create or replace view` of these
+views must keep `with (security_invoker = true)`.
+
 ### `available_players_by_gameweek` (view)
 The core "which players can be picked for gameweek X" query: joins active
 `player_team_history` → `teams` → `fixtures` (excluding postponed/cancelled) →
