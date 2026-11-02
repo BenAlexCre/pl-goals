@@ -1,6 +1,6 @@
 # Project Board
 
-Last reviewed: 2026-11-02, post-release hardening — see [finalisation-status.md § 0b](./finalisation-status.md#0b-post-release-hardening-2026-11-02).
+Last reviewed: 2026-11-02, Release 2 prepared — see [finalisation-status.md § 0c](./finalisation-status.md#0c-release-2--payments--competition-rules-2026-11-02).
 
 This is the **active work tracker** — a Kanban view of what's queued, in progress,
 blocked, or done. It's derived from, and must stay consistent with,
@@ -32,7 +32,8 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
-- **Pick 5 interim "lost" before kickoff** — `ISSUE-85` (P2), needs an owner decision on the interim-result rule.
+- **ISSUE-85 follow-up** — final display of a postponed player's pick after gameweek completion (owner decision; recommended void).
+- **ISSUE-87** (P3) — map provider `SUSPENDED` (abandoned) explicitly instead of `tbd`.
 - **Optional: raise pg_net timeout for `sync-fixtures-daily`** (42 s daily run) — observability only, follow-up to `ISSUE-83`.
 - **Security advisor follow-ups** — `ISSUE-84` (P2) remaining items: pin search_path on 7 invoker functions, enable leaked-password protection (owner, dashboard), `pg_trgm` schema. The anon-EXECUTE item is fixed in repo (046).
 - **Fix the 7 `exhaustive-deps` warnings** — folds into `ISSUE-10`/`ISSUE-27` (TanStack Query migration of `PotDetail.jsx`); lint ratchets at 7 meanwhile.
@@ -72,7 +73,8 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Blocked
 
-- **`ISSUE-86` (P1) — free pots void entries unless members are marked paid** — 6 real entries already void in production. Blocked on the owner's rule decision (recommended: €0 pots count as paid) and approval before any reinstatement of real entries.
+- **Deploy Release 2** (`release-2/payments-rules`: ISSUE-86, ISSUE-85, plus ISSUE-83/84 and migration 046) — implemented and tested; blocked on owner approval. Exact steps: finalisation-status.md § 0c.
+- **Six void test entries** — investigated (all test accounts); owner to choose leave / delete test data.
 - **Apply migration 046 to production + deploy the compute-scores change** (`ISSUE-84`, `ISSUE-83`) — implemented and tested locally on `hardening/post-release`; blocked on owner approval.
 - **Score Predictor 40/40/20 rules** — proposal written ([docs/proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md)); 8 owner decisions listed; no logic changed.
 - **Signed-in production testing** — plan ready ([production-testing-plan.md](./production-testing-plan.md)); blocked on approval to create the test accounts.
@@ -91,6 +93,7 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Done
 
+- **Release 2 prepared (not deployed)** — 2026-11-02. ISSUE-86 free pots (engines, reinstatement, CSV, UI, business rule), ISSUE-85 per-fixture pick status, worktree migration renumbered 045→047, 40/40/20 specification v2 with skipped acceptance tests, live local settlement check; six void entries investigated (test accounts only).
 - **Post-release hardening (code + tests, not deployed)** — 2026-11-02. Migration 046 (`ISSUE-84` anon EXECUTE) with pgTAP tests; compute-scores selective dispatch (`ISSUE-83` root cause) with unit + equivalence tests; production testing plan; 40/40/20 proposal; `ISSUE-85`/`ISSUE-86` found.
 - **Production deployment of the mobile finalisation release** — 2026-11-02. Backup taken and restore-verified; migration 044 applied (09:06 UTC, `ISSUE-78` resolved); PR #1 merged (fast-forward to `a7b7804`) and deployed (09:46 UTC); signed-out, performance, data-preservation, cron and advisor smoke tests passed. Live 4G first paint 3.5 s → 0.57 s.
 - **Release preparation (`ISSUE-77`, `ISSUE-79`, `ISSUE-38` resolved)** — 2026-11-02. Migration 045 renumbered in the worktree; local migration history repaired; 044 reviewed (grants, triggers, rollback tested); 001→045 replayed on a fresh DB; production state read-only verified (schema dump + push dry run); ESLint 9 toolchain; CI workflow; deployment runbook, rollback and approval checklist. Nothing pushed/deployed.

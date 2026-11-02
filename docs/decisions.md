@@ -7328,3 +7328,46 @@ logic into each engine (more change surface for the same result).
 gameweek without locked entries or active fixtures must extend `selectGameweeks.ts`
 — the equivalence test (`frontend/scripts/qa/compute-scores-equivalence.mjs`) is the
 check. `full_scan` is the escape hatch.
+
+
+### Free pots: financial settlement is derived, not stored — decision (2026-11-02, ISSUE-86)
+
+**Decision:** an entry in a pot with `entry_fee = 0` is treated as financially settled
+by computing it from the pot's fee at the point of use (`paymentEligibility.ts` in the
+engines and reinstatement; `utils/paymentStatus.js` in the UI). No `entry_payments`
+row is written or changed for free entries; the UI shows a third state, "Free entry".
+
+**Context:** settlement voided every entry without `is_paid = true`, and free LMS/
+Predictor pots could not record a payment at all. The owner specified the rule and
+required free entries to stay distinguishable from paid ones and history to stay intact.
+
+**Reason:** `pots.entry_fee` is immutable once a pot has entries
+(`prevent_pot_contract_change`), so deriving "free" is exact and needs no backfill;
+storing synthetic `is_paid` rows would make free indistinguishable from paid and
+rewrite payment history.
+
+**Alternatives considered:** auto-marking free entries paid (rejected — loses the
+distinction, writes fake records); a new `payment_status` column/enum (schema change
+and backfill for a fact already derivable); exempting free pots only in the UI (would
+leave settlement voiding them).
+
+**Consequences:** every payment reader must use the shared helpers; a future change
+allowing fee edits after entries would invalidate the derivation and must revisit this.
+
+### Pick 5 displayed result from the player's own fixture — decision (2026-11-02, ISSUE-85)
+
+**Decision:** `pick5_picks.result` is derived per pick from the player's team's fixtures
+in the gameweek (`pick5/pickResult.ts`), excluding postponed/cancelled ones exactly as
+gameweek completion does; fixture status, not the clock, decides "started".
+
+**Context:** a gameweek-wide "anything live?" check showed picks as "lost" before their
+player had played.
+
+**Reason:** owner-requested; `result` is display-only (the engine scores with
+`picks_won`), so the change cannot alter winners or prizes.
+
+**Alternatives considered:** deriving status client-side from fixtures (two sources of
+truth); using kickoff time (wrong for delayed kickoffs).
+
+**Consequences:** two extra batched reads per scored gameweek; the final display of a
+postponed player's pick is an open owner decision.

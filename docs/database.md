@@ -252,9 +252,10 @@ invoker functions without a pinned search_path): ISSUE-84.
 
 **Migration numbering (ISSUE-77, resolved 2026-11-02):** `043` is
 `043_views_security_invoker.sql` (repo and production), `044` is
-`044_pin_security_definer_search_path.sql`, and the pot-admin-orphaning migration is
-**`045_prevent_pot_admin_orphaning.sql`** — renumbered from 043, currently only in the
-uncommitted `pot-admin-a11y-remediation` worktree, not in production. It adds
+`044_pin_security_definer_search_path.sql`, `045` is **intentionally unused**, `046` is
+`046_restrict_security_definer_execute.sql`, and the pot-admin-orphaning migration is
+**`047_prevent_pot_admin_orphaning.sql`** — renumbered 043 → 045 → 047, currently only in
+the uncommitted `pot-admin-a11y-remediation` worktree, not in production. It adds
 `enforce_pot_has_admin()` (`security definer`, `search_path = ''`) with BEFORE
 DELETE / BEFORE UPDATE OF role triggers on `pot_members`, blocking any change that
 would leave an active pot without an admin. Document it in the tables above when it

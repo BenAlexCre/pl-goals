@@ -1,6 +1,6 @@
 # PL-GOALS — FINALISATION STATUS & MASTER TODO
 
-Last updated: **2026-11-02, post-deployment** (sessions 83–85 in
+Last updated: **2026-11-02, Release 2 prepared (§0c)** — previously: **2026-11-02, post-deployment** (sessions 83–85 in
 [session-log.md](./session-log.md)). **Status: DEPLOYED to production** —
 migration 044 applied 09:06 UTC, frontend live 09:46 UTC (`main` = `a7b7804`).
 Signed-out and database-side smoke tests pass; signed-in smoke tests await an owner
@@ -111,6 +111,126 @@ and implement ISSUE-86 (free pots), the Score Predictor 40/40/20 rules (time-bou
 GW19) and ISSUE-85, all behind the existing engine tests plus new ones, then run the
 signed-in production test plan across one real gameweek. Feature work should wait
 until those rules are settled, because real players' entries are affected today.
+
+## 0c. Release 2 — payments & competition rules (2026-11-02)
+
+Branch **`release-2/payments-rules`** (on top of `hardening/post-release`, which is on
+top of `docs/post-release-2026-11-02`; both earlier branches unchanged). **Nothing in
+this section is in production** — no deploys, no merges, no production data changes.
+Production was read only (`supabase db query`).
+
+### Completed fixes (in repo, tested, not deployed)
+
+| Item | What changed | Tests |
+|---|---|---|
+| **ISSUE-86** free pots | An entry in a €0 pot is financially settled without a payment record: never voided for non-payment, reinstatable without one, shown as "Free entry" (never "Paid"/"Unpaid"). No `entry_payments` row is created or changed; already-void entries are untouched; pots with a fee are unchanged. Applies to all three engines, reinstatement, CSV import (refuses free pots), Dashboard, Pick 5 status bar and member cards, LMS/Predictor status line, admin Payments. business-rules.md updated. | 20 engine/admin Deno tests (mutation-checked: 7 fail if the rule is disabled), 16 frontend tests, live local settlement check (§ below) |
+| **ISSUE-85** Pick 5 pending | A pick's displayed result follows its own player's match: `pending` → `winning`/`losing` → `won`/`lost`. Display only — `picks_won`, winners and prizes unchanged. Open pages update via existing realtime. business-rules.md updated. | 11 decision-table + 5 integration Deno tests |
+| **ISSUE-83 / ISSUE-84** | From the hardening branch (included): compute-scores selective dispatch; migration 046. | see § 0b |
+| Migration numbering | Worktree migration renumbered **045 → 047** (refs updated); local history aligned. 045 is intentionally unused. | 001→047 replays on a fresh DB |
+| 40/40/20 spec | Recommended rules specification v2 with 8 owner decisions; 7 acceptance tests written and **skipped** until approval. | — |
+
+**Live local check** (`frontend/scripts/qa/settlement-live-check.mjs`, real Edge
+Functions, snapshot/restore): with nobody marked paid and a gameweek ready to settle,
+settlement dispatched (3), voided the unpaid entry in a €20 pot, **settled — did not
+void — the free Pick 5 entries**, left free pots' payment rows unchanged, and showed no
+premature "lost"; data restored byte-identical. (The €9.99 LMS pot wasn't eligible for
+that gameweek, so LMS's free-pot path is proven by unit tests only.)
+
+**Test results (this branch):** frontend 33/33, lint 0 errors (7-warning ratchet),
+build clean; Deno 391 passed, 7 ignored (acceptance), `deno check` 16/16; pgTAP 31/31;
+migration replay 001→047 clean; mobile regression sweep 37 runs clean; free-pot screens
+verified by rendered text.
+
+### The six void entries (investigated individually)
+
+All six belong to **three test accounts on a disposable-inbox domain**, each in its own
+single-member test pot created during August QA. **No real player is affected.**
+(Account names and ids are deliberately not in this public repository; they were
+reported to the owner directly.)
+
+| # | Mode | Pot (test) | Entry created | Voided | Reason | Payment | If restored |
+|---|---|---|---|---|---|---|---|
+| 1–3 | Score Predictor | 3 test pots, 1 member each | 22 Aug 2026 | 24 Aug 21:30 UTC (settle-gameweek) | Free pot, never marked paid (ISSUE-86) | none recorded | Re-scored (1 prediction each); 1-row standings; €0 prize at season end; affects nobody else |
+| 4–6 | Pick 5 (GW2) | 3 test pots, 1 member each | 22 Aug 2026 | 31 Aug 21:30 UTC (settle-gameweek) | Same | none recorded | GW2 is completed, so reinstatement would leave the entry "locked" for a gameweek that won't settle again; no prizes or standings exist; affects nobody else |
+
+**Recommendation:** don't restore them — they are QA artefacts. Remove the three test
+accounts and their pots by exact id instead (see the production testing plan's
+clean-up). **Not done — needs owner approval either way.**
+
+### Real-player data risk
+
+- **Today: none.** Every production pot and entry belongs to disposable test accounts;
+  none of the six Gmail accounts is a member of any pot.
+- **Until Release 2 ships:** the first real free pot will have its entries voided at
+  its first settlement. Ship ISSUE-86 before inviting real players, or ask organisers
+  to use per-member "Mark paid" meanwhile.
+- **Release 2 itself changes no stored data** (no data migration; already-void entries
+  stay void).
+
+### Gameweek 19 deadline (Score Predictor 40/40/20)
+
+From production's schedule: **GW19 deadline Fri 1 Jan 2027 19:45 UTC; last GW19 kickoff
+Sun 3 Jan 16:30 UTC.** Recommended: owner decisions by ~30 Nov 2026, deploy by
+**Mon 21 Dec 2026**. Details: [proposals/score-predictor-40-40-20.md § 0](./proposals/score-predictor-40-40-20.md#0-deadline-from-productions-fixture-schedule-read-2026-11-02).
+
+### Decisions required from the owner
+
+| # | Decision | Recommendation |
+|---|---|---|
+| 1 | Approve Release 2 for deployment (scope below) | Yes — ISSUE-86 must ship before real players |
+| 2 | The six void test entries: restore, leave, or delete the test data | Leave void; delete test accounts/pots by exact id |
+| 3 | ISSUE-85: what a postponed player's pick shows after the gameweek completes (currently stays `pending`) | Show it as void ("not played") — needs a small follow-up |
+| 4 | Score Predictor 40/40/20: approve [RULE]s + decisions 1–8 | See the spec § 12 |
+| 5 | Codex files (`.agents/`, `.codex/`, `AGENTS.md`, untracked): commit, ignore, or delete | Commit if you use Codex on this repo; otherwise add to `.gitignore` |
+| 6 | Signed-in production test accounts | Per production-testing-plan.md |
+
+### Migration requirements
+
+| Version | File | Production | Ships with |
+|---|---|---|---|
+| 043, 044 | views / search_path | applied | — |
+| 045 | *(unused)* | — | — |
+| **046** | `046_restrict_security_definer_execute.sql` | **pending** | Release 2 |
+| 047 | `047_prevent_pot_admin_orphaning.sql` | — | the `pot-admin-a11y-remediation` worktree, later (uncommitted, separate) |
+
+Release 2's code needs **no new migration**. 046 is independent and can go first.
+
+### Deployment instructions (owner-approved steps only)
+
+Order: backup → 046 → Edge Functions → frontend → verify.
+
+1. **Backup** — same procedure as § 0 (the 2026-11-02 backup predates 044/046).
+2. **Migration 046** — `npx supabase db push --linked --dry-run` must list only 046;
+   then `npx supabase db push --linked`. (It aborts itself if privileges come out wrong.)
+3. **Edge Functions** (merging to `main` does NOT deploy them). Seven functions bundle
+   the changed engines and must be deployed **together**, so no function runs the old
+   payment rule:
+   ```bash
+   for f in compute-scores compute-deadlines settle-gameweek admin-actions \
+            submit-pick5-picks submit-lms-pick submit-predictor-picks; do
+     npx supabase functions deploy $f --project-ref rgohuoooujqclcfkoaht
+   done
+   ```
+   Deploy them **outside** settle-gameweek's :00/:30 runs.
+4. **Frontend** — PR `release-2/payments-rules` → `main`; CI and the Vercel preview
+   must be green; merging deploys production.
+5. **Verify** — free pot: player sees "Free entry", admin sees "No payment needed";
+   compute-scores `sync_runs` under 1 s; anonymous
+   `POST /rest/v1/rpc/refresh_gameweek_deadlines` → 401; security advisor clean of the
+   046 items; § 9 checklist.
+
+**Rollback:** frontend → Vercel instant rollback; Edge Functions → redeploy from
+`a7b7804` (the current production commit); 046 → its re-grant SQL (§ 0b). No data
+rollback is needed (no data was changed).
+
+### Outstanding bugs / follow-ups
+
+| ID | Pri | Item |
+|---|---|---|
+| ISSUE-87 (new) | P3 | Provider status `SUSPENDED` (abandoned match) maps to `tbd` in `sync-fixtures`/`sync-live-scores`. Handled safely by ISSUE-85's rule, but an abandoned match isn't labelled as such. |
+| ISSUE-84 (rest) | P2 | 7 invoker functions' search_path; leaked-password protection (owner, dashboard) |
+| ISSUE-10/27 | P2 | `PotDetail.jsx` data fetching (clears the 7 lint warnings) |
+| ISSUE-80 | P3 | Non-member pot view logs a 406 |
 
 ## 1. Release readiness
 

@@ -13,6 +13,40 @@ from here.
 
 ---
 
+## 2026-11-02 (87) — Release 2: payments & competition rules (not deployed)
+
+Branch `release-2/payments-rules` on top of `hardening/post-release`.
+
+**Housekeeping:** `.agents/`, `.codex/`, `AGENTS.md` identified as an OpenAI Codex
+import of this repo's Claude Code setup (AGENTS.md = CLAUDE.md with two words changed;
+.codex/config.toml mirrors .mcp.json; skills = migrated .claude/commands), created
+17:59; not required, no secrets; left untracked. Worktree migration renumbered 045 →
+047; local history row updated; 001→047 replays clean.
+
+**ISSUE-86:** payment eligibility derived from the pot's immutable fee; engines,
+reinstatement, CSV import, five UI surfaces, business rule. Five existing Pick 5 tests
+had been asserting free-pot voiding via the fake's default €0 fee — moved to a pot with
+a fee; LMS/Predictor fixtures had no fee at all (so never exercised the free path) —
+made explicit. Mutation check: 7 free-pot tests fail with the rule disabled.
+
+**Six void entries (read-only):** all three owners are disposable-inbox test accounts
+in single-member QA pots; every production pot belongs to test accounts — no real
+player affected.
+
+**ISSUE-85:** `pick5/pickResult.ts` + integration; display only (picks_won unchanged);
+realtime already refreshes open pages. Found ISSUE-87 (SUSPENDED → tbd).
+
+**40/40/20:** spec v2 with [RULE]/[OWNER DECISION] labels; GW19 deadline from
+production (Fri 1 Jan 2027 19:45 UTC); 7 acceptance tests skipped until approval.
+
+**Testing:** frontend 33/33, Deno 391 (+7 ignored), deno check 16/16, pgTAP 31/31,
+replay 001→047, sweep 37 runs clean, rendered free-pot screens checked. A live
+settlement check initially proved nothing (0 dispatches) — rebuilt so it fails unless
+settlement really runs; then passed. Its first restore failed on a generated column
+(transaction rolled back, snapshot kept, restored manually, verified identical).
+
+---
+
 ## 2026-11-02 (86) — Post-release hardening: ISSUE-84, ISSUE-83, testing plan, 40/40/20 proposal
 
 Branch `hardening/post-release` (on top of `docs/post-release-2026-11-02`, which is

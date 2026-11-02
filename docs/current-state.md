@@ -1,6 +1,9 @@
 # Current State
 
-Last reviewed: 2026-11-02, post-release hardening (ISSUE-83/84 fixed in repo — migration
+Last reviewed: 2026-11-02, Release 2 prepared (ISSUE-85/86 fixed in repo on
+`release-2/payments-rules`, not deployed; ISSUE-87 opened; six void entries investigated —
+all test accounts; see [finalisation-status.md § 0c](./finalisation-status.md#0c-release-2--payments--competition-rules-2026-11-02)).
+Before that: post-release hardening (ISSUE-83/84 fixed in repo — migration
 046 and the compute-scores change, both pending owner approval; ISSUE-85/86 opened;
 ISSUE-86 is P1). Before that: post-deployment (release deployed; ISSUE-78 resolved in
 production; ISSUE-83/84 opened — [finalisation-status.md § 0](./finalisation-status.md#0-deployment-record-2026-11-02)).
@@ -374,7 +377,17 @@ now explicitly expected, not an open question.
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-86 — Free (€0) pots void their players' entries unless every member is manually marked paid
+#### ISSUE-86 — Free (€0) pots void entries — **FIXED IN REPO (Release 2, `3f9777e`), pending deploy**
+Owner-specified rule implemented: entries in €0 pots are financially settled without a
+payment record (derived from the pot's immutable fee, never stored), shown as "Free
+entry", never voided for non-payment, reinstatable without a payment; CSV import refuses
+free pots. Already-void entries untouched; pots with a fee unchanged. **The six void
+production entries were investigated individually: all belong to three disposable-inbox
+test accounts in single-member QA pots — no real player affected** (details in
+finalisation-status.md § 0c; names kept out of this public repo). Move to Resolved once
+deployed.
+
+#### ISSUE-86 (original entry, kept for history) — Free (€0) pots void their players' entries unless every member is manually marked paid
 **Discovered 2026-11-02** while preparing the production testing plan. Settlement
 voids every entry not marked paid (`Pick5Engine`/`LmsEngine`/`PredictorEngine`
 `settle()` read only `entry_payments.is_paid`), **regardless of the entry fee**. For
@@ -659,7 +672,16 @@ owner is `postgres`). Tested locally: pgTAP `supabase/tests/046_*.test.sql` 31/3
 sweep. Items (2)–(5) remain open. **Note for publishing:** this repository is public —
 apply 046 before pushing these docs, or push both together.
 
-#### ISSUE-85 — Pick 5 shows a pick as "lost" before its player's match has started
+#### ISSUE-85 — Pick 5 "lost" before kickoff — **FIXED IN REPO (Release 2, `f4480f5`), pending deploy**
+Each pick's displayed result now follows its own player's fixture(s): pending before
+kickoff, winning/losing while live (or with a double-gameweek match to come), won/lost
+when every expected match has finished; postponed/cancelled excluded like gameweek
+completion; status from the fixture row, not the clock. Display only — `picks_won`,
+winners and prizes unchanged. **Open owner decision:** what a postponed player's pick
+shows once the gameweek has completed (currently stays `pending`; recommended: void).
+Move to Resolved once deployed and that decision is made.
+
+#### ISSUE-85 (original entry, kept for history) — Pick 5 shows a pick as "lost" before its player's match has started
 **Discovered 2026-11-02** reading `Pick5Engine.calculateScore()` during the ISSUE-83
 work. Once a gameweek's entries are locked, every run scores each pick from goals so
 far, and when **no fixture in the gameweek is live at that moment** a pick below its
@@ -672,6 +694,15 @@ with a red warning icon. The final result is correct once every fixture has fini
 interim result from its own player's fixture: `pending` before kickoff,
 `winning`/`losing` while that fixture is live, `won`/`lost` once it has finished.
 **Status: confirmed, open (P2).**
+
+#### ISSUE-87 — An abandoned (provider `SUSPENDED`) match is stored as `tbd`
+**Discovered 2026-11-02** reviewing fixture states for ISSUE-85. `fixtureStatus()` in
+`sync-fixtures` and `sync-live-scores` maps football-data.org's `SUSPENDED` to the
+default `tbd` (and `AWARDED` to `cancelled`). ISSUE-85's pick rule handles it safely
+(goals already scored still count; never shown as lost), and gameweek completion would
+wait for it like any unfinished fixture, but the UI can't say "abandoned". Fix: an
+explicit mapping (possibly a new `fixture_status` value — schema change, needs a
+decision). **Status: confirmed, open (P3).**
 
 #### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path` — **RESOLVED 2026-11-02 (044 applied to production), see [Resolved issues](#resolved-issues)**
 
