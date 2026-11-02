@@ -7,7 +7,7 @@
 // live-verified instead.
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { decideReinstatement, type ReinstatementEntryFacts } from './reinstate.ts'
+import { decideReinstatement, reinstatementIsPaid, type ReinstatementEntryFacts } from './reinstate.ts'
 
 function voidEntry(overrides: Partial<ReinstatementEntryFacts> = {}): ReinstatementEntryFacts {
   return { id: 'entry-1', status: 'void', gameweekId: null, reinstatedAt: null, ...overrides }
@@ -81,4 +81,34 @@ Deno.test('an already-settled entry is left alone even if previously reinstated 
   const entry = voidEntry({ status: 'settled', reinstatedAt: null })
   const decision = decideReinstatement({ gameType: 'pick5', entry, isPaid: true, isAlreadyConcluded: false })
   assertEquals(decision, { outcome: 'not_void' })
+})
+
+// --- ISSUE-86: free (€0) pots ---------------------------------------------------
+
+Deno.test('ISSUE-86: an entry in a free pot counts as paid for reinstatement, with no payment record', () => {
+  assertEquals(reinstatementIsPaid(false, 0), true)
+  assertEquals(reinstatementIsPaid(false, '0.00'), true)
+})
+
+Deno.test('ISSUE-86: an unpaid entry in a pot with a fee still cannot be reinstated', () => {
+  assertEquals(reinstatementIsPaid(false, 10), false)
+  assertEquals(reinstatementIsPaid(false, '20.00'), false)
+  assertEquals(reinstatementIsPaid(true, 10), true)
+})
+
+Deno.test('ISSUE-86: an unknown fee is never treated as free', () => {
+  assertEquals(reinstatementIsPaid(false, null), false)
+  assertEquals(reinstatementIsPaid(false, undefined), false)
+})
+
+Deno.test('ISSUE-86: a void entry in a free pot reinstates when not concluded, and is still refused once concluded', () => {
+  const entry = { id: 'e1', status: 'void', gameweekId: null, reinstatedAt: null }
+  assertEquals(
+    decideReinstatement({ gameType: 'score_predictor', entry, isPaid: reinstatementIsPaid(false, 0), isAlreadyConcluded: false }),
+    { outcome: 'reinstate', newStatus: 'pending', writeStatus: true },
+  )
+  assertEquals(
+    decideReinstatement({ gameType: 'score_predictor', entry, isPaid: reinstatementIsPaid(false, 0), isAlreadyConcluded: true }).outcome,
+    'already_concluded',
+  )
 })

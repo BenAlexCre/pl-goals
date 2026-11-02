@@ -7,6 +7,7 @@
 // All eight GameEngine contract methods are now implemented.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
+import { loadFreePotIds } from '../paymentEligibility.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { resolveNextSeasonLeague, resolveSeasonGameweekBounds } from '../season-resolution.ts'
 import { Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
@@ -385,10 +386,14 @@ export class Pick5Engine implements GameEngine {
         .map((p) => `${p.pot_id}:${p.user_id}`)
     )
 
+    // ISSUE-86 — an entry in a free (€0) pot is financially settled without a
+    // payment record; see paymentEligibility.ts.
+    const freePotIds = await loadFreePotIds(ctx, potIds)
+
     const unpaidEntryIds: string[] = []
     const paidEntryIds: string[] = []
     for (const entry of entries as { id: string; pot_id: string; user_id: string }[]) {
-      if (paidKeys.has(`${entry.pot_id}:${entry.user_id}`)) {
+      if (paidKeys.has(`${entry.pot_id}:${entry.user_id}`) || freePotIds.has(entry.pot_id)) {
         paidEntryIds.push(entry.id)
       } else {
         unpaidEntryIds.push(entry.id)

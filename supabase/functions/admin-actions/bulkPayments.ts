@@ -43,6 +43,11 @@ export interface ResolvedLookups {
   // pot_ids the caller is authorized to verify payments for (pot-admin of,
   // or every resolved pot if the caller is an app admin).
   authorizedPotIds: Set<string>
+  // ISSUE-86: pot_ids whose entry fee is €0. Free entries are financially
+  // settled without a payment record, so there is nothing to import for them —
+  // recording one would make a free entry look "paid". Optional for callers that
+  // predate this field (treated as empty).
+  freePotIds?: Set<string>
   // `${potId}:${userId}` pairs that are real pot_members rows.
   potMemberships: Set<string>
   // `${potId}:${userId}` -> current entry_payments.is_paid, if a row
@@ -118,6 +123,11 @@ export function classifyBulkPaymentRows(
 
     if (!lookups.authorizedPotIds.has(potId)) {
       results.push(fail(rowNum, row, `Not authorized to verify payments for "${potName}"`))
+      return
+    }
+
+    if (lookups.freePotIds?.has(potId)) {
+      results.push(fail(rowNum, row, `"${potName}" is a free pot — entries need no payment, so there is nothing to record`))
       return
     }
 

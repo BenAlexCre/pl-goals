@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { usePots, useDashboardPotStatus } from '../hooks/usePots'
+import { isFreeEntryFee } from '../utils/paymentStatus'
 import { useCurrentGameweek, useNextGameweek, useGameweek, useAllGameweeks } from '../hooks/useGameweek'
 import { useLiveScores } from '../hooks/useLiveScores'
 import { useLeaderboard } from '../hooks/useLeaderboard'
@@ -760,7 +761,12 @@ export default function Dashboard() {
 
                       <div className="mt-4 flex items-end justify-between gap-3 text-sm">
                         <div className="min-w-0 space-y-1">
-                          {status?.isPaid === true ? (
+                          {/* ISSUE-86 — free (€0) pots show "Free entry", not "Unpaid". */}
+                          {isFreeEntryFee(pot.entry_fee) ? (
+                            <span className="flex items-center gap-1 text-xs text-white/55">
+                              <CreditCard size={12} /> Free entry
+                            </span>
+                          ) : status?.isPaid === true ? (
                             <span className="flex items-center gap-1 text-xs text-accent">
                               <CreditCard size={12} /> Paid
                             </span>

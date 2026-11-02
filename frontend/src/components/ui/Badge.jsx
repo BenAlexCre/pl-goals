@@ -9,6 +9,8 @@ const configs = {
   settled:  'bg-accent/10 text-accent/70 border-accent/20',
   paid:     'bg-accent/15 text-accent border-accent/30',
   unpaid:   'bg-red-goal/15 text-red-goal border-red-goal/30',
+  // ISSUE-86 — free (€0) entries: settled, but visibly not "paid".
+  free:     'bg-white/8 text-white/70 border-white/15',
   live:     'bg-red-goal/20 text-red-goal border-red-goal/40 animate-pulse',
   upcoming: 'bg-white/8 text-white/60 border-white/10',
   completed:'bg-white/5 text-white/40 border-white/8',
@@ -29,7 +31,7 @@ const configs = {
 const defaultLabels = {
   won: '✓ Won', winning: '⚡ Winning', lost: '✗ Lost', losing: '↓ Losing',
   pending: '· Pending', void: '∅ Void', locked: '🔒 Locked', settled: '✓ Settled',
-  paid: '✓ Paid', unpaid: '✗ Unpaid', live: '● Live', upcoming: 'Upcoming',
+  paid: '✓ Paid', unpaid: '✗ Unpaid', free: 'Free entry', live: '● Live', upcoming: 'Upcoming',
   completed: 'Final', admin: 'Admin', member: 'Member',
   alive: '● Alive', eliminated: '✗ Eliminated',
   starting: 'Starting XI', bench: 'Bench', not_in_squad: 'Not in squad',

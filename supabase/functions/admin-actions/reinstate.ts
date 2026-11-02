@@ -24,6 +24,7 @@ import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameEngineContext } from '../_shared/game-engine/contracts.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
+import { isFinanciallySettled, isFreeEntryFee } from '../_shared/game-engine/paymentEligibility.ts'
 import '../_shared/game-engine/pick5/index.ts'
 import '../_shared/game-engine/lms/index.ts'
 import '../_shared/game-engine/predictor/index.ts'
@@ -61,6 +62,14 @@ export type ReinstatementDecision =
   | { outcome: 'reinstate'; newStatus: 'locked' | 'pending'; writeStatus: boolean }
 
 // Pure — no I/O. Every branch is independently testable.
+// ISSUE-86 — what decideReinstatement() receives as `isPaid`: the entry is
+// financially settled if it has a paid record OR its pot is free (€0). Without
+// this, an entry voided in a free pot could only be reinstated by recording a
+// payment that never happened.
+export function reinstatementIsPaid(paymentRecordIsPaid: boolean, potEntryFee: number | string | null | undefined): boolean {
+  return isFinanciallySettled({ isPaid: paymentRecordIsPaid, potIsFree: isFreeEntryFee(potEntryFee) })
+}
+
 export function decideReinstatement(input: ReinstatementInput): ReinstatementDecision {
   const { gameType, entry, isPaid, isAlreadyConcluded } = input
 
@@ -104,7 +113,7 @@ export async function handleReinstateEntry(
 
   const { data: pot, error: potError } = await adminClient
     .from('pots')
-    .select('id, game_type, season_id')
+    .select('id, game_type, season_id, entry_fee')
     .eq('id', potId)
     .single()
 
@@ -182,7 +191,7 @@ export async function handleReinstateEntry(
   const decision = decideReinstatement({
     gameType,
     entry,
-    isPaid: payment?.is_paid === true,
+    isPaid: reinstatementIsPaid(payment?.is_paid === true, pot.entry_fee),
     isAlreadyConcluded: prize?.is_settled === true,
   })
 

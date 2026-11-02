@@ -973,10 +973,15 @@ Deno.test('settle marks a paid entry settled with a settled_at timestamp', async
   assertEquals(db.gameEntries[0].settled_at, '2026-08-05T12:00:00.000Z')
 })
 
+// ISSUE-86 (2026-11-02): the five voiding tests below now run against a pot with a
+// fee. They previously relied on the fake's default entry_fee of 0 — i.e. they were
+// asserting that FREE pots void unpaid entries, the behaviour ISSUE-86 changes.
+// Free-pot behaviour has its own tests further down.
 Deno.test('settle voids an unpaid entry and its picks', async () => {
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 5 } }, // a pot WITH a fee — voiding applies (ISSUE-86)
     gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
     entryPayments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
     pick5Picks: [
@@ -1005,6 +1010,7 @@ Deno.test('settle: if voiding picks fails, the entry is untouched and stays retr
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 5 } }, // a pot WITH a fee — voiding applies (ISSUE-86)
     gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
     entryPayments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
     pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
@@ -1027,6 +1033,7 @@ Deno.test('settle: if voiding the entry fails after its picks were already voide
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 5 } }, // a pot WITH a fee — voiding applies (ISSUE-86)
     gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
     entryPayments: [{ pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
     pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
@@ -1056,6 +1063,7 @@ Deno.test('settle voids an entry with no entry_payments row at all (defaults to 
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 5 } }, // a pot WITH a fee — voiding applies (ISSUE-86)
     gameEntries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
     // no entry_payments row at all — must default to "unpaid", not throw or skip
     pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
@@ -1072,6 +1080,7 @@ Deno.test('settle handles a mix of paid and unpaid entries independently and cor
   const engine = new Pick5Engine()
   const db = emptyFakeDb({
     pick5PotIds: ['pot-1'],
+    potFeeConfig: { 'pot-1': { entry_fee: 5 } }, // a pot WITH a fee — voiding applies (ISSUE-86)
     gameEntries: [
       { id: 'entry-paid', pot_id: 'pot-1', user_id: 'user-paid', gameweek_id: 4, status: 'locked', settled_at: null },
       { id: 'entry-unpaid', pot_id: 'pot-1', user_id: 'user-unpaid', gameweek_id: 4, status: 'locked', settled_at: null },
@@ -2212,4 +2221,75 @@ Deno.test('does not double-count a duplicate pick as two eligibility lookups fai
 
   await engine.validateEntry(ctx, pendingEntry(), Array(5).fill({ playerId: 1 }))
   assertEquals(inCallCount, 1)
+})
+
+// --- ISSUE-86: free (€0) pots -------------------------------------------------
+// The fake's default entry_fee is 0, so 'pot-free' below is free; 'pot-paid'
+// has a fee. No test here may cause an entry_payments row to be written or
+// rewritten — free must stay distinguishable from paid.
+
+Deno.test('ISSUE-86: settle does not void an entry in a free pot with no payment record', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-free'],
+    gameEntries: [{ id: 'entry-1', pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'won' }],
+  })
+
+  await engine.settle(fakeDbContext(db), 4)
+
+  assertEquals(db.gameEntries[0].status, 'settled')
+  assertEquals(db.pick5Picks[0].result, 'won', 'picks are not voided')
+  assertEquals(db.entryPayments.length, 0, 'no payment record is created for a free entry')
+})
+
+Deno.test('ISSUE-86: a free-pot entry with the default is_paid=false row is settled, and the row is left unchanged', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-free'],
+    gameEntries: [{ id: 'entry-1', pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null }],
+    entryPayments: [{ pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
+  })
+
+  await engine.settle(fakeDbContext(db), 4)
+
+  assertEquals(db.gameEntries[0].status, 'settled')
+  assertEquals(db.entryPayments, [{ pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, scope: 'gameweek', is_paid: false }],
+    'the historical payment record is not rewritten to paid')
+})
+
+Deno.test('ISSUE-86: in one run, an unmarked free-pot entry settles while an unpaid entry in a pot with a fee is voided', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-free', 'pot-paid'],
+    potFeeConfig: { 'pot-paid': { entry_fee: 5 } },
+    gameEntries: [
+      { id: 'entry-free', pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, status: 'locked', settled_at: null },
+      { id: 'entry-unpaid', pot_id: 'pot-paid', user_id: 'user-2', gameweek_id: 4, status: 'locked', settled_at: null },
+      { id: 'entry-paid', pot_id: 'pot-paid', user_id: 'user-3', gameweek_id: 4, status: 'locked', settled_at: null },
+    ],
+    entryPayments: [{ pot_id: 'pot-paid', user_id: 'user-3', gameweek_id: 4, scope: 'gameweek', is_paid: true }],
+    pick5Picks: [{ id: 1, game_entry_id: 'entry-unpaid', result: 'won' }],
+  })
+
+  await engine.settle(fakeDbContext(db), 4)
+
+  assertEquals(db.gameEntries.find((e) => e.id === 'entry-free')?.status, 'settled')
+  assertEquals(db.gameEntries.find((e) => e.id === 'entry-paid')?.status, 'settled')
+  assertEquals(db.gameEntries.find((e) => e.id === 'entry-unpaid')?.status, 'void', 'unpaid entries in pots with a fee are still voided')
+  assertEquals(db.pick5Picks[0].result, 'void')
+})
+
+Deno.test('ISSUE-86: an entry that is already void in a free pot stays void (no automatic un-voiding)', async () => {
+  const engine = new Pick5Engine()
+  const db = emptyFakeDb({
+    pick5PotIds: ['pot-free'],
+    gameEntries: [{ id: 'entry-1', pot_id: 'pot-free', user_id: 'user-1', gameweek_id: 4, status: 'void', settled_at: null }],
+    pick5Picks: [{ id: 1, game_entry_id: 'entry-1', result: 'void' }],
+  })
+
+  await engine.settle(fakeDbContext(db), 4)
+
+  assertEquals(db.gameEntries[0].status, 'void')
+  assertEquals(db.pick5Picks[0].result, 'void')
 })

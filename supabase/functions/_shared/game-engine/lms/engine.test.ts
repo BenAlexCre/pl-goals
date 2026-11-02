@@ -334,7 +334,7 @@ Deno.test('lockEntries returns 0 when there are no picks at all for the gameweek
 // for six tables.
 
 interface FakeGameweek { id: number; deadline_utc: string | null }
-interface FakePot { id: string; game_type: string; start_gameweek_id: number | null }
+interface FakePot { id: string; game_type: string; start_gameweek_id: number | null; entry_fee?: number }
 interface FakeGameEntry { id: string; pot_id: string }
 interface FakeGameEntryLms { game_entry_id: string; competitive_status: string; eliminated_gameweek_id: number | null }
 interface FakePick { id: number; game_entry_id: string; gameweek_id: number; team_id: number; result: string }
@@ -415,7 +415,9 @@ function fakeCalculateScoreContext(db: FakeDb, now: Date): GameEngineContext {
 function baseDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
     gameweeks: [{ id: 13, deadline_utc: '2026-01-01T00:00:00Z' }],
-    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 1 }],
+    // entry_fee made explicit for ISSUE-86: these fixtures describe a pot WITH a fee
+    // (free pots have their own tests).
+    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 1, entry_fee: 10 }],
     game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
     game_entry_lms: [{ game_entry_id: 'entry-1', competitive_status: 'alive', eliminated_gameweek_id: null }],
     lms_team_picks: [],
@@ -1863,4 +1865,59 @@ Deno.test('awardPrize still awards the prize and payout when the notification wr
   assertEquals(db.prizes[0].is_settled, true)
   assertEquals(db.entries[0].payout_amount, 20)
   assertEquals(db.notifications.length, 0, 'the failed write never lands in the table, but that does not block the payout above')
+})
+
+// --- ISSUE-86: free (€0) pots -------------------------------------------------
+
+Deno.test('ISSUE-86: settle leaves an unmarked entry in a free pot pending, picks untouched, no payment row written', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 1, entry_fee: 0 }],
+    entry_payments: [],
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-1', gameweek_id: 13, team_id: 100, result: 'won' }],
+  })
+
+  await engine.settle(fakeCalculateScoreContext(db, AFTER_DEADLINE), 13)
+
+  assertEquals(db.game_entries[0].status, 'pending')
+  assertEquals(db.lms_team_picks[0].result, 'won')
+  assertEquals(db.entry_payments.length, 0)
+})
+
+Deno.test('ISSUE-86: a free pot settles while an unpaid entry in a pot with a fee is still voided', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    pots: [
+      { id: 'pot-free', game_type: 'last_man_standing', start_gameweek_id: 1, entry_fee: 0 },
+      { id: 'pot-paid', game_type: 'last_man_standing', start_gameweek_id: 1, entry_fee: 10 },
+    ],
+    game_entries: [
+      { id: 'entry-free', pot_id: 'pot-free', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-unpaid', pot_id: 'pot-paid', user_id: 'user-2', status: 'pending' },
+    ],
+    game_entry_lms: [
+      { game_entry_id: 'entry-free', competitive_status: 'alive', eliminated_gameweek_id: null },
+      { game_entry_id: 'entry-unpaid', competitive_status: 'alive', eliminated_gameweek_id: null },
+    ],
+    entry_payments: [{ pot_id: 'pot-paid', user_id: 'user-2', is_paid: false, scope: 'season' }],
+    lms_team_picks: [{ id: 1, game_entry_id: 'entry-unpaid', gameweek_id: 13, team_id: 100, result: 'won' }],
+  })
+
+  await engine.settle(fakeCalculateScoreContext(db, AFTER_DEADLINE), 13)
+
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-free')?.status, 'pending')
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-unpaid')?.status, 'void')
+  assertEquals(db.lms_team_picks[0].result, 'void')
+})
+
+Deno.test('ISSUE-86: an entry already void in a free pot stays void', async () => {
+  const engine = new LmsEngine()
+  const db = baseDb({
+    pots: [{ id: 'pot-1', game_type: 'last_man_standing', start_gameweek_id: 1, entry_fee: 0 }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'void' }],
+  })
+
+  await engine.settle(fakeCalculateScoreContext(db, AFTER_DEADLINE), 13)
+
+  assertEquals(db.game_entries[0].status, 'void')
 })

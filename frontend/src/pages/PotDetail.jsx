@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { paymentState } from '../utils/paymentStatus'
 import { Link, useParams } from 'react-router-dom'
 import {
   Users,
@@ -698,8 +699,13 @@ export default function PotDetailPage() {
       memberEntries.map((entryRow) => ({
         ...entryRow,
         isPaid: payments.find((p) => p.user_id === entryRow.member.user_id)?.is_paid ?? false,
+        // ISSUE-86 — paid / free / unpaid, for MemberCard.
+        paymentState: paymentState({
+          isPaid: payments.find((p) => p.user_id === entryRow.member.user_id)?.is_paid ?? false,
+          entryFee: pot?.entry_fee,
+        }),
       })),
-    [memberEntries, payments]
+    [memberEntries, payments, pot]
   )
 
   async function handleConfirmRemoveMember() {
@@ -907,6 +913,7 @@ export default function PotDetailPage() {
           <EntryStatusBar
             loading={paymentsLoading}
             isPaid={myPayment?.is_paid ?? false}
+            entryFee={pot?.entry_fee}
             hasEntry={!!savedEntry}
             entryStatus={savedEntry?.status}
             deadlineUtc={selectedGameweek?.deadline_utc}

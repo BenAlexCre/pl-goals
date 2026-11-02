@@ -45,6 +45,7 @@
 // comparison).
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
+import { loadFreePotIds } from '../paymentEligibility.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { resolveNextSeasonLeague } from '../season-resolution.ts'
 import { LmsFinalPredictionNotImplementedError, LmsPrizePoolExceededError, LmsValidationError } from './errors.ts'
@@ -503,8 +504,11 @@ export class LmsEngine implements GameEngine {
           .map((p) => `${p.pot_id}:${p.user_id}`)
       )
 
+      // ISSUE-86 — an entry in a free (€0) pot is financially settled without
+      // a payment record; see paymentEligibility.ts.
+      const freePotIds = await loadFreePotIds(ctx, potIds)
       const unpaidEntryIds = (entries as { id: string; pot_id: string; user_id: string }[])
-        .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`))
+        .filter((e) => !paidKeys.has(`${e.pot_id}:${e.user_id}`) && !freePotIds.has(e.pot_id))
         .map((e) => e.id)
 
       // Hardening sprint, 2026-08-06 (architecture review finding, same

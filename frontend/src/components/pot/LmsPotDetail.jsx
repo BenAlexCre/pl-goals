@@ -197,7 +197,7 @@ export default function LmsPotDetail({ pot, potId }) {
           {entry ? (
             <>
               <span className="text-white/15">•</span>
-              <SeasonPaymentStatus potId={potId} />
+              <SeasonPaymentStatus potId={potId} entryFee={pot.entry_fee} />
             </>
           ) : null}
           {competitionPicks.length > 0 ? (

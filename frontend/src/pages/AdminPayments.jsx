@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { isFreeEntryFee } from '../utils/paymentStatus'
 import { CreditCard, Upload, CheckCircle2, AlertTriangle, FileText, Wallet } from 'lucide-react'
 import {
   usePotsForAdmin,
@@ -83,6 +84,8 @@ export default function AdminPayments() {
   // reinstating an entry all now work for every mode — see usePaymentStatus/
   // useRecordPayment for the season-scoped branch.
   const isPick5 = selectedPot?.game_type === 'pick5'
+  // ISSUE-86 — free (€0) pot: entries are settled without payment records.
+  const isFreePot = isFreeEntryFee(selectedPot?.entry_fee)
 
   useEffect(() => {
     if (!selectedPotId && pots.length > 0) setSelectedPotId(pots[0].id)
@@ -315,7 +318,8 @@ export default function AdminPayments() {
     // whose payment is now marked paid — matches reinstate_entry's own
     // "payment_not_verified"/"not_void" guard rejections one-to-one, so
     // the button never appears somewhere the backend would just reject it.
-    canReinstate: r.is_paid && r.entry_status === 'void',
+    // ISSUE-86 — in a free pot a void entry is reinstatable without a payment.
+    canReinstate: (r.is_paid || isFreePot) && r.entry_status === 'void',
   }))
 
   const activeSummary = applyResult?.summary ?? preview?.summary ?? null
@@ -387,6 +391,17 @@ export default function AdminPayments() {
         <EmptyState icon={CreditCard} title="Select a pot" description="Choose a pot above to manage its payments." />
       ) : (
         <>
+          {isFreePot ? (
+            <section>
+              <h2 className="mb-3 text-lg font-semibold text-white">Payments</h2>
+              <Card className="p-5">
+                <p className="text-sm text-white/60">
+                  This is a <span className="font-medium text-white">free pot</span> (no entry fee). Every member's
+                  entry counts as settled without a payment record, so there is nothing to record or import here.
+                </p>
+              </Card>
+            </section>
+          ) : (
           <section>
             <h2 className="mb-3 text-lg font-semibold text-white">Record payment received</h2>
             <Card className="p-5 space-y-4">
@@ -529,6 +544,7 @@ export default function AdminPayments() {
               )}
             </Card>
           </section>
+          )}
 
           {isPick5 && !selectedGameweekId ? (
             <EmptyState
@@ -553,11 +569,12 @@ export default function AdminPayments() {
                     onMarkPaid={(row) => handleMark(row, true)}
                     onMarkUnpaid={(row) => handleMark(row, false)}
                     onReinstate={handleReinstate}
+                    entryFee={selectedPot?.entry_fee}
                   />
                 )}
               </section>
 
-              {isPick5 && (
+              {isPick5 && !isFreePot && (
                 <section className="space-y-4">
                   <h2 className="text-lg font-semibold text-white">Bulk CSV import</h2>
                   <Card className="p-5 space-y-4">

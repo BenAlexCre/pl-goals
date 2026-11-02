@@ -4,6 +4,7 @@ import { classifyBulkPaymentRows, type BulkPaymentRow } from './bulkPayments.ts'
 import { handleReinstateEntry } from './reinstate.ts'
 import { handleRecordPayment } from './recordPayment.ts'
 import { upsertEntryPayment } from './upsertEntryPayment.ts'
+import { isFreeEntryFee } from '../_shared/game-engine/paymentEligibility.ts'
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -191,10 +192,11 @@ async function handleBulkVerifyPayments(
   // one id, which classifyBulkPaymentRows() reports as "ambiguous")
   const potNames = [...new Set(rows.map((r) => (r.pot ?? '').trim()).filter(Boolean))]
   const potsByName = new Map<string, string[]>()
+  const freePotIds = new Set<string>() // ISSUE-86
   let resolvedPotIds: string[] = []
 
   if (potNames.length > 0) {
-    const { data: potRows, error: potsError } = await adminClient.from('pots').select('id, name').in('name', potNames)
+    const { data: potRows, error: potsError } = await adminClient.from('pots').select('id, name, entry_fee').in('name', potNames)
     if (potsError) throw new Error(`Failed to look up pots: ${potsError.message}`)
     for (const p of (potRows ?? []) as { id: string; name: string }[]) {
       const existing = potsByName.get(p.name) ?? []
@@ -202,6 +204,9 @@ async function handleBulkVerifyPayments(
       potsByName.set(p.name, existing)
     }
     resolvedPotIds = [...new Set((potRows ?? []).map((p: { id: string }) => p.id))]
+    for (const p of (potRows ?? []) as { id: string; entry_fee: number | string | null }[]) {
+      if (isFreeEntryFee(p.entry_fee)) freePotIds.add(p.id)
+    }
   }
 
   // --- authorization: which of the resolved pots may this caller act on? ---
@@ -284,6 +289,7 @@ async function handleBulkVerifyPayments(
     usersByEmail,
     usersByPhone,
     potsByName,
+    freePotIds,
     authorizedPotIds,
     potMemberships,
     existingPayments,
