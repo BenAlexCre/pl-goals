@@ -1,6 +1,8 @@
 # Current State
 
-Last reviewed: 2026-11-02, release preparation (ISSUE-77/79/38 resolved; release
+Last reviewed: 2026-11-02, post-deployment (release deployed; ISSUE-78 resolved in
+production; ISSUE-83/84 opened — [finalisation-status.md § 0](./finalisation-status.md#0-deployment-record-2026-11-02)).
+Earlier: release preparation (ISSUE-77/79/38 resolved; release
 candidate and runbook in [finalisation-status.md](./finalisation-status.md)). Earlier the
 same day: finalisation audit — mobile responsiveness overhaul,
 ISSUE-42/44 revalidated and closed, ISSUE-77–82 opened; release-readiness summary in
@@ -573,7 +575,38 @@ deliberate design choice, not an open question.
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
 
-#### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path`
+#### ISSUE-83 — ~25 % of cron → Edge Function calls hit pg_net's 5-second timeout
+**Discovered 2026-11-02** in the post-deploy smoke test (read-only queries on
+production `net._http_response`). Last 24 h: 371 × HTTP 200, 128 × `status_code`
+null with "Timeout of 5000 ms reached"; ~35 % of those stall in DNS resolution for
+the full 5 s, the rest wait on a slow response. **Not caused by the release** — rate
+25.9 % before vs 24.1 % after. Functional impact appears low: `sync_runs` shows
+compute-scores 480/480 successful in the same 24 h (the functions finish after pg_net
+stops waiting). Risk: a DNS stall may mean a call never reaches the function; the
+logs can't yet distinguish this per job. Fix: pass a larger `timeout_milliseconds` to
+the cron jobs' `net.http_post` calls (new migration) and track per-job outcomes.
+**Status: confirmed, open (P2).**
+
+#### ISSUE-84 — Supabase security advisor warnings (post-044)
+**Discovered 2026-11-02** (`supabase db advisors --linked --type security`): 28
+warnings, 0 errors. Notable: (1) **anon can EXECUTE 8 `SECURITY DEFINER` functions**
+— `create_entry_payment`, `handle_new_user`, `is_banned`, `is_email_verified`,
+`is_pot_admin`, `is_pot_member`, `refresh_gameweek_deadlines`,
+`trigger_refresh_gameweek_deadlines`; `refresh_gameweek_deadlines` writes data, so an
+anonymous caller may be able to trigger a deadline recompute via `/rpc` (not
+probed — doing so would modify production); (2) 7 *invoker* functions without a
+pinned search_path (`set_updated_at`, `recompute_goal_thresholds`,
+`refresh_player_fixture_goals`, `is_app_admin`, `prevent_pot_contract_change`,
+`recompute_pick5_goal_thresholds`, `is_super_admin`) — low risk, they run with the
+caller's rights; (3) leaked-password protection disabled; insufficient MFA options;
+`pg_trgm` in `public`; materialized view exposed to the API (anon already revoked,
+043). Fix: migration revoking anon EXECUTE where not required and pinning search_path;
+enable leaked-password protection in the Auth dashboard (owner). **Status:
+confirmed, open (P2).**
+
+#### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path` — **RESOLVED 2026-11-02 (044 applied to production), see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-78 (original entry, kept for history) — Four `SECURITY DEFINER` functions had no pinned `search_path`
 **Discovered 2026-11-02** via `pg_proc`: `is_pot_member`, `is_pot_admin`,
 `create_entry_payment`, `handle_new_user` run with owner privileges but resolved
 names through the caller's `search_path` (Supabase advisor
@@ -829,6 +862,13 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-78 — `SECURITY DEFINER` search_path (resolved 2026-11-02 09:06 UTC)
+Migration 044 applied to production after a restore-verified backup. Verified from
+production: `migration list` shows 044; a schema dump before/after differs only in
+the four `SET search_path` lines; grants unchanged; anon RLS probes unchanged; the
+security advisor no longer flags the four functions. Remaining advisor items:
+ISSUE-84.
 
 #### ISSUE-77 — Migration `043` collision (resolved 2026-11-02, release preparation)
 The worktree migration was renumbered to `045_prevent_pot_admin_orphaning.sql`

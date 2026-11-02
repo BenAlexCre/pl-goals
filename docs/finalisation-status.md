@@ -1,8 +1,35 @@
 # PL-GOALS — FINALISATION STATUS & MASTER TODO
 
-Last updated: **2026-11-02, release preparation** (sessions 83–84 in
-[session-log.md](./session-log.md)). **Status: release candidate prepared, awaiting
-owner approval. Nothing has been pushed, merged, deployed or applied to production.**
+Last updated: **2026-11-02, post-deployment** (sessions 83–85 in
+[session-log.md](./session-log.md)). **Status: DEPLOYED to production** —
+migration 044 applied 09:06 UTC, frontend live 09:46 UTC (`main` = `a7b7804`).
+Signed-out and database-side smoke tests pass; signed-in smoke tests await an owner
+decision on a test account (§0).
+
+## 0. Deployment record (2026-11-02)
+
+| Step | When (UTC) | Result | Evidence |
+|---|---|---|---|
+| Production backup | 08:50 | ✅ verified | Supabase lists **no managed backups** (PITR off), so a full dump was taken: roles + schema + data to `C:\Users\benal\pl-goals-backups\2026-11-02-pre-044\` with SHA-256 manifest. Restore-tested into a disposable Supabase stack pinned to production's Postgres 17.6.1.155 / Auth v2.195.0, single transaction with ON_ERROR_STOP: **exit 0; public 31/31 tables, 46,765/46,765 rows; auth.users 13/13; identities 13/13; Auth service lists all 13 users.** Ephemeral session/token rows and empty hosted-only tables were excluded from the *test* only (they differ from the open-source images). |
+| Linked project verified | 09:03 | ✅ | CLI link, `supabase projects list`, the live site's bundle and `.env.production.local` all = `rgohuoooujqclcfkoaht` (pl-predictor-production). |
+| Migration 044 | 09:06:35 | ✅ applied | `db push --dry-run` listed only 044; after push, `migration list` shows 044 remote; production schema diff before→after = **only the four `SET search_path` lines**; grants identical (12); anon still sees 0 rows on protected tables/views; matview 401; auth health 200. |
+| Push + PR #1 | 09:08 | ✅ | https://github.com/BenAlexCre/pl-goals/pull/1 |
+| CI first run | 09:09 | ❌ → fixed | `npm ci` failed on npm 10 (Node 22): lockfile lacked Vitest 4's optional-peer `esbuild`. **Pre-existing on `main`** (since 5e8292b), invisible until CI first ran `npm ci` on npm 10 (local dev is npm 11). Fixed by commit 10, `a7b7804`: purely additive lockfile entries (27 added, 0 removed, 0 version changes); production bundle byte-identical. Owner accepted the extra commit. |
+| CI + Vercel preview | 09:15 | ✅ all green | Every CI step ran (npm ci, lint, test, build; 16 deno checks; deno tests). Preview served identical bundle hashes. **Note: previews use the production Supabase project.** |
+| Merge to `main` | 09:45:31 | ✅ owner-approved | Fast-forward `89735dc..a7b7804`; PR #1 closed as merged. |
+| Production deploy | 09:46 | ✅ | Vercel production deployment `pl-goals-i4g3ywh5m`; both domains serve `index-au8_b9qg.js`. CI on `main` green. **Rollback target:** previous production deployment `7481307279` (commit `89735dc`). |
+
+**Smoke tests after deploy:**
+
+| Area | Result | Evidence |
+|---|---|---|
+| Live site, signed-out, mobile + desktop | ✅ | Hardened sweep against https://www.premierleaguepredictor.ie: 68 runs (Chromium 8 widths, WebKit 320/390/768) — 0 overflow, redirects, error screens, console errors or failed requests. iPhone 13 / Pixel 7 emulation: new bundle, 0 errors. |
+| Auth guards | ✅ | Signed-out `/dashboard`, `/pots`, `/admin`, `/super-admin` redirect to `/sign-in`; deep links resolve (SPA fallback). |
+| Mobile load (live CDN, same throttling as the original diagnosis) | ✅ | 4G: first paint **3.5 s → 0.57 s**, app content **3.6 s → 1.5 s**. 3G sign-in: blank until ~5.7 s → paint **1.65 s**, usable 4.6 s. |
+| Data preserved | ✅ | 21 core tables (users, profiles, pots, members, entries, picks, payments, prizes, notifications, fixtures, players…) — counts **identical** to the pre-release backup (read-only queries). |
+| Cron / scoring pipeline | ✅ healthy | All jobs firing since 044 (compute-scores 14, live-scores 43, settle 1). `sync_runs` last 24 h: compute-scores **480/480 success**, compute-deadlines 24/24, sync-fixtures 1/1. ~25 % of pg_net calls hit its 5 s client timeout — **same rate before and after the release (25.9 % → 24.1 %)**, functions still complete; logged as ISSUE-83. |
+| Supabase security advisor | ✅ no errors | 28 warnings, none error-level; the four 044 functions no longer flagged. Remaining warnings logged as ISSUE-84 (incl. anon-executable `SECURITY DEFINER` functions). |
+| Signed-in flows (sign-up, Pick 5 / LMS / Predictor picks, payments, admin) | ⛔ pending | Needs the owner's decision: use an owner-supplied test account, or create a named test account in production. Not done without that decision. |
 
 This is the release-readiness view: what ships, how to ship it, how to undo it, and
 what needs the owner. It summarises and links; canonical detail lives in
@@ -40,7 +67,7 @@ apply one migration, deploy, smoke-test on real devices.
 | Migration replay on a fresh database, 001→044 and 001→045 | ✅ both exit 0 (`supabase db diff` shadow database) |
 | Production migration state | 🔍 001–043 applied; push dry run would apply **only 044** |
 | Production schema drift vs migrations | 🔍 none material (schema-only dump diff; see §3) |
-| CI on GitHub | ◻ workflow validated locally; runs for the first time when the branch is pushed |
+| CI on GitHub | ✅ green on PR #1 and on `main` (after the lockfile fix — see §0) |
 | Real-device / signed-in production smoke test | ⛔ owner (§8, §9) |
 
 ---
@@ -82,7 +109,7 @@ environment variables**, no data changes.
 |---|---|---|---|---|---|
 | 001–042 | — | ✅ | ✅ | 🔍 applied | — |
 | 043 | `043_views_security_invoker.sql` | ✅ | ✅ (repaired this session) | 🔍 applied — schema dump shows all four views `security_invoker`; anon gets 0 rows, matview 401 | — |
-| **044** | `044_pin_security_definer_search_path.sql` | ✅ RC only | ✅ applied this session | ⛔ **pending — the only migration this release applies** | §4 |
+| **044** | `044_pin_security_definer_search_path.sql` | ✅ | ✅ | ✅ **applied 2026-11-02 09:06 UTC** | §4, §0 |
 | 045 | `045_prevent_pot_admin_orphaning.sql` | ❌ worktree only, uncommitted | ✅ applied (was recorded as 043) | 🔍 never applied (no `enforce_pot_has_admin` in prod schema) | Ships later with its worktree |
 
 **ISSUE-77 (043 collision) — resolved:**
@@ -153,7 +180,8 @@ errors — found already fixed by `a11a32c`, closed now with evidence).
 
 | ID | Pri | Summary | Next step |
 |---|---|---|---|
-| ISSUE-78 | P2 | 044 not yet in production | Owner applies (§7) |
+| ISSUE-83 | P2 | ~25 % of cron → Edge Function calls hit pg_net's 5 s timeout (some stall on DNS); pre-existing | Raise `timeout_milliseconds` in the cron `net.http_post` calls (new migration); monitor DNS stalls |
+| ISSUE-84 | P2 | Security advisor warnings: anon can EXECUTE 8 `SECURITY DEFINER` functions (incl. data-writing `refresh_gameweek_deadlines`); 7 invoker functions without pinned search_path; leaked-password protection off | `REVOKE EXECUTE … FROM anon` where not needed; pin search_path; enable leaked-password protection in Auth settings (owner) |
 | — | P2 | 7 `exhaustive-deps` warnings in `PotDetail.jsx`/`PotManager.jsx` | Real stale-closure risk, but adding the deps as suggested would loop (loaders are recreated every render). Fix with ISSUE-10/27 (TanStack Query migration). Ratcheted so no new warning can land. |
 | ISSUE-10/27 | P2 | `PotDetail.jsx` imperative fetching, no stale-response guard | Planned refactor |
 | ISSUE-80 | P3 | Non-member pot view logs a 406 | `.maybeSingle()` |
@@ -323,7 +351,7 @@ for the owner, not decisions.
 | # | Question | Current behaviour | Urgency | Recommendation |
 |---|---|---|---|---|
 | 1 | **ISSUE-39 — what is the "current gameweek"?** | **Already decided (2026-08-19, [decisions.md](./decisions.md#is_current-issue-39--decision)):** the earliest-deadline, not-completed gameweek of an active league (`useNextGameweek()`); `is_current` columns are legacy and never set. | Low | Confirm the recorded decision. Optional tidy-up: stop reading `is_current` anywhere so nobody mistakes it for truth. |
-| 2 | **Score Predictor `two_halves` payout** — pay once (season end) or twice (half-season boundary + season end)? | Pays **once**, at season end. `two_halves` is the **default** mode for every new Predictor pot. | **High — decide before gameweek 19** (the half-season boundary) | Decide now. If "twice": a half-time settlement must be designed and built before GW19. If "once": rename/describe the mode so organisers aren't misled. |
+| 2 | **Score Predictor `two_halves` payout** — pay once (season end) or twice (half-season boundary + season end)? | Pays **once**, at season end. `two_halves` is the **default** mode for every new Predictor pot. | **High — decide before gameweek 19** (the half-season boundary) | See the proposed structure in §10a. **Pending owner decision; payout logic deliberately unchanged.** |
 | 3 | **Score Predictor reuse restriction** — what can't be reused (scoreline, goalscorer, both), and how is a "half" defined? | No restriction enforced. | Medium | Define the rule (simplest: a goalscorer can't be picked twice per half; half = GW1–19 / GW20–38) or explicitly drop it. |
 | 4 | **Score Predictor entry window** — can people join mid-season? | Allowed (no gate). Cumulative scoring makes late joiners uncompetitive. | Medium | Block after the pot's start gameweek deadline, matching LMS (`pots.start_gameweek_id` already exists). |
 | 5 | **LMS `season_end_tie_rule = final_prediction`** | Not selectable in the UI (only `split_prize`); engine refuses rather than guesses. | Low | Keep deferred; design only if organisers ask. |
@@ -332,18 +360,58 @@ for the owner, not decisions.
 
 ---
 
+### 10a. PENDING DECISION — proposed Score Predictor two-half payout structure
+
+**Status: proposal only. Not a business rule, not implemented, payout logic
+unchanged.** Recorded 2026-11-02 at the owner's request.
+
+**How `two_halves` behaves today (verified in `PredictorEngine` and
+business-rules.md):** one cumulative standings table across all 38 gameweeks; one
+season-end prize (`pot_prizes`, `scope = 'season'`) to the leader(s) after
+`end_gameweek_id`'s deadline, using the existing tiebreak hierarchy (points →
+exact scores → goalscorer bonuses → split). `two_halves` and `single_cycle` are
+paid identically; the mode currently changes nothing about money.
+
+**Proposed structure (for decision):**
+
+| Element | Proposal |
+|---|---|
+| Halves | **H1 = GW1–19, H2 = GW20–38** (for a pot starting mid-season: from `start_gameweek_id` to GW19, then GW20–38) |
+| Standings | Two independent half tables (points reset at GW20) **plus** the existing cumulative season table |
+| Prize split of the net pool (after admin/charity fees) | **Option A — 50 / 50:** H1 winner(s) 50 %, H2 winner(s) 50 %; no overall prize. **Option B — 40 / 40 / 20:** H1 40 %, H2 40 %, overall season winner 20 %. **Option C — current behaviour:** one season-end prize (rename the mode so it doesn't imply two payouts). |
+| When H1 pays | After GW19's deadline has passed **and** every GW19 fixture is finished/resolved — the same readiness gate settlement already uses |
+| Ties | Existing hierarchy (points → exact scores → goalscorer bonuses → equal split), applied within each half |
+| Entry fee | Unchanged: one season-scoped fee covers both halves; an entry voided for non-payment is excluded from any half settled while void (Late Payment Override reinstates as today) |
+| Late joiners | Depends on decision 4 (entry window); if mid-season joining stays allowed, a GW10 joiner competes for H1 from GW10 and fully in H2 |
+| Notifications | One `predictor.prize_awarded` per winner per half (existing event, payload gains a `half` field) |
+
+**Recommendation:** Option B (40/40/20) keeps the season meaningful after a poor
+first half — the reason organisers pick "two halves" — while still rewarding the
+season winner. Option C is the zero-engineering choice if a mid-season payout isn't
+wanted; then rename `two_halves` in the UI before more pots are created with it.
+
+**Engineering implications if A or B is chosen** (for estimating, not started):
+half-scoped standings (a `half` dimension on `pot_standings_snapshots` or a
+computed view), `pot_prizes` rows with a half scope, an extra `awardPrize` call
+at the GW19 boundary in `settle()`, tests, and the pot-detail UI showing the
+current half. Needs to be built, tested and deployed **before GW19** to pay H1 on
+time; otherwise H1 can be paid retrospectively once built.
+
+**Owner to decide:** A, B or C (or other split); confirm H1/H2 boundaries; confirm
+mid-season-joiner treatment (ties to decision 4).
+
 ## 11. Owner approval checklist
 
 Tick in order. Nothing in this list has been done by Claude.
 
-- [ ] **Read §2** — agree the release is exactly the 9 commits on `fix/mobile-finalisation-audit` (frontend + migration 044; no Edge Functions; no env changes)
-- [ ] **Agree to exclude** the `pot-admin-a11y-remediation` worktree and migration 045 from this release
-- [ ] **Confirm a production backup** exists (Step 1)
-- [ ] **Approve applying migration 044** to production (Step 2) — reversible in ~1 min (§8)
-- [ ] **Check Vercel Preview env vars** before pushing (Step 3)
-- [ ] **Approve pushing the branch** and opening a PR (triggers CI + Vercel preview, not production)
-- [ ] **Approve merging to `main`** — this deploys to production
-- [ ] **Run §9** on real devices; keep the rollback steps (§8) at hand
+- [x] **Read §2** — agree the release is exactly the 9 commits on `fix/mobile-finalisation-audit` (frontend + migration 044; no Edge Functions; no env changes)
+- [x] **Agree to exclude** the `pot-admin-a11y-remediation` worktree and migration 045 from this release
+- [x] **Confirm a production backup** exists (Step 1) — taken and restore-verified (§0)
+- [x] **Approve applying migration 044** to production (Step 2) — reversible in ~1 min (§8)
+- [x] **Check Vercel Preview env vars** before pushing (Step 3) — previews use the production Supabase project
+- [x] **Approve pushing the branch** and opening a PR (triggers CI + Vercel preview, not production)
+- [x] **Approve merging to `main`** — this deploys to production (approved; plus the 10th, lockfile-only commit)
+- [ ] **Run §9** on real devices; keep the rollback steps (§8) at hand — signed-out + database checks done (§0); signed-in checks pending a test-account decision
 - [ ] **Decide product item #2** (two-halves payout) before gameweek 19
 - [ ] Later: commit and finish the worktree; ship 045 with its `admin-actions` change
 

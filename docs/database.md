@@ -235,8 +235,9 @@ RLS helper functions (all `security definer`, used only inside policy definition
 **`search_path` (migration 044, ISSUE-78):** `is_pot_member`, `is_pot_admin`,
 `create_entry_payment` and `handle_new_user` are pinned to `search_path = ''` (their
 bodies are fully schema-qualified). Any new `security definer` function must declare
-`set search_path = ''` at creation. **044 is in the repo but not yet applied to
-production** (as of 2026-11-02).
+`set search_path = ''` at creation. 044 was **applied to production on 2026-11-02
+09:06 UTC**. Remaining advisor items (anon EXECUTE on `security definer` functions,
+invoker functions without a pinned search_path): ISSUE-84.
 
 **Migration numbering (ISSUE-77, resolved 2026-11-02):** `043` is
 `043_views_security_invoker.sql` (repo and production), `044` is

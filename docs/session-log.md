@@ -13,6 +13,44 @@ from here.
 
 ---
 
+## 2026-11-02 (85) — Production deployment of the mobile finalisation release
+
+**Owner approvals:** release scope (9 commits, excluding the worktree and 045);
+later the 10th lockfile-only commit and the merge to `main`.
+
+**Backup:** Supabase lists no managed backups (PITR off). Full roles/schema/data
+dumps taken to `C:\Users\benal\pl-goals-backups\2026-11-02-pre-044\` (manifest +
+SHA-256). Restore-tested into a disposable Supabase stack pinned to production
+versions: strict single-transaction restore exit 0, public 31/31 tables and
+46,765/46,765 rows, auth.users and identities 13/13. Several false starts were caught
+by checking numbers rather than exit codes (Git Bash rewrote container paths so psql
+never ran; an inline filter dropped 47k rows — rewritten as a script that refuses to
+drop any row it isn't told to).
+
+**Linked project** verified four ways. **Migration 044** applied 09:06:35 UTC;
+verified by migration list, schema dump diff (only the 4 SET lines), grants, anon
+probes. **PR #1** opened via the owner's signed-in Chrome; CI's first run failed on
+`npm ci` (npm 10 vs npm 11 lockfile difference, pre-existing on main) → fixed by
+`a7b7804` (additive lockfile entries; bundle byte-identical). All checks green;
+preview verified (identical bundle hashes; uses production Supabase).
+
+**Deploy:** owner approved; fast-forward merge `89735dc..a7b7804`, pushed 09:45:31;
+Vercel production deployment ready 09:46; both domains serve the new bundle.
+
+**Smoke tests:** live signed-out sweep 68 runs clean; auth guards; live CDN 4G first
+paint 3.5 s → 0.57 s; 21 core tables identical to the backup; cron healthy
+(compute-scores 480/480 in 24 h); security advisor 0 errors. New: ISSUE-83 (pg_net
+5 s timeouts, ~25 %, pre-existing), ISSUE-84 (advisor warnings incl. anon EXECUTE on
+SECURITY DEFINER functions). Signed-in flows pending a test-account decision.
+
+**Score Predictor:** proposed two-half payout structure documented as a pending
+decision (finalisation-status.md § 10a); no logic changed.
+
+**Docs** committed on `docs/post-release-2026-11-02` (not pushed to `main`, since
+any push to `main` redeploys production).
+
+---
+
 ## 2026-11-02 (84) — Release preparation: ISSUE-77 resolved, 044 reviewed, ESLint + CI, runbook
 
 **Inventory:** RC `fix/mobile-finalisation-audit` is a fast-forward of `main`
