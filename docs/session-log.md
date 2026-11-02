@@ -13,6 +13,38 @@ from here.
 
 ---
 
+## 2026-11-02 (86) — Post-release hardening: ISSUE-84, ISSUE-83, testing plan, 40/40/20 proposal
+
+Branch `hardening/post-release` (on top of `docs/post-release-2026-11-02`, which is
+unchanged). No production changes; production read only via `supabase db query` and
+the earlier schema dump.
+
+**ISSUE-84:** audited the eight anon-executable SECURITY DEFINER functions (callers in
+migrations/policies/Edge Functions/frontend; production policy roles all
+`authenticated`). Migration 046 + pgTAP test (31/31; 15 fail before). The guard was
+proven by running 046 against local supabase_admin-owned functions (REVOKE only
+warned; guard aborted). Local ownership aligned to production. HTTP probes, a real
+local sign-up (test user deleted by exact id), trigger paths, all four cron functions,
+and a frontend sweep passed.
+
+**ISSUE-83:** attributed pg_net responses to jobs: compute-scores answered 0 of ~120
+calls in time; p50 6.3 s. Every call still executed; no overlaps; no retries. Cause:
+90 sequential dispatches for mostly idle gameweeks. Fixed with selective dispatch
+(`selectGameweeks.ts`, 8 unit tests) and a local equivalence test built in the
+production shape from a stale state (byte-identical, idempotent; local data restored
+byte-identical). Two test-harness defects were caught and fixed along the way (a
+non-deterministic scenario; a converged state that couldn't reveal a wrong skip).
+`api.md`'s compute-scores entry rewritten (it described the retired loop).
+
+**Found:** ISSUE-85 (Pick 5 interim "lost" before kickoff) and **ISSUE-86 (P1)**: all 12
+production pots are free, 0 payments recorded, 6 entries already void.
+
+**Docs:** production-testing-plan.md (new), proposals/score-predictor-40-40-20.md
+(new), finalisation-status, current-state, project-board, database, decisions (two
+ADRs), api.
+
+---
+
 ## 2026-11-02 (85) — Production deployment of the mobile finalisation release
 
 **Owner approvals:** release scope (9 commits, excluding the worktree and 045);

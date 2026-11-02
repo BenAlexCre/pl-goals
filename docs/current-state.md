@@ -1,6 +1,8 @@
 # Current State
 
-Last reviewed: 2026-11-02, post-deployment (release deployed; ISSUE-78 resolved in
+Last reviewed: 2026-11-02, post-release hardening (ISSUE-83/84 fixed in repo — migration
+046 and the compute-scores change, both pending owner approval; ISSUE-85/86 opened;
+ISSUE-86 is P1). Before that: post-deployment (release deployed; ISSUE-78 resolved in
 production; ISSUE-83/84 opened — [finalisation-status.md § 0](./finalisation-status.md#0-deployment-record-2026-11-02)).
 Earlier: release preparation (ISSUE-77/79/38 resolved; release
 candidate and runbook in [finalisation-status.md](./finalisation-status.md)). Earlier the
@@ -372,6 +374,25 @@ now explicitly expected, not an open question.
 
 ### P1 — features that are half-built or internally inconsistent
 
+#### ISSUE-86 — Free (€0) pots void their players' entries unless every member is manually marked paid
+**Discovered 2026-11-02** while preparing the production testing plan. Settlement
+voids every entry not marked paid (`Pick5Engine`/`LmsEngine`/`PredictorEngine`
+`settle()` read only `entry_payments.is_paid`), **regardless of the entry fee**. For
+LMS/Score Predictor the "Record payment received" form refuses a €0 pot
+(`validateSeasonPayment`: "no entry fee configured"); the only path is the per-member
+**Mark paid** toggle, which nothing prompts an organiser of a free pot to use.
+**Production (read-only counts, 2026-11-02):** all 12 pots are free (9 Pick 5, 3 Score
+Predictor), **0 payment records exist, and 6 entries are already void** (3 Pick 5,
+3 Predictor). The landing page advertises "free to play". business-rules.md states the
+voiding rule without a free-pot exception, so this is a **product decision**, not a
+bug to fix silently. **Recommendation (pending owner approval):** an entry in a pot
+whose `entry_fee = 0` is treated as paid — implemented in each engine's `settle()`
+(and payment-status display), not by writing fake payment rows. Affected real entries
+could then be restored with the existing Late Payment Override (reinstate), **only with
+the owner's approval** (real player records). No code or data changed.
+**Status: confirmed, open (P1), awaiting decision.**
+
+
 **Status: confirmed, not fixed.** This is the largest single gap between what
 the backend can do and what a real user can do — see
 [project-board.md](./project-board.md) for the prioritized implementation plan.
@@ -587,6 +608,26 @@ logs can't yet distinguish this per job. Fix: pass a larger `timeout_millisecond
 the cron jobs' `net.http_post` calls (new migration) and track per-job outcomes.
 **Status: confirmed, open (P2).**
 
+**Correction:** "last 24 h" above was effectively the last ~6 h — pg_net keeps
+responses for 6 hours. **Root cause found and fixed in repo (2026-11-02, post-release hardening, commit
+10d74ff — not deployed).** Attributing responses to jobs by body signature showed the
+timeouts are almost entirely **compute-scores** (0 of ~120 calls answered in time over
+pg_net's 6-hour window; other jobs ~99 %). compute-scores ran every engine for all ~30
+upcoming/live gameweeks × 3 modes sequentially (90 dispatches): p50 6.3 s, p95 8.3 s,
+max 20 s against a 5 s client timeout. The work always completed (cron fired 120 /
+function ran 120 / 120 success in 6 h); 0 overlapping runs in 480; pg_net does not
+retry, so no duplicate processing. The "DNS time 5000 ms" figures are a pg_net
+reporting artefact — those requests demonstrably executed. Not network latency, not
+platform limits, not a database bottleneck as such: round-trip count. **Fix:** dispatch
+only gameweeks where an engine can act (deadline passed or unknown, or a live/finished
+fixture, or locked entries) — production shape 29 of 30 gameweeks idle, ~3 dispatches
+instead of 90. Unit-tested (8) and equivalence-tested locally from a stale state
+(byte-identical to the old path, idempotent). The timeout was **not** raised: with the
+fix, the expected runtime is well under 5 s. sync-fixtures (42 s, once daily) still
+exceeds 5 s — it completes and logs to `sync_runs`; raising its pg_net timeout is
+optional observability work. **Status: fixed in repo, pending deploy; verify in
+production with the § 0 queries in finalisation-status.md.**
+
 #### ISSUE-84 — Supabase security advisor warnings (post-044)
 **Discovered 2026-11-02** (`supabase db advisors --linked --type security`): 28
 warnings, 0 errors. Notable: (1) **anon can EXECUTE 8 `SECURITY DEFINER` functions**
@@ -603,6 +644,34 @@ caller's rights; (3) leaked-password protection disabled; insufficient MFA optio
 043). Fix: migration revoking anon EXECUTE where not required and pinning search_path;
 enable leaked-password protection in the Auth dashboard (owner). **Status:
 confirmed, open (P2).**
+
+**Update 2026-11-02 (post-release hardening): item (1) fixed in repo — migration 046
+(commit 3e2f8a5), not applied to production.** Full audit of the eight functions
+(purpose, callers, writes, abuse) is in the migration header. `refresh_gameweek_deadlines`
+had no direct caller at all (only its fixtures trigger); anonymous `POST
+/rest/v1/rpc/refresh_gameweek_deadlines` could force full-table rewrites of
+`gameweeks` on demand. 046 revokes EXECUTE from PUBLIC/anon on all eight and from
+authenticated on the four write/trigger functions; service_role keeps all; a guard
+aborts the migration if any grant survives (REVOKE by a non-owner only warns —
+reproduced locally, where two functions are `supabase_admin`-owned; production's
+owner is `postgres`). Tested locally: pgTAP `supabase/tests/046_*.test.sql` 31/31
+(15 fail before 046); HTTP probes; real sign-up; triggers; cron functions; frontend
+sweep. Items (2)–(5) remain open. **Note for publishing:** this repository is public —
+apply 046 before pushing these docs, or push both together.
+
+#### ISSUE-85 — Pick 5 shows a pick as "lost" before its player's match has started
+**Discovered 2026-11-02** reading `Pick5Engine.calculateScore()` during the ISSUE-83
+work. Once a gameweek's entries are locked, every run scores each pick from goals so
+far, and when **no fixture in the gameweek is live at that moment** a pick below its
+goal threshold gets `result = 'lost'` — including picks whose player hasn't played
+yet: between the deadline and the first kickoff, and between match windows (e.g. a
+Sunday player on Saturday evening). `GameweekPage` renders that via `LivePickCard`
+with a red warning icon. The final result is correct once every fixture has finished
+(settlement re-scores), so this is a misleading interim state, not a wrong payout.
+**Recommendation (needs owner approval — scoring display rule):** derive each pick's
+interim result from its own player's fixture: `pending` before kickoff,
+`winning`/`losing` while that fixture is live, `won`/`lost` once it has finished.
+**Status: confirmed, open (P2).**
 
 #### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path` — **RESOLVED 2026-11-02 (044 applied to production), see [Resolved issues](#resolved-issues)**
 

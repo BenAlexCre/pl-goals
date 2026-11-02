@@ -7275,3 +7275,56 @@ removed by ISSUE-10/27; the ratchet must be lowered as they are fixed. Revisit
 react-hooks 7 if the React Compiler is ever adopted. CI uses non-secret placeholder
 `VITE_SUPABASE_*` values and never talks to Supabase; the Playwright mobile sweep is
 not yet in CI.
+
+
+### SECURITY DEFINER EXECUTE privileges — decision (2026-11-02, ISSUE-84)
+
+**Decision:** migration 046 removes EXECUTE from PUBLIC and anon on all eight
+`security definer` functions, and from authenticated on the four write/trigger
+functions; service_role keeps all; a DO-block guard aborts the migration unless the
+final privileges are exactly as intended.
+
+**Context:** Supabase's advisor flagged anon-executable `security definer` functions.
+`refresh_gameweek_deadlines()` writes every `gameweeks` row and was callable
+anonymously via `/rpc`, with no legitimate direct caller.
+
+**Reason:** least privilege with evidence: every policy using the read-only helpers is
+`TO authenticated` (verified in production's schema), the frontend calls none of them,
+Edge Functions call `is_banned` with a user token, and trigger functions don't need
+EXECUTE for the firing role. The guard exists because REVOKE by a non-owner only warns
+— reproduced locally.
+
+**Alternatives considered:** revoking from anon only (ineffective — anon inherits
+PUBLIC); dropping SECURITY DEFINER from the helpers (would change RLS evaluation and
+needs per-table review); changing default privileges for all future functions
+(broader platform change — left as a recommendation).
+
+**Consequences:** any future anonymous RPC need must be granted explicitly. New
+`security definer` functions must revoke PUBLIC/anon themselves (Supabase defaults
+grant them). Rollback: re-grant EXECUTE to anon/authenticated/PUBLIC.
+
+### compute-scores selective dispatch — decision (2026-11-02, ISSUE-83)
+
+**Decision:** compute-scores dispatches a gameweek only when at least one engine can
+act on it (deadline passed or unknown, a live/finished fixture, or locked entries);
+`{ "full_scan": true }` keeps the previous dispatch-everything behaviour.
+
+**Context:** ~25 % of cron calls hit pg_net's 5 s timeout; investigation showed it was
+compute-scores on essentially every call (p50 6.3 s), because it ran all three
+engines for ~30 idle future gameweeks every 3 minutes.
+
+**Reason:** fixes the cause (round-trip count) instead of raising the observer's
+timeout. Each skip condition mirrors an engine's own early return, and the rule is
+conservative (null deadlines always scored). The earlier entry-based pre-filter was
+removed because it missed LMS/Predictor's season-scoped entries; this one does not
+depend on entries for those modes.
+
+**Alternatives considered:** raising `timeout_milliseconds` (hides the cost, keeps
+~150 sequential round trips every 3 minutes); parallelising engine calls (risk of
+concurrent season-aggregate recomputes, no reduction in total work); moving the skip
+logic into each engine (more change surface for the same result).
+
+**Consequences:** a future engine whose `calculateScore()` can act on a future
+gameweek without locked entries or active fixtures must extend `selectGameweeks.ts`
+— the equivalence test (`frontend/scripts/qa/compute-scores-equivalence.mjs`) is the
+check. `full_scan` is the escape hatch.

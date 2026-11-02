@@ -4,7 +4,9 @@ Last updated: **2026-11-02, post-deployment** (sessions 83–85 in
 [session-log.md](./session-log.md)). **Status: DEPLOYED to production** —
 migration 044 applied 09:06 UTC, frontend live 09:46 UTC (`main` = `a7b7804`).
 Signed-out and database-side smoke tests pass; signed-in smoke tests await an owner
-decision on a test account (§0).
+decision on a test account (§0). **Post-release hardening (§0b):** migration 046 and a
+compute-scores fix are ready but not deployed; **ISSUE-86 (P1)** — free pots voiding
+players' entries — needs an owner decision.
 
 ## 0. Deployment record (2026-11-02)
 
@@ -48,6 +50,67 @@ what needs the owner. It summarises and links; canonical detail lives in
 | ⛔ | Blocked — needs owner credentials, approval, a decision or a real-world event |
 
 ---
+
+## 0b. Post-release hardening (2026-11-02)
+
+Branch `hardening/post-release` (on top of the unchanged `docs/post-release-2026-11-02`).
+**Nothing here is in production yet** — no production database changes, no deploys.
+
+| Item | Result | Evidence |
+|---|---|---|
+| **ISSUE-84** anon EXECUTE on 8 `SECURITY DEFINER` functions | ✅ fixed in repo — **migration 046** (not applied) | Audit per function (purpose, callers, writes, abuse) in the migration header. pgTAP `supabase/tests/046_*.test.sql` 31/31 (15 fail before). HTTP: anon `rpc/refresh_gameweek_deadlines` → 401 with `gameweeks` untouched; anon `is_pot_member` → 401; signed-in `is_banned`/`is_pot_member`/pots unchanged; signed-in refresh → 403; service role → 204. Real Auth sign-up still creates the profile; fixtures/user_entries triggers fire; all 4 cron functions 200; frontend sweep (34 runs) clean. Guard proven to abort a silent no-op REVOKE. |
+| **ISSUE-83** compute-scores timeouts | ✅ root cause found, fixed in repo (not deployed) | compute-scores answered 0 of ~120 calls within 5 s (others ~99 %); p50 6.3 s / p95 8.3 s / max 20 s; every call still ran (120/120), 0 overlaps, no retries. Cause: 90 sequential dispatches for mostly idle gameweeks. Fix: selective dispatch — production shape ~3 dispatches instead of 90. 8 unit tests; local equivalence test (production shape, stale start state) byte-identical and idempotent. Deno suite 355/355. |
+| Signed-in production testing | 📋 plan ready, blocked on approval | [production-testing-plan.md](./production-testing-plan.md) — isolation, €0 `[QA]` pots, local-vs-production split, one-gameweek schedule, clean-up by exact id. No account created. |
+| Score Predictor 40/40/20 | 📋 proposal ready, no logic changed | [proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md) — 8 owner decisions. |
+| **ISSUE-86 (P1, new)** free pots void entries | ⛔ needs owner decision | All 12 production pots are free; 0 payments recorded; **6 entries already void**. Recommended rule: €0 pots count as paid. |
+| **ISSUE-85 (new)** Pick 5 interim "lost" | ⛔ needs owner decision | A pick shows "lost" before its player's match starts; final results correct. |
+
+**Production verification status:** release deployed and verified signed-out,
+data-preserving and cron-healthy (§ 0). Signed-in flows: not yet tested in production.
+046 and the compute-scores change: tested locally only.
+
+**Remaining work, prioritised:**
+
+| Pri | Task | Needs |
+|---|---|---|
+| P1 | ISSUE-86 rule decision, then implementation + restoring the 6 void entries | Owner decision; approval to touch real entries |
+| P1 | Apply 046; deploy compute-scores (one Edge Function deploy) | Owner approval |
+| P1 | Signed-in production test run | Approval to create test accounts |
+| P2 | Score Predictor 40/40/20 decisions → build before GW19 | Owner decisions |
+| P2 | ISSUE-85 interim-result rule | Owner decision |
+| P2 | ISSUE-84 leftovers (invoker search_path, leaked-password protection, MFA) | Dashboard setting is owner-only |
+| P2 | ISSUE-10/27 `PotDetail` → TanStack Query (also clears the 7 lint warnings) | — |
+| P3 | ISSUE-80 `.maybeSingle()`; Deno lockfile; Playwright sweep in CI; rest of `api.md` (settle-gameweek entry is stale like compute-scores' was) | — |
+
+**When approved — exact steps (owner-run or owner-approved):**
+
+1. Back up first (same procedure as § 0; the 2026-11-02 backup predates 044).
+2. **Migration 046:** `npx supabase db push --linked --dry-run` must list only
+   `046_restrict_security_definer_execute.sql`, then `npx supabase db push --linked`.
+   The migration aborts itself if the privileges don't come out exactly right.
+   Verify: re-run the security advisor (the `anon_security_definer_function_executable`
+   items should be gone) and the anon probe `POST /rest/v1/rpc/refresh_gameweek_deadlines`
+   → 401.
+   Rollback (tested shape): `grant execute on function <each of the 8> to public, anon, authenticated;`
+   then `npx supabase migration repair --status reverted 046 --linked`.
+3. **compute-scores:** merging to `main` does **not** deploy Edge Functions (Vercel
+   builds only the frontend). Deploy with
+   `npx supabase functions deploy compute-scores --project-ref rgohuoooujqclcfkoaht`.
+   Verify within 15 minutes: `sync_runs` compute-scores durations under 1 s, and
+   compute-scores 200 responses appearing in `net._http_response`.
+   Rollback: redeploy the previous version from `main` (`a7b7804`), or call with
+   `{"full_scan": true}`.
+4. **Migration ordering:** if 046 ships before the `pot-admin-a11y-remediation`
+   worktree, its `045_prevent_pot_admin_orphaning.sql` becomes out of order —
+   renumber it to **047** before merging (`db push` refuses out-of-order versions).
+5. **Publishing:** this repository is public and these docs describe the ISSUE-84 gap;
+   push the hardening branch **after** 046 is applied, or together with it.
+
+**Recommended next development phase — "Payments & rules correctness":** decide
+and implement ISSUE-86 (free pots), the Score Predictor 40/40/20 rules (time-bound by
+GW19) and ISSUE-85, all behind the existing engine tests plus new ones, then run the
+signed-in production test plan across one real gameweek. Feature work should wait
+until those rules are settled, because real players' entries are affected today.
 
 ## 1. Release readiness
 
@@ -180,8 +243,10 @@ errors — found already fixed by `a11a32c`, closed now with evidence).
 
 | ID | Pri | Summary | Next step |
 |---|---|---|---|
-| ISSUE-83 | P2 | ~25 % of cron → Edge Function calls hit pg_net's 5 s timeout (some stall on DNS); pre-existing | Raise `timeout_milliseconds` in the cron `net.http_post` calls (new migration); monitor DNS stalls |
-| ISSUE-84 | P2 | Security advisor warnings: anon can EXECUTE 8 `SECURITY DEFINER` functions (incl. data-writing `refresh_gameweek_deadlines`); 7 invoker functions without pinned search_path; leaked-password protection off | `REVOKE EXECUTE … FROM anon` where not needed; pin search_path; enable leaked-password protection in Auth settings (owner) |
+| ISSUE-86 | **P1** | Free (€0) pots void every entry not manually marked paid; production: 12/12 pots free, 0 payments, 6 entries void | Owner decision (recommended: €0 pots count as paid), then implement and reinstate affected entries with approval — §0b |
+| ISSUE-83 | P2 | compute-scores exceeded pg_net's 5 s timeout on ~every call (p50 6.3 s) — root cause found | **Fixed in repo** (selective dispatch, tested) — deploy compute-scores, then verify with the §0 queries |
+| ISSUE-85 | P2 | Pick 5 shows picks as "lost" before the player's match starts | Owner decision on the interim-result rule |
+| ISSUE-84 | P2 | Security advisor warnings | anon-EXECUTE item **fixed in repo (migration 046, tested)** — apply with approval; remaining: 7 invoker functions' search_path, leaked-password protection (owner, dashboard), MFA options |
 | — | P2 | 7 `exhaustive-deps` warnings in `PotDetail.jsx`/`PotManager.jsx` | Real stale-closure risk, but adding the deps as suggested would loop (loaders are recreated every render). Fix with ISSUE-10/27 (TanStack Query migration). Ratcheted so no new warning can land. |
 | ISSUE-10/27 | P2 | `PotDetail.jsx` imperative fetching, no stale-response guard | Planned refactor |
 | ISSUE-80 | P3 | Non-member pot view logs a 406 | `.maybeSingle()` |
@@ -357,48 +422,25 @@ for the owner, not decisions.
 | 5 | **LMS `season_end_tie_rule = final_prediction`** | Not selectable in the UI (only `split_prize`); engine refuses rather than guesses. | Low | Keep deferred; design only if organisers ask. |
 | 6 | **Member self-leave** | Members can't leave; only admins remove. | Low | Decide whether players may leave (and what happens to paid entries). |
 | 7 | **Last admin can't be removed** (ships with migration 045) | Not yet in production. | Low | Confirm the invariant "every active pot keeps an admin"; also decide whether admins need a promote-member UI (none exists). |
+| 8 | **ISSUE-86 — are €0 pots "paid"?** | Every unmarked entry is voided at settlement, free pot or not; 6 production entries already void. | **High — affects real players now** | Treat entries in €0 pots as paid (in `settle()` and payment display); then reinstate the 6 entries with approval. |
+| 9 | **ISSUE-85 — Pick 5 interim result** | A pick shows "lost" before its player's match starts. | Medium | `pending` until the player's fixture kicks off; `winning`/`losing` while live; `won`/`lost` when finished. |
 
 ---
 
-### 10a. PENDING DECISION — proposed Score Predictor two-half payout structure
+### 10a. PENDING DECISION — Score Predictor 40 / 40 / 20 prize structure
 
 **Status: proposal only. Not a business rule, not implemented, payout logic
-unchanged.** Recorded 2026-11-02 at the owner's request.
+unchanged.** Full rules — gameweek boundaries, eligibility, tie-breaking, prize
+calculation with a worked example, late joiners, withdrawals, incomplete
+competitions, finalisation — and the **8 owner decisions** they need are in
+**[proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md)**
+(this section previously held an earlier A/B/C sketch; the owner chose to develop
+40 / 40 / 20, and the proposal document supersedes it).
 
-**How `two_halves` behaves today (verified in `PredictorEngine` and
-business-rules.md):** one cumulative standings table across all 38 gameweeks; one
-season-end prize (`pot_prizes`, `scope = 'season'`) to the leader(s) after
-`end_gameweek_id`'s deadline, using the existing tiebreak hierarchy (points →
-exact scores → goalscorer bonuses → split). `two_halves` and `single_cycle` are
-paid identically; the mode currently changes nothing about money.
-
-**Proposed structure (for decision):**
-
-| Element | Proposal |
-|---|---|
-| Halves | **H1 = GW1–19, H2 = GW20–38** (for a pot starting mid-season: from `start_gameweek_id` to GW19, then GW20–38) |
-| Standings | Two independent half tables (points reset at GW20) **plus** the existing cumulative season table |
-| Prize split of the net pool (after admin/charity fees) | **Option A — 50 / 50:** H1 winner(s) 50 %, H2 winner(s) 50 %; no overall prize. **Option B — 40 / 40 / 20:** H1 40 %, H2 40 %, overall season winner 20 %. **Option C — current behaviour:** one season-end prize (rename the mode so it doesn't imply two payouts). |
-| When H1 pays | After GW19's deadline has passed **and** every GW19 fixture is finished/resolved — the same readiness gate settlement already uses |
-| Ties | Existing hierarchy (points → exact scores → goalscorer bonuses → equal split), applied within each half |
-| Entry fee | Unchanged: one season-scoped fee covers both halves; an entry voided for non-payment is excluded from any half settled while void (Late Payment Override reinstates as today) |
-| Late joiners | Depends on decision 4 (entry window); if mid-season joining stays allowed, a GW10 joiner competes for H1 from GW10 and fully in H2 |
-| Notifications | One `predictor.prize_awarded` per winner per half (existing event, payload gains a `half` field) |
-
-**Recommendation:** Option B (40/40/20) keeps the season meaningful after a poor
-first half — the reason organisers pick "two halves" — while still rewarding the
-season winner. Option C is the zero-engineering choice if a mid-season payout isn't
-wanted; then rename `two_halves` in the UI before more pots are created with it.
-
-**Engineering implications if A or B is chosen** (for estimating, not started):
-half-scoped standings (a `half` dimension on `pot_standings_snapshots` or a
-computed view), `pot_prizes` rows with a half scope, an extra `awardPrize` call
-at the GW19 boundary in `settle()`, tests, and the pot-detail UI showing the
-current half. Needs to be built, tested and deployed **before GW19** to pay H1 on
-time; otherwise H1 can be paid retrospectively once built.
-
-**Owner to decide:** A, B or C (or other split); confirm H1/H2 boundaries; confirm
-mid-season-joiner treatment (ties to decision 4).
+In one line: H1 (GW1–19) 40 %, H2 (GW20–38) 40 %, Overall 20 % of the net pool; H1 is
+calculated on the pool at H1 finalisation and never clawed back; season-end prizes
+share what remains 2 : 1; existing tiebreaks per prize. Today a `two_halves` pot still
+pays once, at season end. **Decide before the gameweek-19 deadline** to pay H1 on time.
 
 ## 11. Owner approval checklist
 

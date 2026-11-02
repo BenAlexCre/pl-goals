@@ -236,7 +236,18 @@ RLS helper functions (all `security definer`, used only inside policy definition
 `create_entry_payment` and `handle_new_user` are pinned to `search_path = ''` (their
 bodies are fully schema-qualified). Any new `security definer` function must declare
 `set search_path = ''` at creation. 044 was **applied to production on 2026-11-02
-09:06 UTC**. Remaining advisor items (anon EXECUTE on `security definer` functions,
+09:06 UTC**.
+
+**EXECUTE (migration 046, ISSUE-84 — in repo, not yet in production):** the eight
+`security definer` functions are not executable by PUBLIC/anon. `is_pot_member`,
+`is_pot_admin`, `is_banned`, `is_email_verified`: authenticated + service_role (used
+by `TO authenticated` RLS policies). `refresh_gameweek_deadlines`,
+`trigger_refresh_gameweek_deadlines`, `handle_new_user`, `create_entry_payment`:
+service_role only (trigger functions need no EXECUTE for the firing role). New
+functions inherit Supabase's default grants to anon — revoke explicitly when adding a
+`security definer` function. Tests: `supabase test db` (`supabase/tests/`). Local-DB
+note: those two deadline functions were `supabase_admin`-owned locally (drift); local
+ownership was aligned to `postgres` to match production. Remaining advisor items (anon EXECUTE on `security definer` functions,
 invoker functions without a pinned search_path): ISSUE-84.
 
 **Migration numbering (ISSUE-77, resolved 2026-11-02):** `043` is

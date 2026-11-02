@@ -1,6 +1,6 @@
 # Project Board
 
-Last reviewed: 2026-11-02, post-deployment — deployment record and smoke tests in [finalisation-status.md § 0](./finalisation-status.md#0-deployment-record-2026-11-02).
+Last reviewed: 2026-11-02, post-release hardening — see [finalisation-status.md § 0b](./finalisation-status.md#0b-post-release-hardening-2026-11-02).
 
 This is the **active work tracker** — a Kanban view of what's queued, in progress,
 blocked, or done. It's derived from, and must stay consistent with,
@@ -32,8 +32,9 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
-- **Raise pg_net timeouts for cron → Edge Function calls** — `ISSUE-83` (P2), pre-existing ~25 % client-side timeouts.
-- **Security advisor follow-ups** — `ISSUE-84` (P2): revoke anon EXECUTE on `SECURITY DEFINER` functions (notably `refresh_gameweek_deadlines`), pin search_path on 7 invoker functions, enable leaked-password protection (owner, dashboard).
+- **Pick 5 interim "lost" before kickoff** — `ISSUE-85` (P2), needs an owner decision on the interim-result rule.
+- **Optional: raise pg_net timeout for `sync-fixtures-daily`** (42 s daily run) — observability only, follow-up to `ISSUE-83`.
+- **Security advisor follow-ups** — `ISSUE-84` (P2) remaining items: pin search_path on 7 invoker functions, enable leaked-password protection (owner, dashboard), `pg_trgm` schema. The anon-EXECUTE item is fixed in repo (046).
 - **Fix the 7 `exhaustive-deps` warnings** — folds into `ISSUE-10`/`ISSUE-27` (TanStack Query migration of `PotDetail.jsx`); lint ratchets at 7 meanwhile.
 - **Add a Deno lockfile for Edge Functions; add the Playwright mobile sweep to CI** — P3, follow-ups from release preparation.
 - **`.maybeSingle()` for the non-member pot view** — `ISSUE-80` (P3) → [current-state.md](./current-state.md#issue-80--viewing-a-pot-you-arent-a-member-of-logs-a-406-error-to-the-console).
@@ -71,6 +72,10 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Blocked
 
+- **`ISSUE-86` (P1) — free pots void entries unless members are marked paid** — 6 real entries already void in production. Blocked on the owner's rule decision (recommended: €0 pots count as paid) and approval before any reinstatement of real entries.
+- **Apply migration 046 to production + deploy the compute-scores change** (`ISSUE-84`, `ISSUE-83`) — implemented and tested locally on `hardening/post-release`; blocked on owner approval.
+- **Score Predictor 40/40/20 rules** — proposal written ([docs/proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md)); 8 owner decisions listed; no logic changed.
+- **Signed-in production testing** — plan ready ([production-testing-plan.md](./production-testing-plan.md)); blocked on approval to create the test accounts.
 - **Finish the `pot-admin-a11y-remediation` worktree and ship migration 045** — `ISSUE-77` resolved (renumbered to 045, uncommitted); blocked on the owner finishing that work. Original card: **`ISSUE-77` — migration version `043` collision (main vs uncommitted worktree)** (P1) → [current-state.md](./current-state.md#issue-77--migration-version-043-collision-between-main-and-an-uncommitted-worktree). Blocked on: the owner's decision about the in-progress `pot-admin-a11y-remediation` worktree — its `043_prevent_pot_admin_orphaning.sql` must be renumbered (now `045`) before merging.
 - **Signed-in production smoke tests** — blocked on the owner choosing a test-account approach (owner-supplied account, or a named test account created in production). Checklist: [finalisation-status.md § 9](./finalisation-status.md#9-post-deployment-verification-checklist).
 - **Product decision: Score Predictor `two_halves` payout (once vs twice)** — default mode for every Predictor pot; must be decided before gameweek 19. Proposed structure (options A/B/C, recommendation B 40/40/20): [finalisation-status.md § 10a](./finalisation-status.md#10a-pending-decision--proposed-score-predictor-two-half-payout-structure). Payout logic unchanged until decided.
@@ -86,6 +91,7 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Done
 
+- **Post-release hardening (code + tests, not deployed)** — 2026-11-02. Migration 046 (`ISSUE-84` anon EXECUTE) with pgTAP tests; compute-scores selective dispatch (`ISSUE-83` root cause) with unit + equivalence tests; production testing plan; 40/40/20 proposal; `ISSUE-85`/`ISSUE-86` found.
 - **Production deployment of the mobile finalisation release** — 2026-11-02. Backup taken and restore-verified; migration 044 applied (09:06 UTC, `ISSUE-78` resolved); PR #1 merged (fast-forward to `a7b7804`) and deployed (09:46 UTC); signed-out, performance, data-preservation, cron and advisor smoke tests passed. Live 4G first paint 3.5 s → 0.57 s.
 - **Release preparation (`ISSUE-77`, `ISSUE-79`, `ISSUE-38` resolved)** — 2026-11-02. Migration 045 renumbered in the worktree; local migration history repaired; 044 reviewed (grants, triggers, rollback tested); 001→045 replayed on a fresh DB; production state read-only verified (schema dump + push dry run); ESLint 9 toolchain; CI workflow; deployment runbook, rollback and approval checklist. Nothing pushed/deployed.
 - **Finalisation audit — mobile responsiveness overhaul (`ISSUE-81`, `ISSUE-82` resolved; `ISSUE-44` closed; `ISSUE-42` revalidated)** — 2026-11-02, implemented and verified locally (Chromium 8 widths + WebKit), **not yet deployed**. Root cause of "doesn't load on my phone": a 3.5–6 s blank screen on mobile networks plus mobile navigation/layout defects — not a runtime crash. See [finalisation-status.md](./finalisation-status.md) and [session-log.md](./session-log.md) entry 83.
