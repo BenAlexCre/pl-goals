@@ -345,3 +345,28 @@ export function useCreatePot() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pots'] }),
   })
 }
+// ISSUE-44 (completed 2026-11-02) — the signed-in player's own season-scoped
+// payment for a Last Man Standing / Score Predictor pot (one flat fee per
+// competition, `scope = 'season'` — see business-rules.md § Payment
+// Verification). Read-only by design: RLS `entry_payments_select_member`
+// lets a member read their pot's payments; nothing here can write one.
+// Resolves to `null` when no payment row exists yet, which the UI treats the
+// same as unverified — exactly how settlement treats it.
+export function useMySeasonPayment(potId) {
+  const { user } = useAuthStore()
+  return useQuery({
+    queryKey: ['my-season-payment', potId, user?.id],
+    enabled: !!potId && !!user?.id,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('entry_payments')
+        .select('is_paid, marked_at')
+        .eq('pot_id', potId)
+        .eq('user_id', user.id)
+        .eq('scope', 'season')
+        .maybeSingle()
+      if (error) throw error
+      return data ?? null
+    },
+  })
+}

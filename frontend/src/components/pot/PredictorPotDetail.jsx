@@ -24,6 +24,7 @@ import { usePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
 import { formatSeasonName } from '../../utils/format'
+import SeasonPaymentStatus from './SeasonPaymentStatus'
 
 // Score Predictor "pot home" — the Predictor sibling of LmsPotDetail.jsx,
 // same reasoning for staying its own component rather than a branch inside
@@ -199,7 +200,7 @@ export default function PredictorPotDetail({ pot, potId }) {
             {isPotAdmin ? (
               <Link
                 to={`/pot/${potId}/manage`}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 [@media(pointer:coarse)]:min-h-[44px] transition-colors hover:text-white"
               >
                 <Settings size={13} />
                 Manage
@@ -218,7 +219,11 @@ export default function PredictorPotDetail({ pot, potId }) {
               {isPotAdmin ? 'Start playing' : 'Join competition'}
             </Button>
           </div>
-        ) : null}
+        ) : (
+          <div className="mt-5 border-t border-white/6 pt-4 text-sm">
+            <SeasonPaymentStatus potId={potId} />
+          </div>
+        )}
       </section>
 
       {entry ? (
@@ -394,8 +399,10 @@ export default function PredictorPotDetail({ pot, potId }) {
           Pick 5's own PotDetail.jsx pattern exactly (same md:hidden
           breakpoint, sits directly above BottomNav). Only relevant once
           fixtures are actually being shown for editing. */}
+      {/* Sits above BottomNav, whose height includes the device safe area
+          (home indicator) — a fixed bottom-16 overlapped it on iPhones. */}
       {entry && !deadlinePassed && !currentPick?.locked_at && fixtures.length > 0 && (
-        <div className="fixed inset-x-0 bottom-16 z-40 px-4 md:hidden">
+        <div className="fixed inset-x-0 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-40 px-4 md:hidden">
           {mobilePanelOpen && (
             <div className="mb-2 max-h-[55vh] overflow-y-auto rounded-2xl border border-white/10 bg-pitch-950/95 p-4 shadow-card backdrop-blur-lg">
               <PredictorSummaryPanel

@@ -18,6 +18,7 @@ import { usePot } from '../../hooks/usePots'
 import { useAuthStore } from '../../store/authStore'
 import { isPastDeadline } from '../../utils/time'
 import { formatSeasonName } from '../../utils/format'
+import SeasonPaymentStatus from './SeasonPaymentStatus'
 
 // Last Man Standing "pot home" — the LMS sibling of PotDetail.jsx's Pick 5
 // body, kept as its own component rather than crammed into that file's
@@ -161,7 +162,7 @@ export default function LmsPotDetail({ pot, potId }) {
           {isPotAdmin ? (
             <Link
               to={`/pot/${potId}/manage`}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 transition-colors hover:text-white"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/60 [@media(pointer:coarse)]:min-h-[44px] transition-colors hover:text-white"
             >
               <Settings size={13} />
               Manage
@@ -193,6 +194,12 @@ export default function LmsPotDetail({ pot, potId }) {
             <Users size={14} className="text-white/35" />
             {members.length} member{members.length === 1 ? '' : 's'}
           </span>
+          {entry ? (
+            <>
+              <span className="text-white/15">•</span>
+              <SeasonPaymentStatus potId={potId} />
+            </>
+          ) : null}
           {competitionPicks.length > 0 ? (
             <>
               <span className="text-white/15">•</span>
