@@ -156,7 +156,7 @@ export default function LmsFixtureSelector({
               type="button"
               onClick={() => setDrawerOpen(true)}
               aria-label="Open Match Centre for this fixture"
-              className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/50 transition-colors hover:border-accent/30 hover:text-accent"
+              className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/50 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 transition-colors hover:border-accent/30 hover:text-accent"
             >
               <BarChart3 size={14} />
             </button>

@@ -8,8 +8,10 @@ const variants = {
   outline:   'border border-accent/40 text-accent hover:bg-accent/10 active:scale-95',
 }
 
+// `sm` stays compact (36px) for mouse users but grows to the 44px minimum
+// touch target on coarse-pointer (touch) devices — mobile audit 2026-11-02.
 const sizes = {
-  sm: 'px-3 py-1.5 text-xs rounded-lg  min-h-[36px]',
+  sm: 'px-3 py-1.5 text-xs rounded-lg  min-h-[36px] [@media(pointer:coarse)]:min-h-[44px]',
   md: 'px-4 py-2.5 text-sm rounded-xl  min-h-[44px]',
   lg: 'px-6 py-3   text-base rounded-xl min-h-[52px]',
 }

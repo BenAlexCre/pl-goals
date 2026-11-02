@@ -79,12 +79,12 @@ export default function Drawer() {
         </div>
         <button
           onClick={closeDrawer}
-          className="absolute top-3 right-4 text-white/40 hover:text-white/70 p-1"
+          className="absolute top-1 right-2 inline-flex h-11 w-11 items-center justify-center rounded-xl text-white/40 hover:text-white/70"
           aria-label="Close drawer"
         >
           <X size={18} />
         </button>
-        <div className="overflow-y-auto flex-1 px-4 pb-6 pt-2">
+        <div className="overflow-y-auto overscroll-contain flex-1 px-4 pt-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
           {drawerContent}
         </div>
       </div>

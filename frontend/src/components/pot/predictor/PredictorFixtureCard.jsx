@@ -309,7 +309,7 @@ export default function PredictorFixtureCard({
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              className="flex items-center gap-1 text-[11px] text-white/35 transition-colors hover:text-accent"
+              className="flex items-center gap-1 text-[11px] text-white/50 transition-colors hover:text-accent [@media(pointer:coarse)]:min-h-[44px]"
             >
               <BarChart3 size={11} />
               Match Centre
@@ -318,7 +318,7 @@ export default function PredictorFixtureCard({
               type="button"
               onClick={onToggleExpand}
               aria-expanded={expanded}
-              className="flex items-center gap-1 text-xs font-semibold text-accent"
+              className="flex items-center gap-1 text-xs font-semibold text-accent [@media(pointer:coarse)]:min-h-[44px]"
             >
               {isYourPick && savedPick ? 'Change' : 'Predict this fixture'}
               <ChevronDown size={13} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />

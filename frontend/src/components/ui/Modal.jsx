@@ -70,7 +70,7 @@ export default function Modal({ open, onClose, title, children, size = 'md' }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
       role="dialog"
       aria-modal="true"
       aria-label={title}
@@ -88,19 +88,24 @@ export default function Modal({ open, onClose, title, children, size = 'md' }) {
           relative z-10 w-full ${sizes[size]}
           glass rounded-2xl border border-white/8
           animate-slide-up shadow-card
+          flex max-h-[calc(100dvh-2rem)] flex-col
         `}
       >
-        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+        {/* Mobile audit (2026-11-02) — the panel is height-capped and its
+            body scrolls. Previously a modal taller than the screen (the body
+            is scroll-locked while open) left its lower content and action
+            buttons unreachable on a phone. */}
+        <div className="flex shrink-0 items-center justify-between gap-3 px-5 pt-4 pb-2">
           <h2 className="text-base font-semibold text-white">{title}</h2>
           <button
             onClick={onClose}
-            className="text-white/40 hover:text-white/80 transition-colors p-1"
+            className="-mr-2 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white/40 hover:text-white/80 transition-colors"
             aria-label="Close"
           >
             <X size={18} />
           </button>
         </div>
-        <div className="px-5 pb-5">{children}</div>
+        <div className="min-h-0 overflow-y-auto overscroll-contain px-5 pb-5">{children}</div>
       </div>
     </div>
   )

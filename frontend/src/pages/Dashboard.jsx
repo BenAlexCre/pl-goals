@@ -460,7 +460,7 @@ export default function Dashboard() {
       <div className="space-y-8 lg:grid lg:grid-cols-[1fr_380px] lg:items-start lg:gap-8 lg:space-y-0">
       <div className="space-y-8 min-w-0">
         {/* B. Summary cards */}
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <section className="grid grid-cols-2 gap-4 xl:grid-cols-4">
           <SummaryCard icon={CalendarClock} label="Next gameweek">
             {loadingNextGwTile ? (
               <div className="h-10 animate-pulse rounded-lg bg-white/5" />
@@ -564,7 +564,7 @@ export default function Dashboard() {
                 disabled={!canGoPrev}
                 aria-label="Previous gameweek"
                 title="Previous gameweek"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <ChevronLeft size={16} />
               </button>
@@ -573,8 +573,11 @@ export default function Dashboard() {
                 <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-white/35">
                   {displayGw?.leagues?.name ?? 'Premier League'}
                 </p>
-                <div className="mt-0.5 flex items-center justify-center gap-2">
-                  <h2 className="truncate text-xl font-bold text-white">
+                {/* Mobile audit (2026-11-02) — wraps the status badge under the
+                    title on narrow screens instead of truncating the title to
+                    "Gamewe…" at 320px. */}
+                <div className="mt-0.5 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+                  <h2 className="truncate text-lg font-bold text-white sm:text-xl">
                     {gwState ? `Gameweek ${gwState.gw.number}` : 'No gameweek'}
                   </h2>
                   {statusMeta && <Badge status={statusMeta.badge}>{statusMeta.label}</Badge>}
@@ -591,7 +594,7 @@ export default function Dashboard() {
                 disabled={!canGoNext}
                 aria-label="Next gameweek"
                 title="Next gameweek"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/10 bg-surface-2 text-white/60 transition-colors hover:border-accent/30 hover:text-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <ChevronRight size={16} />
               </button>

@@ -60,12 +60,12 @@ export default function TopNav() {
     // separate, lower-opacity, unprefixed-only styling.
     <header className="glass sticky top-0 z-40 border-b border-white/8">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4">
-        <Link to="/dashboard" className="flex items-center gap-2">
+        <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
           <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white/10">
             <Trophy size={18} className="text-white" />
           </div>
           <div>
-            <div className="text-sm font-semibold text-white">PL Predictor</div>
+            <div className="whitespace-nowrap text-sm font-semibold text-white">PL Predictor</div>
           </div>
         </Link>
 
@@ -77,7 +77,7 @@ export default function TopNav() {
             super_admin. overflow-x-auto is the fallback if it still
             doesn't fit at very narrow desktop widths: the nav scrolls
             internally rather than the whole page. */}
-        <nav className="hidden md:flex min-w-0 items-center gap-1 overflow-x-auto lg:gap-2">
+        <nav className="hidden lg:flex min-w-0 items-center gap-1 overflow-x-auto lg:gap-2">
           {links.map((link) => {
             const Icon = link.icon
             return (
@@ -100,16 +100,19 @@ export default function TopNav() {
           })}
         </nav>
 
-        <div className="flex min-w-0 items-center gap-3">
+        {/* Mobile audit (2026-11-02) — icon buttons are 44px touch targets
+            (were 34x34 / 40x32); the cluster gap tightens below sm so the
+            row still fits a 320px screen. */}
+        <div className="flex min-w-0 items-center gap-1 sm:gap-3">
           <button
             type="button"
             onClick={() => openDrawer(<NotificationPanel />)}
             aria-label={unreadCount > 0 ? `Notifications (${unreadCount} unread)` : 'Notifications'}
-            className="relative rounded-xl p-2 text-white/65 hover:bg-white/5 hover:text-white"
+            className="relative inline-flex h-11 w-11 items-center justify-center rounded-xl text-white/65 hover:bg-white/5 hover:text-white"
           >
             <Bell size={18} />
             {unreadCount > 0 ? (
-              <span className="absolute right-1 top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-pitch-950">
+              <span className="absolute right-1.5 top-1.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-pitch-950">
                 {unreadCount > 9 ? '9+' : unreadCount}
               </span>
             ) : null}
@@ -147,7 +150,7 @@ export default function TopNav() {
             type="button"
             onClick={handleSignOut}
             aria-label="Sign out"
-            className="inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm text-white/65 hover:bg-white/5 hover:text-white"
+            className="inline-flex h-11 min-w-[44px] items-center justify-center gap-2 rounded-xl px-2.5 text-sm text-white/65 hover:bg-white/5 hover:text-white sm:px-3"
           >
             <LogOut size={16} />
             <span className="hidden sm:inline">Sign out</span>

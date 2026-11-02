@@ -7,7 +7,7 @@ export default function ToastContainer() {
   return (
     <div
       aria-live="polite"
-      className="fixed bottom-24 right-4 md:bottom-6 md:right-6 z-50 flex flex-col gap-2"
+      className="fixed bottom-[calc(6rem+env(safe-area-inset-bottom))] right-4 lg:bottom-6 lg:right-6 z-50 flex flex-col gap-2"
     >
       {toasts.map((t) => (
         <Toast key={t.id} {...t} />

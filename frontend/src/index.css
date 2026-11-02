@@ -70,3 +70,29 @@
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
+/* Mobile audit (2026-11-02) — touch devices only (desktop density unchanged).
+   1. iOS Safari zooms the whole page when a focused form control's font size
+      is under 16px, and doesn't zoom back out. Several controls use text-sm
+      (14px). Deliberately outside @layer and !important: this must beat any
+      text-* utility on a form control, now and in future components.
+   2. Native text inputs/selects get the 44px minimum touch height. */
+@media (pointer: coarse) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
+  select,
+  textarea {
+    font-size: max(16px, 1em) !important;
+  }
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']),
+  select {
+    min-height: 44px;
+  }
+}
+
+/* FixtureCard layout by card width, not viewport (see FixtureCard.jsx).
+   Default (and fallback for browsers without container queries): stacked. */
+.fixture-card { container: fixture-card / inline-size; }
+.fixture-split { display: none; }
+@container fixture-card (min-width: 26rem) {
+  .fixture-stacked { display: none; }
+  .fixture-split { display: flex; }
+}

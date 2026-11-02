@@ -1,8 +1,10 @@
+import { Suspense } from 'react'
 import { Outlet } from 'react-router-dom'
 import TopNav from './TopNav'
 import BottomNav from './BottomNav'
 import Drawer from '../ui/Drawer'
 import UnverifiedBanner from './UnverifiedBanner'
+import Spinner from '../ui/Spinner'
 
 export default function AppShell() {
   return (
@@ -31,9 +33,16 @@ export default function AppShell() {
           match in the same change. Padding stays a flat `px-4`, exactly
           matching TopNav's own — a responsive px-6/px-8 step here alone
           would just trade one mismatch for another at those breakpoints. */}
-      <main className="min-w-0 flex-1 pb-24 md:pb-0">
+      {/* Bottom padding clears BottomNav (56px + the device safe area)
+          below lg, where that bar is shown. */}
+      <main className="min-w-0 flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))] lg:pb-0">
         <div className="max-w-7xl mx-auto px-4 py-6">
-          <Outlet />
+          {/* Pages are lazy chunks (App.jsx). Suspending here, inside the
+              shell, keeps TopNav/BottomNav on screen while a page loads
+              instead of blanking the whole app to a full-screen spinner. */}
+          <Suspense fallback={<div className="flex justify-center py-16"><Spinner size="lg" /></div>}>
+            <Outlet />
+          </Suspense>
         </div>
       </main>
       <BottomNav />

@@ -101,7 +101,7 @@ export default function SlideDrawer({ open, onClose, title, children, widthClass
         className={`
           absolute right-0 top-0 h-full w-full ${widthClass}
           glass border-l border-white/8 shadow-card
-          overflow-y-auto
+          overflow-y-auto overscroll-contain
           transition-transform duration-300 ease-out
           ${visible ? 'translate-x-0' : 'translate-x-full'}
         `}
@@ -110,7 +110,7 @@ export default function SlideDrawer({ open, onClose, title, children, widthClass
           <h2 className="text-base font-semibold text-white">{title}</h2>
           <button
             onClick={onClose}
-            className="rounded-lg p-1 text-white/40 transition-colors hover:text-white/80"
+            className="-mr-2 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white/40 transition-colors hover:text-white/80"
             aria-label="Close"
           >
             <X size={18} />

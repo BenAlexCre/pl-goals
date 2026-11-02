@@ -34,7 +34,7 @@ function TeamRow({ team, standing, form, align }) {
     <div className={`flex min-w-0 flex-1 items-center gap-2.5 ${align === 'right' ? 'flex-row-reverse text-right' : ''}`}>
       <TeamCrest team={team} />
       <div className="min-w-0">
-        <p className="text-sm font-semibold leading-tight text-white">{formatTeamName(team)}</p>
+        <p className="break-words text-sm font-semibold leading-tight text-white">{formatTeamName(team)}</p>
         <div className={`mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden ${align === 'right' ? 'flex-row-reverse' : ''}`}>
           {standing ? (
             <span className="shrink-0 text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>
@@ -42,6 +42,34 @@ function TeamRow({ team, standing, form, align }) {
           <TeamForm results={form} />
         </div>
       </div>
+    </div>
+  )
+}
+
+// Mobile audit (2026-11-02) — the side-by-side layout needs ~26rem of CARD
+// width; at 320px (and in the Dashboard's two-column grid at 1024px) it left
+// ~70-80px per team, so names broke mid-word and form badges were clipped.
+// Narrow cards now use the conventional stacked score layout (one team per
+// line, goals right-aligned). Which layout shows is decided by a container
+// query on the card itself (.fixture-card in index.css), not the viewport,
+// because the card's width depends on its parent grid. Browsers without
+// container-query support simply keep the stacked layout.
+function StackedTeamLine({ team, standing, form, goals, showGoals }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <TeamCrest team={team} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold leading-tight text-white">{formatTeamName(team)}</p>
+        <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden">
+          {standing ? (
+            <span className="shrink-0 text-[11px] text-white/35">{standing.position}{ordinalSuffix(standing.position)}</span>
+          ) : null}
+          <TeamForm results={form} />
+        </div>
+      </div>
+      {showGoals ? (
+        <span className="shrink-0 text-lg font-bold tabular text-white">{goals}</span>
+      ) : null}
     </div>
   )
 }
@@ -115,11 +143,18 @@ export default function FixtureCard({ fixture, leagueId, seasonId, competitionNa
       <button
         type="button"
         onClick={() => setDrawerOpen(true)}
-        className="group w-full rounded-2xl border border-white/8 bg-surface-1 p-4 text-left transition-all hover:border-accent/25 hover:bg-surface-2"
+        // min-w-0: every consumer renders this card as a grid item, whose
+        // default min-width:auto let it grow to its content's min-content
+        // width (353px inside a 288px column at a 320px viewport).
+        className="fixture-card group w-full min-w-0 rounded-2xl border border-white/8 bg-surface-1 p-4 text-left transition-all hover:border-accent/25 hover:bg-surface-2"
       >
-        <div className="flex items-center justify-between gap-2 text-xs text-white/35">
-          <span>{competitionName}</span>
-          <span className="flex items-center gap-2">
+        {/* Mobile audit (2026-11-02) — at 320px the competition name, the
+            difficulty badge and the kickoff label didn't fit on one line and
+            the row had no way to wrap, pushing the card (and page) 25px past
+            the viewport. The row now wraps, and the name truncates. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-white/35">
+          <span className="min-w-0 truncate">{competitionName}</span>
+          <span className="flex flex-wrap items-center justify-end gap-2">
             {difficulty && (
               <span
                 title={DIFFICULTY_TITLE}
@@ -139,7 +174,12 @@ export default function FixtureCard({ fixture, leagueId, seasonId, competitionNa
           </span>
         </div>
 
-        <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="fixture-stacked mt-3 space-y-2">
+          <StackedTeamLine team={fixture.home_team} standing={homeStanding} form={homeForm?.results} goals={fixture.home_goals} showGoals={hasScore} />
+          <StackedTeamLine team={fixture.away_team} standing={awayStanding} form={awayForm?.results} goals={fixture.away_goals} showGoals={hasScore} />
+        </div>
+
+        <div className="fixture-split mt-3 items-center justify-between gap-3">
           <TeamRow team={fixture.home_team} standing={homeStanding} form={homeForm?.results} align="left" />
           {hasScore ? (
             <span className="shrink-0 rounded-lg bg-black/20 px-3 py-1 text-lg font-bold tabular text-white">
