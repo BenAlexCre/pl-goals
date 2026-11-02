@@ -123,6 +123,28 @@ frontend/src/
 For what each route/page actually does from a product perspective, see
 [features.md](./features.md).
 
+### Loading, code splitting and responsive layout (2026-11-02)
+
+- **Boot screen:** `index.html` paints a static loading screen inside `#root` before
+  any JS runs; React's first render replaces it. After 12 s it offers a reload.
+- **Code splitting:** public pages (landing, auth, join, 404) are in the entry
+  bundle; every signed-in page is a lazy chunk declared in `App.jsx` via
+  `lib/lazyRoute.js`, which reloads the page **once** (sessionStorage-guarded) if a
+  chunk 404s after a deploy. `AppShell` suspends inside the shell so the nav stays
+  visible. Third-party code is split into `vendor-react` / `vendor-data` chunks
+  (`vite.config.js`) so it stays cached across deploys.
+- **Navigation breakpoint:** below `lg` (1024 px — phones and tablets) primary
+  navigation is `BottomNav`; from `lg` up it is `TopNav`'s link row. Both list the
+  same destinations.
+- **Touch sizing:** on `pointer: coarse` devices, form controls are 16 px / 44 px
+  tall (`index.css`) and `Button size="sm"` grows to 44 px; desktop density is
+  unchanged.
+- **Card-width layouts:** `FixtureCard` picks stacked vs side-by-side layout with a
+  container query on the card (`.fixture-card` in `index.css`), because its width
+  depends on the parent grid, not the viewport.
+- **QA:** `frontend/scripts/qa/` holds the Playwright viewport/overlay/auth/throttle
+  scripts used to verify all of the above (see finalisation-status.md § 3).
+
 ### Two competing data-fetching patterns
 
 Most pages (`Dashboard`, `PicksPage`, `GameweekPage`, `AdminDashboard`) go through the

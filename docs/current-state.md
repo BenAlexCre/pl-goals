@@ -1,6 +1,10 @@
 # Current State
 
-Last reviewed: 2026-08-18 (Phase 9 — Demo Gameweek / Match Centre UX Enhancement).
+Last reviewed: 2026-11-02 (finalisation audit — mobile responsiveness overhaul,
+ISSUE-42/44 revalidated and closed, ISSUE-77–82 opened; release-readiness summary in
+[finalisation-status.md](./finalisation-status.md)). Note: the uncommitted
+`pot-admin-a11y-remediation` worktree uses ISSUE-73–76 in its own copy of this file;
+those ids are reserved for it and were deliberately skipped here.
 
 This file is the **canonical, frequently-updated record of what's true about the
 running system right now** — open bugs, unverified assumptions, half-built features,
@@ -49,7 +53,7 @@ belongs in decisions.md.
   [architecture.md](./architecture.md).
 - **Product:** a private Premier League "goals pot" prediction game — full detail:
   [architecture.md § What this system is](./architecture.md#what-this-system-is).
-- **Tests:** none exist (ISSUE-16 below).
+- **Tests:** a small Vitest suite in `frontend/` (5 files, 17 tests as of 2026-11-02 — `npm test`) plus the Game Engine Deno suite; most frontend and Edge Function code is still untested (ISSUE-16 below). Browser QA scripts: `frontend/scripts/qa/`.
 - **CI/CD:** none found in the repo (no `.github/workflows/`, no other CI config).
 - **Version control:** the repository has one clean commit, pushed to
   `origin/main` (`github.com/BenAlexCre/pl-goals`). The root `.gitignore` has been
@@ -431,7 +435,27 @@ Standings section). Not moved to Resolved issues, since the legacy code itself
 hasn't been removed — only superseded.
 Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
-#### ISSUE-42 — `player_team_history` has players active on two clubs at once, corrupting the pick picker
+#### ISSUE-77 — Migration version `043` collision between `main` and an uncommitted worktree
+**Discovered 2026-11-02** (finalisation audit) while checking why migration 043's
+view hardening wasn't in effect locally. `supabase_migrations.schema_migrations`
+on the local DB records version `043` as **`prevent_pot_admin_orphaning`** — an
+untracked file that exists only in the uncommitted worktree
+`.claude/worktrees/pot-admin-a11y-remediation` — while `main` committed a
+*different* `043_views_security_invoker.sql` (89735dc, 2026-11-01). Consequences:
+(1) the local DB has never run main's 043 (its four views still have no
+`security_invoker`; `anon` can still read `player_fixture_goals` locally);
+(2) if the worktree's file is merged as-is, the CLI will treat `043` as already
+applied in production and **silently never run** the orphaned-admin trigger there.
+Production itself is fine for main's 043 — verified read-only with the public anon
+key: every view returns 0 rows to `anon` and the matview returns 401. **Fix
+(owner):** renumber the worktree migration to the next free version (now `045`,
+since `044` was added this session) before merging, then re-sync the local DB
+(`supabase db reset`, or apply main's 043 manually). Not done autonomously — the
+worktree is in-progress, uncommitted work. **Status: confirmed, open.**
+
+#### ISSUE-42 — `player_team_history` has players active on two clubs at once — **RESOLVED, see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-42 (original entry, kept for history) — `player_team_history` has players active on two clubs at once, corrupting the pick picker
 **Discovered 2026-08-10**, Launch Readiness Sprint 2 (End-to-End Workflow
 Audit), via a real, reproducible React duplicate-key warning in `PotDetail.
 jsx`'s Pick 5 player picker for a real gameweek. Root-caused, not guessed:
@@ -459,7 +483,9 @@ underlying data is still wrong and will still mis-attribute which club's
 fixture a duplicated player's pick is actually scored against until
 corrected. **Status: confirmed, data issue open, UI symptom mitigated.**
 
-#### ISSUE-44 — No player-facing payment status is shown anywhere in the frontend
+#### ISSUE-44 — No player-facing payment status is shown anywhere in the frontend — **RESOLVED 2026-11-02, see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-44 (original entry, kept for history) — No player-facing payment status is shown anywhere in the frontend
 **Discovered 2026-08-10**, Launch Readiness Sprint 2, while auditing the
 player journey's own explicit "payment visibility" checklist item. Checked,
 not assumed: grepped `PotDetail.jsx`, `LmsPotDetail.jsx`,
@@ -542,6 +568,35 @@ broken today. Full reasoning, alternatives considered, and consequences:
 deliberate design choice, not an open question.
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
+
+#### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path`
+**Discovered 2026-11-02** via `pg_proc`: `is_pot_member`, `is_pot_admin`,
+`create_entry_payment`, `handle_new_user` run with owner privileges but resolved
+names through the caller's `search_path` (Supabase advisor
+`function_search_path_mutable`). Low exploitability here (bodies are fully
+schema-qualified), but it is the textbook escalation shape. **Fixed in repo** by
+`044_pin_security_definer_search_path.sql` (`set search_path = ''`), verified in a
+rolled-back local transaction (identical `is_pot_member`/`is_pot_admin` results and
+RLS-visible row counts under a real user's JWT). **Status: fixed in repo, not yet
+applied to production** — move to Resolved once applied. The worktree's
+`enforce_pot_has_admin()` (ISSUE-77) has the same gap and should get the same clause.
+
+#### ISSUE-79 — ESLint has never actually run
+**Discovered 2026-11-02.** `npm run lint` failed immediately (`--ext` is invalid
+with a flat config — fixed this session), but the real problem is underneath:
+`frontend/eslint.config.js` is an ESLint 9 template (imports `eslint/config`,
+`@eslint/js`, `globals`, `eslint-plugin-react-refresh`, uses
+`reactHooks.configs.flat`) while `package.json` installs ESLint 8.57 and none of
+those packages. Fix: upgrade to ESLint 9 with the matching plugin set and triage the
+findings (likely a backlog). Deferred — a tooling upgrade, not part of a mobile fix.
+**Status: confirmed, open.**
+
+#### ISSUE-80 — Viewing a pot you aren't a member of logs a 406 error to the console
+**Discovered 2026-11-02** in the viewport sweep. `PotDetail.jsx`'s pot query uses
+`.single()`; RLS correctly hides the row, PostgREST answers 406 (PGRST116), and
+the page correctly shows "Pot not found" — but the console logs a failed request.
+Observability noise only; no data exposure. Fix: `.maybeSingle()` with an explicit
+not-found branch. **Status: confirmed, open (P3-level).**
 
 #### ISSUE-65 — `fullSyncPlayers.js` hardcodes a stale `SEASON_ID`
 **Discovered 2026-08-19, Phase 21**, while investigating the fixture-
@@ -766,6 +821,51 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-81 — Mobile: blank screen for 3.5–6 s on load ("the site doesn't load on my phone")
+**Discovered and resolved 2026-11-02** (finalisation audit). Root-caused with
+evidence, not assumed: the production site loads on iOS (WebKit) and Android
+(Chromium) emulation with zero JS errors and no failed requests, and the bundle
+contains no syntax older Safari can't parse — but on throttled mobile networks
+nothing painted for 3.5 s (4G) / ~5.7 s (3G): one 809 KB (215 KB gz) script, a
+render-blocking font stylesheet, and an empty `#root`. **Fixed:** inline boot screen
+in `index.html` (plus a reload hint after 12 s, which also covers a bundle that
+fails to execute), non-blocking font CSS with preconnect, route-level code splitting
+(`lib/lazyRoute.js`, with a loop-guarded one-time reload for stale-deploy chunk
+404s), vendor chunking. Measured: 4G first paint 3.5 s → 0.56 s, app content
+3.6 s → 1.5 s. **Pending production deploy.**
+
+#### ISSUE-82 — Mobile/tablet navigation and layout defects
+**Discovered and resolved 2026-11-02**, via a scripted sweep of every route at
+8 widths (Chromium) plus WebKit at 320/390 — `frontend/scripts/qa/`. Found and
+fixed: no "Pots" tab in the phone bottom bar (pot list/create/join unreachable from
+navigation); broken header at 768–1023 px (the bottom bar now shows below 1024 px);
+horizontal overflow at 320 px (FixtureCard as a grid item, MemberList); team names
+breaking mid-word in narrow fixture cards (now a stacked layout chosen by card width
+via a container query); `Modal` not height-capped (content and action buttons
+unreachable on short screens); iOS auto-zoom on 14 px inputs; floating pick bars
+overlapping the bottom bar on iPhones with a home indicator; many sub-44 px touch
+targets. Regression test: `BottomNav.test.jsx`. **Pending production deploy.**
+
+#### ISSUE-44 — No player-facing payment status (resolved 2026-11-02)
+The remaining gap described in the original entry (LMS and Score Predictor pot pages
+showed nothing; Dashboard and Pick 5 already did) is closed: `SeasonPaymentStatus`
+(`components/pot/`) reads the player's own `scope = 'season'` `entry_payments` row
+via `useMySeasonPayment()` (`hooks/usePots.js`) and shows "Entry paid" or "Payment
+not verified yet — ask the organiser to record it" once the player has an entry.
+Read-only, per business-rules.md § Payment Verification; RLS
+`entry_payments_select_member` already permitted the read. Verified in the browser
+(Score Predictor, 320–1440 px).
+
+#### ISSUE-42 — Duplicate active club history (resolved; revalidated 2026-11-02)
+Resolved by the F5 red-team remediation (5e8292b): the 16 remaining corrupt rows were
+corrected against football-data.org, `fullSyncPlayers.js`'s
+`deactivateOtherActiveTeams` fixed the root cause, and migration 042 added the
+partial unique index `player_team_history_one_active_per_season`. Revalidated on the
+local DB: 0 players with more than one active row per season; index present.
+Production application of 042 was not directly verified this session (needs prod DB
+access); 042's index creation would have failed on corrupt data, so a clean
+migration history in production implies clean data.
 
 #### ISSUE-2 — `fixture_player_status` table missing from migrations
 **Discovered 2026-08-03, resolved 2026-08-21, Phase 25 (lineup status).**

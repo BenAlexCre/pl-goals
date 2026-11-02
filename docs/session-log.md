@@ -13,6 +13,45 @@ from here.
 
 ---
 
+## 2026-11-02 (83) — Finalisation audit: mobile load investigation and responsiveness overhaul
+
+**Note on the log:** commits 95a9b08…89735dc (2026-08-22 → 2026-11-01) have no
+session-log entries; this entry does not reconstruct them.
+
+**Investigated "the app doesn't load on my phone".** Production probed read-only
+(signed out) under iPhone 13/WebKit and Pixel 7/Chromium: loads with zero JS errors
+or failed requests; bundle scanned for old-Safari-breaking syntax — none. Throttled
+mobile networks showed the real problem: 3.5 s (4G) / ~5.7 s (3G) blank screen →
+ISSUE-81. Signed-in sweep of every route at 8 widths (local stack, sessions minted
+via the local GoTrue admin API for existing local users — no passwords changed)
+found the navigation/layout defects → ISSUE-82. Auth-on-resume hypothesis tested and
+disproved (supabase-js dedupes refreshes: 1 token call per resume).
+
+**Fixed (frontend, verified locally, not deployed):** boot screen, non-blocking
+font CSS, route-level code splitting with stale-chunk reload, vendor chunks;
+BottomNav "Pots" tab and < 1024 px breakpoint; TopNav touch targets; FixtureCard
+overflow + container-query stacked layout; Modal height cap/scroll; iOS input zoom;
+safe-area offsets for floating bars/toasts; MemberList overflow; tap targets.
+ISSUE-44 closed (LMS/Predictor payment status). `npm run lint` invocation fixed.
+
+**Database:** `044_pin_security_definer_search_path.sql` (ISSUE-78), verified in a
+rolled-back transaction, not applied anywhere. Discovered ISSUE-77 (043 collision
+with the uncommitted worktree) — production confirmed to have main's 043 via
+anon-key row counts. ISSUE-42 revalidated as resolved; ISSUE-40 sound in code (prod
+run history unverifiable without access).
+
+**Tests:** `BottomNav.test.jsx`, `lazyRoute.test.js` added; 17/17 pass; build clean.
+ESLint found to have never run → ISSUE-79. Non-member pot 406 noise → ISSUE-80.
+
+**Docs:** new `finalisation-status.md` (master status/TODO); current-state.md,
+project-board.md, database.md, architecture.md updated. Skipped ISSUE-73–76 (used by
+the worktree's uncommitted docs).
+
+**Next:** owner deploys build + applies 044; resolve ISSUE-77; authenticated
+smoke test on a real phone.
+
+---
+
 ## 2026-08-21 (82) — Vercel Production deployment: env var recreation + fresh deploy trigger
 
 Production was throwing "Missing Supabase env vars" (a real, pre-existing

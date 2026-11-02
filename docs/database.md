@@ -232,6 +232,17 @@ RLS helper functions (all `security definer`, used only inside policy definition
 - `is_app_admin() returns boolean` — `auth.jwt() -> 'app_metadata' ->> 'role' =
   'app_admin'`.
 
+**`search_path` (migration 044, ISSUE-78):** `is_pot_member`, `is_pot_admin`,
+`create_entry_payment` and `handle_new_user` are pinned to `search_path = ''` (their
+bodies are fully schema-qualified). Any new `security definer` function must declare
+`set search_path = ''` at creation. **044 is in the repo but not yet applied to
+production** (as of 2026-11-02).
+
+**Migration numbering (ISSUE-77):** version `043` is `043_views_security_invoker.sql`
+on `main` and in production. A local DB that ran the uncommitted worktree's
+`043_prevent_pot_admin_orphaning.sql` has the wrong `043` recorded and must be
+re-synced; that worktree migration must be renumbered before it is merged.
+
 ## Row Level Security summary
 
 RLS is enabled on every table. Policy shape, table by table:
