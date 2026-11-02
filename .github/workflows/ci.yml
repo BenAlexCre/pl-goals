@@ -1,0 +1,71 @@
+# Quality gates for every pull request and every push to main (ISSUE-79).
+#
+# Runs only checks that need no secrets and no running Supabase stack:
+#   frontend        ESLint (warning ratchet), Vitest, production build
+#   edge-functions  `deno check` on every function, Deno unit tests (no permissions)
+#
+# Not here (yet): the Playwright mobile sweep in frontend/scripts/qa/ — it needs a
+# local Supabase stack with seeded users. See docs/finalisation-status.md.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Non-secret placeholders. lib/supabase.js throws at import time without
+      # these (one unit test imports it), and the build inlines them. Nothing in
+      # CI talks to Supabase. Never put real keys here.
+      VITE_SUPABASE_URL: http://127.0.0.1:54321
+      VITE_SUPABASE_ANON_KEY: ci-placeholder-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  edge-functions:
+    name: Edge Functions (type check, unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: supabase/functions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Type check every function
+        run: |
+          status=0
+          for dir in */; do
+            name="${dir%/}"
+            [ "$name" = "_shared" ] && continue
+            echo "::group::deno check $name"
+            deno check "$name/index.ts" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+      - name: Unit tests
+        run: deno test --no-prompt
