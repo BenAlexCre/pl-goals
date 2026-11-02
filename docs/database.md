@@ -238,10 +238,15 @@ bodies are fully schema-qualified). Any new `security definer` function must dec
 `set search_path = ''` at creation. **044 is in the repo but not yet applied to
 production** (as of 2026-11-02).
 
-**Migration numbering (ISSUE-77):** version `043` is `043_views_security_invoker.sql`
-on `main` and in production. A local DB that ran the uncommitted worktree's
-`043_prevent_pot_admin_orphaning.sql` has the wrong `043` recorded and must be
-re-synced; that worktree migration must be renumbered before it is merged.
+**Migration numbering (ISSUE-77, resolved 2026-11-02):** `043` is
+`043_views_security_invoker.sql` (repo and production), `044` is
+`044_pin_security_definer_search_path.sql`, and the pot-admin-orphaning migration is
+**`045_prevent_pot_admin_orphaning.sql`** — renumbered from 043, currently only in the
+uncommitted `pot-admin-a11y-remediation` worktree, not in production. It adds
+`enforce_pot_has_admin()` (`security definer`, `search_path = ''`) with BEFORE
+DELETE / BEFORE UPDATE OF role triggers on `pot_members`, blocking any change that
+would leave an active pot without an admin. Document it in the tables above when it
+merges.
 
 ## Row Level Security summary
 

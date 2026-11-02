@@ -1,6 +1,8 @@
 # Current State
 
-Last reviewed: 2026-11-02 (finalisation audit — mobile responsiveness overhaul,
+Last reviewed: 2026-11-02, release preparation (ISSUE-77/79/38 resolved; release
+candidate and runbook in [finalisation-status.md](./finalisation-status.md)). Earlier the
+same day: finalisation audit — mobile responsiveness overhaul,
 ISSUE-42/44 revalidated and closed, ISSUE-77–82 opened; release-readiness summary in
 [finalisation-status.md](./finalisation-status.md)). Note: the uncommitted
 `pot-admin-a11y-remediation` worktree uses ISSUE-73–76 in its own copy of this file;
@@ -435,7 +437,9 @@ Standings section). Not moved to Resolved issues, since the legacy code itself
 hasn't been removed — only superseded.
 Plan: [roadmap.md § P1](./roadmap.md#p1--close-the-loop-on-features-that-are-half-built).
 
-#### ISSUE-77 — Migration version `043` collision between `main` and an uncommitted worktree
+#### ISSUE-77 — Migration version `043` collision — **RESOLVED 2026-11-02, see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-77 (original entry, kept for history) — Migration version `043` collision between `main` and an uncommitted worktree
 **Discovered 2026-11-02** (finalisation audit) while checking why migration 043's
 view hardening wasn't in effect locally. `supabase_migrations.schema_migrations`
 on the local DB records version `043` as **`prevent_pot_admin_orphaning`** — an
@@ -581,7 +585,9 @@ RLS-visible row counts under a real user's JWT). **Status: fixed in repo, not ye
 applied to production** — move to Resolved once applied. The worktree's
 `enforce_pot_has_admin()` (ISSUE-77) has the same gap and should get the same clause.
 
-#### ISSUE-79 — ESLint has never actually run
+#### ISSUE-79 — ESLint has never actually run — **RESOLVED 2026-11-02, see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-79 (original entry, kept for history) — ESLint has never actually run
 **Discovered 2026-11-02.** `npm run lint` failed immediately (`--ext` is invalid
 with a flat config — fixed this session), but the real problem is underneath:
 `frontend/eslint.config.js` is an ESLint 9 template (imports `eslint/config`,
@@ -760,7 +766,9 @@ for the reasoning. Related to, but distinct from, the more urgent security quest
 in ISSUE-5 (the root copy isn't gitignored). **Status: confirmed.** Plan:
 [roadmap.md § P2](./roadmap.md#p2--cleanup--consolidation).
 
-#### ISSUE-38 — `sync-fixtures/index.ts` fails `deno check` with 31 pre-existing type errors
+#### ISSUE-38 — `sync-fixtures/index.ts` fails `deno check` — **RESOLVED (closed 2026-11-02), see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-38 (original entry, kept for history) — `sync-fixtures/index.ts` fails `deno check` with 31 pre-existing type errors
 **Discovered 2026-08-09**, during Phase 7 Stage 1's baseline verification pass
 (run before any frontend work, to confirm the starting point was clean — not
 part of the frontend audit itself). Ran `deno check` against every Edge
@@ -821,6 +829,33 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-77 — Migration `043` collision (resolved 2026-11-02, release preparation)
+The worktree migration was renumbered to `045_prevent_pot_admin_orphaning.sql`
+(3 references updated; `set search_path = ''` added per ISSUE-78), left uncommitted
+in the `pot-admin-a11y-remediation` worktree because that work is unfinished.
+Verified: no `045` existed; nothing depends on it; production never ran it
+(read-only schema dump has no `enforce_pot_has_admin`); production's 043 is the
+views migration (dump shows `security_invoker` on all four views); migrations
+001→045 replay cleanly on a fresh shadow database. The local DB's history was
+repaired (backup taken; main's 043 + 044 applied; rows now 043 = views,
+044 = search_path, 045 = orphaning). **Remaining owner action:** when the worktree
+is finished, commit it, rebase onto `main`, and ship 045 with its `admin-actions`
+change. Detail: [finalisation-status.md § 3](./finalisation-status.md#3-migration-status).
+
+#### ISSUE-79 — ESLint never ran (resolved 2026-11-02)
+ESLint 9 + `@eslint/js` 9, `globals`, `eslint-plugin-react-refresh`,
+`eslint-plugin-react-hooks` 6 (classic rules — v7's preset adds React Compiler rules
+this app doesn't use) and `eslint-plugin-react` for `jsx-uses-vars` only. 593 initial
+findings → 0 errors after configuration fixes plus 8 small source fixes; no rule
+disabled. 7 `exhaustive-deps` warnings remain (ISSUE-10/27 territory) under a
+`--max-warnings 7` ratchet. CI added (`.github/workflows/ci.yml`).
+
+#### ISSUE-38 — `sync-fixtures` type errors (closed 2026-11-02)
+Found already fixed: `deno check sync-fixtures/index.ts` passes cleanly (the
+`a11a32c` football-data.org rewrite removed the failing code), confirmed against a
+negative control that proves the checker reports errors. All 16 Edge Functions pass
+and are now checked in CI.
 
 #### ISSUE-81 — Mobile: blank screen for 3.5–6 s on load ("the site doesn't load on my phone")
 **Discovered and resolved 2026-11-02** (finalisation audit). Root-caused with

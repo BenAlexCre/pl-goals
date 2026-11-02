@@ -7244,3 +7244,34 @@ above. No backfill of `started`/appearances-derived minutes data beyond
 what this phase's own ingestion produces going forward — historical
 fixtures that were never scraped stay exactly as empty as they already
 were.
+
+
+### Lint toolchain and CI — decision (2026-11-02, ISSUE-79)
+
+**Decision:** ESLint 9 with `@eslint/js` 9, `globals`, `eslint-plugin-react-refresh`,
+`eslint-plugin-react-hooks` **6** (classic `flat/recommended`: rules-of-hooks +
+exhaustive-deps) and `eslint-plugin-react` used only for `react/jsx-uses-vars`. A
+`--max-warnings` ratchet in `npm run lint`. GitHub Actions CI on pull requests and
+pushes to `main`: frontend lint/test/build and Edge Function `deno check`/`deno test`.
+
+**Context:** `eslint.config.js` was an ESLint 9 template while ESLint 8 and none of
+its imports were installed, so lint had never run; there was no CI.
+
+**Reason:** ESLint 9 is what the existing config was written for (`eslint/config`).
+react-hooks 7's `flat.recommended` adds ~14 React Compiler readiness rules; this app
+doesn't use the React Compiler, so they would flag working code and push large
+refactors unrelated to correctness. `jsx-uses-vars` is the precise fix for ESLint 9
+core not seeing JSX usage (211 false positives), unlike the Vite template's
+`varsIgnorePattern: '^[A-Z_]'`, which would also hide genuinely unused components.
+
+**Alternatives considered:** ESLint 10 (newer than the config; plugin peer support
+less certain); react-hooks 7 with compiler rules (large, behaviour-adjacent
+refactors); keeping ESLint 8 and rewriting the config by hand (8 is end-of-life);
+`varsIgnorePattern` (hides real issues).
+
+**Consequences:** lint and CI now guard every PR. The 7 remaining exhaustive-deps
+warnings are known stale-closure risks in `PotDetail.jsx`/`PotManager.jsx`, to be
+removed by ISSUE-10/27; the ratchet must be lowered as they are fixed. Revisit
+react-hooks 7 if the React Compiler is ever adopted. CI uses non-secret placeholder
+`VITE_SUPABASE_*` values and never talks to Supabase; the Playwright mobile sweep is
+not yet in CI.

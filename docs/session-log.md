@@ -13,6 +13,45 @@ from here.
 
 ---
 
+## 2026-11-02 (84) — Release preparation: ISSUE-77 resolved, 044 reviewed, ESLint + CI, runbook
+
+**Inventory:** RC `fix/mobile-finalisation-audit` is a fast-forward of `main`
+(89735dc = origin/main). Worktree `pot-admin-a11y-remediation` is 1 commit behind
+`main` with only uncommitted changes. Production (read-only): `migration list`
+shows 001–043 applied; schema-only dump proves its 043 is the views migration, no
+orphaning trigger, and exactly the four 044 targets lack a pinned search_path;
+dump diff shows no material drift (local DB is the drifted one). `db push
+--dry-run` would apply only 044.
+
+**ISSUE-77:** worktree migration renumbered to 045 (+ `search_path = ''`), refs
+updated, left uncommitted. Trigger behaviour tested in rolled-back txns. 001→044 and
+001→045 replayed on a fresh shadow DB. Local migration history repaired (backup of
+`schema_migrations` taken first).
+
+**044 review:** grants/owner identical to prod, bodies qualified, RLS helper results
+unchanged under a user JWT, both trigger functions fired successfully, rollback SQL
+tested — all in rolled-back transactions.
+
+**ISSUE-79:** ESLint 9 toolchain (ADR in decisions.md); 593 → 0 errors, 7 ratcheted
+warnings. **ISSUE-38** found already fixed and closed (16/16 `deno check`, negative
+control). Deno suite 347/347. CI workflow added and validated locally (clean-env
+simulation caught that tests need placeholder Supabase env). Mobile sweep re-run on
+the RC: 222 runs clean.
+
+**Correction:** session 83's report listed ISSUE-39 as an open product decision; it
+was decided in Phase 21 (2026-08-19).
+
+**Housekeeping:** session 83's background servers had survived their stop commands
+(Windows kills only the wrapper); a stale preview answered the sweep port — its
+bundle hash was verified identical to the fresh build — then all orphans were
+terminated and the edge-runtime container returned to stopped.
+
+**Not done (by instruction):** no push, merge, deploy, production migration or
+production data/config change. **Next:** owner approval checklist in
+finalisation-status.md § 11.
+
+---
+
 ## 2026-11-02 (83) — Finalisation audit: mobile load investigation and responsiveness overhaul
 
 **Note on the log:** commits 95a9b08…89735dc (2026-08-22 → 2026-11-01) have no
