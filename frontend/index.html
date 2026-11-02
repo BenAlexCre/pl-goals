@@ -7,10 +7,53 @@
     <meta name="description" content="Run private Premier League prediction competitions with friends, family or colleagues — Pick 5, Last Man Standing, and Score Predictor, with live scoring and automatic standings." />
     <meta name="theme-color" content="#060a07" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" />
+    <!-- Mobile audit (2026-11-02): the font stylesheet was render-blocking
+         (220-530ms on throttled mobile before anything could paint). It now
+         loads without blocking; font-display=swap already handled the text
+         fallback, and the boot screen below doesn't depend on it. -->
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin />
+    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+    <noscript><link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" /></noscript>
+    <style>
+      /* Boot screen — painted from the HTML alone, before the JS bundle has
+         downloaded (3-6s on a throttled phone, previously a blank black
+         screen that read as "the site doesn't load"). React's first render
+         replaces everything inside #root, so this needs no teardown. */
+      html, body { margin: 0; background: #060a07; }
+      #boot { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #e8ebe9; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 0 16px; }
+      #boot .ring { width: 40px; height: 40px; border-radius: 50%; border: 4px solid rgba(0,230,118,0.2); border-top-color: #00e676; animation: boot-spin 0.9s linear infinite; }
+      #boot .name { font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+      #boot .slow { display: none; max-width: 300px; font-size: 14px; line-height: 1.5; color: rgba(232,235,233,0.6); }
+      #boot .slow button { margin-top: 12px; min-height: 44px; padding: 0 20px; border: 0; border-radius: 12px; background: #00e676; color: #060a07; font: inherit; font-weight: 600; }
+      #boot.is-slow .slow { display: block; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { #boot .ring { animation-duration: 3s; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot" role="status" aria-live="polite">
+        <div class="ring" aria-hidden="true"></div>
+        <div class="name">PL Predictor</div>
+        <div class="slow">
+          This is taking longer than usual — your connection may be slow.
+          <br /><button type="button" onclick="location.reload()">Try again</button>
+        </div>
+      </div>
+    </div>
+    <noscript>
+      <p style="color:#e8ebe9;text-align:center;font-family:sans-serif;padding:16px">PL Predictor needs JavaScript enabled to run.</p>
+    </noscript>
+    <script>
+      // If the app still hasn't replaced the boot screen after 12s (very slow
+      // network, or the bundle failed to load/execute), offer a reload rather
+      // than spinning forever.
+      setTimeout(function () {
+        var el = document.getElementById('boot');
+        if (el) el.className = 'is-slow';
+      }, 12000);
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

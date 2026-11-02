@@ -1,4 +1,6 @@
+import { Suspense } from 'react'
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
+import { lazyRoute } from './lib/lazyRoute'
 import { useAuth } from './hooks/useAuth'
 import { useIsAdmin, useIsSuperAdmin } from './hooks/useAdmin'
 import AppShell from './components/layout/AppShell'
@@ -8,41 +10,50 @@ import SignUp from './pages/auth/SignUp'
 import ForgotPassword from './pages/auth/ForgotPassword'
 import ResetPassword from './pages/auth/ResetPassword'
 import VerifyEmail from './pages/auth/VerifyEmail'
-import Dashboard from './pages/Dashboard'
-import PotDetail from './pages/PotDetail'
-import GameweekPage from './pages/GameweekPage'
-import PicksPage from './pages/PicksPage'
-import AdminDashboard from './pages/AdminDashboard'
-import AdminPayments from './pages/AdminPayments'
-import AdminRollovers from './pages/AdminRollovers'
-import DemoCentre from './pages/admin/DemoCentre'
-import DemoGameweek from './pages/admin/DemoGameweek'
-import SuperAdminLayout from './pages/super-admin/SuperAdminLayout'
-import SuperAdminOverview from './pages/super-admin/Overview'
-import SuperAdminUsers from './pages/super-admin/Users'
-import SuperAdminUserDetail from './pages/super-admin/UserDetail'
-import SuperAdminRoles from './pages/super-admin/Roles'
-import SuperAdminAuditLog from './pages/super-admin/AuditLog'
-import Standings from './pages/Standings'
-import Profile from './pages/Profile'
 import NotFound from './pages/NotFound'
 import NotAuthorized from './pages/NotAuthorized'
 import ToastContainer from './components/ui/ToastContainer'
 import Spinner from './components/ui/Spinner'
-import PotManager from './components/pot/PotManager'
-import PotDetailPage from './pages/PotDetail'
-import PotManage from './pages/pot/PotManage'
 import JoinPot from './pages/JoinPot'
+
+// Route-level code splitting (mobile performance audit, 2026-11-02): the
+// public landing/auth/join pages stay in the entry bundle (they are the first
+// paint for most visitors); every signed-in page is its own chunk, so a phone
+// opening the landing page no longer downloads admin, super-admin and
+// match-centre code. See lib/lazyRoute.js for stale-deploy chunk handling.
+const Dashboard = lazyRoute(() => import('./pages/Dashboard'))
+const PotDetail = lazyRoute(() => import('./pages/PotDetail'))
+const GameweekPage = lazyRoute(() => import('./pages/GameweekPage'))
+const PicksPage = lazyRoute(() => import('./pages/PicksPage'))
+const AdminDashboard = lazyRoute(() => import('./pages/AdminDashboard'))
+const AdminPayments = lazyRoute(() => import('./pages/AdminPayments'))
+const AdminRollovers = lazyRoute(() => import('./pages/AdminRollovers'))
+const DemoCentre = lazyRoute(() => import('./pages/admin/DemoCentre'))
+const DemoGameweek = lazyRoute(() => import('./pages/admin/DemoGameweek'))
+const SuperAdminLayout = lazyRoute(() => import('./pages/super-admin/SuperAdminLayout'))
+const SuperAdminOverview = lazyRoute(() => import('./pages/super-admin/Overview'))
+const SuperAdminUsers = lazyRoute(() => import('./pages/super-admin/Users'))
+const SuperAdminUserDetail = lazyRoute(() => import('./pages/super-admin/UserDetail'))
+const SuperAdminRoles = lazyRoute(() => import('./pages/super-admin/Roles'))
+const SuperAdminAuditLog = lazyRoute(() => import('./pages/super-admin/AuditLog'))
+const Standings = lazyRoute(() => import('./pages/Standings'))
+const Profile = lazyRoute(() => import('./pages/Profile'))
+const PotManager = lazyRoute(() => import('./components/pot/PotManager'))
+const PotManage = lazyRoute(() => import('./pages/pot/PotManage'))
+
+function FullScreenSpinner() {
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-pitch-950">
+      <Spinner size="lg" />
+    </div>
+  )
+}
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-pitch-950">
-        <Spinner size="lg" />
-      </div>
-    )
+    return <FullScreenSpinner />
   }
 
   if (!user) return <Navigate to="/sign-in" replace />
@@ -66,11 +77,7 @@ function AdminRoute() {
   const { isAdmin, isLoading: adminLoading } = useIsAdmin()
 
   if (authLoading || (!!user && adminLoading)) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-pitch-950">
-        <Spinner size="lg" />
-      </div>
-    )
+    return <FullScreenSpinner />
   }
 
   if (!user) return <Navigate to="/sign-in" replace />
@@ -90,11 +97,7 @@ function SuperAdminRoute() {
   const isSuperAdmin = useIsSuperAdmin()
 
   if (authLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-pitch-950">
-        <Spinner size="lg" />
-      </div>
-    )
+    return <FullScreenSpinner />
   }
 
   if (!user) return <Navigate to="/sign-in" replace />
@@ -106,7 +109,8 @@ function SuperAdminRoute() {
 export default function App() {
   return (
     <>
-      <Routes>
+      <Suspense fallback={<FullScreenSpinner />}>
+        <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/sign-in" element={<SignIn />} />
         <Route path="/sign-up" element={<SignUp />} />
@@ -161,7 +165,8 @@ export default function App() {
         </Route>
 
         <Route path="*" element={<NotFound />} />
-      </Routes>
+        </Routes>
+      </Suspense>
       <ToastContainer />
     </>
   )
