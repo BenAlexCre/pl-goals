@@ -354,6 +354,11 @@ interface FakeScoreState {
   picks: FakeScorePick[]
   goalsByPlayer: Record<number, number>
   entryPick5Rows: FakeScoreEntryPick5[]
+  // ISSUE-85: player -> team, and the gameweek's fixtures. Defaults keep the
+  // older tests' meaning: each player on their own team, whose single fixture
+  // is 'live' if liveFixtureExists, otherwise 'finished'.
+  teamByPlayer?: Record<number, number>
+  fixtures?: { home_team_id: number; away_team_id: number; status: string }[]
 }
 
 function fakeCalculateScoreContext(state: FakeScoreState): GameEngineContext {
@@ -362,12 +367,25 @@ function fakeCalculateScoreContext(state: FakeScoreState): GameEngineContext {
       if (table === 'pots') {
         return { select: () => ({ eq: () => Promise.resolve({ data: state.pick5PotIds.map((id) => ({ id })), error: null }) }) }
       }
+      const teamByPlayer = state.teamByPlayer ?? Object.fromEntries(state.picks.map((p) => [p.player_id, p.player_id]))
       if (table === 'fixtures') {
+        const fixtures = state.fixtures ?? [...new Set(Object.values(teamByPlayer))].map((team) => ({
+          home_team_id: team, away_team_id: 9000 + team, status: state.liveFixtureExists ? 'live' : 'finished',
+        }))
+        return { select: () => ({ eq: () => Promise.resolve({ data: fixtures, error: null }) }) }
+      }
+      if (table === 'gameweeks') {
+        return { select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { season_id: 1 }, error: null }) }) }) }
+      }
+      if (table === 'player_team_history') {
         return {
           select: () => ({
             eq: () => ({
               eq: () => ({
-                limit: () => Promise.resolve({ data: state.liveFixtureExists ? [{ id: 1 }] : [], error: null }),
+                in: (_col: string, ids: number[]) => Promise.resolve({
+                  data: ids.filter((id) => id in teamByPlayer).map((id) => ({ player_id: id, team_id: teamByPlayer[id] })),
+                  error: null,
+                }),
               }),
             }),
           }),
@@ -2292,4 +2310,68 @@ Deno.test('ISSUE-86: an entry that is already void in a free pot stays void (no 
 
   assertEquals(db.gameEntries[0].status, 'void')
   assertEquals(db.pick5Picks[0].result, 'void')
+})
+
+// --- ISSUE-85: per-player fixture status -------------------------------------
+
+function issue85State(fixtures: { home_team_id: number; away_team_id: number; status: string }[], teamByPlayer: Record<number, number>, goalsByPlayer: Record<number, number>, playerIds: number[]): FakeScoreState {
+  return {
+    pick5PotIds: ['pot-1'],
+    liveFixtureExists: false,
+    lockedEntryIds: ['entry-1'],
+    picks: playerIds.map((player_id, i) => ({ id: i + 1, game_entry_id: 'entry-1', player_id, pick_position: i + 1, goal_threshold: 1, goals_scored: 0, result: 'pending' })),
+    goalsByPlayer,
+    entryPick5Rows: [{ game_entry_id: 'entry-1', picks_won: 0 }],
+    teamByPlayer,
+    fixtures,
+  }
+}
+
+Deno.test('ISSUE-85: Saturday evening — finished matches resolve, a Sunday player stays pending (was "lost")', async () => {
+  const state = issue85State(
+    [
+      { home_team_id: 1, away_team_id: 2, status: 'finished' }, // Saturday
+      { home_team_id: 3, away_team_id: 4, status: 'scheduled' }, // Sunday
+    ],
+    { 100: 1, 200: 2, 300: 3 },
+    { 100: 1 },
+    [100, 200, 300],
+  )
+  await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
+  assertEquals(state.picks.map((p) => p.result), ['won', 'lost', 'pending'])
+  assertEquals(state.entryPick5Rows[0].picks_won, 1, 'picks_won (what decides winners) is unchanged')
+})
+
+Deno.test('ISSUE-85: between the deadline and the first kickoff every pick is pending', async () => {
+  const state = issue85State([{ home_team_id: 1, away_team_id: 2, status: 'scheduled' }], { 100: 1, 200: 2 }, {}, [100, 200])
+  await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
+  assertEquals(state.picks.map((p) => p.result), ['pending', 'pending'])
+  assertEquals(state.entryPick5Rows[0].picks_won, 0)
+})
+
+Deno.test('ISSUE-85: one live match does not make an unplayed player "losing"', async () => {
+  const state = issue85State(
+    [
+      { home_team_id: 1, away_team_id: 2, status: 'live' },
+      { home_team_id: 3, away_team_id: 4, status: 'scheduled' },
+    ],
+    { 100: 1, 300: 3 },
+    {},
+    [100, 300],
+  )
+  await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
+  assertEquals(state.picks.map((p) => p.result), ['losing', 'pending'])
+})
+
+Deno.test('ISSUE-85: a postponed match leaves the pick pending; picks_won unaffected', async () => {
+  const state = issue85State([{ home_team_id: 1, away_team_id: 2, status: 'postponed' }], { 100: 1 }, {}, [100])
+  await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
+  assertEquals(state.picks[0].result, 'pending')
+  assertEquals(state.entryPick5Rows[0].picks_won, 0)
+})
+
+Deno.test('ISSUE-85: a player with no team/fixture data is pending, not lost', async () => {
+  const state = issue85State([{ home_team_id: 1, away_team_id: 2, status: 'finished' }], {}, {}, [100])
+  await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
+  assertEquals(state.picks[0].result, 'pending')
 })

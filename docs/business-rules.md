@@ -92,9 +92,20 @@ prolific scorer 5 times is a legitimate (if concentrated) strategy, not a way to
 independent easy wins.
 
 An entry's overall score for the gameweek is `picks_won` — the count of its 5 picks
-that individually met their threshold. While the gameweek has a live fixture in
-progress, picks display as `winning`/`losing` rather than the final `won`/`lost`, but
-the underlying win/loss logic is identical either way.
+that individually met their threshold.
+
+**Displayed pick status follows the picked player's own match (ISSUE-85, owner-requested
+2026-11-02; ships with Release 2).** `pending` until that player's match kicks off;
+`winning`/`losing` while it is live (or, in a double gameweek, while one of the team's
+matches is still to come); `won`/`lost` once every one of the team's non-postponed,
+non-cancelled matches in the gameweek has finished. Status comes from the fixture's
+reported state, not the clock, so a delayed kickoff stays `pending`. A player whose
+match is postponed or cancelled, or whose fixture data is missing, shows `pending`
+(or `won` if goals were recorded). This is display only: `picks_won` — and so ranking,
+winners and prizes — is computed exactly as before. *(Previously: the whole gameweek
+was treated as live or not, so a pick could read `lost` before its player had played.)*
+**Open decision:** what a postponed player's pick shows once the gameweek has completed
+(it currently stays `pending`; see finalisation-status.md).
 
 Implementation: the `recompute_goal_thresholds()` trigger derives the threshold
 automatically from how many picks share a `(entry_id, player_id)` pair (see
