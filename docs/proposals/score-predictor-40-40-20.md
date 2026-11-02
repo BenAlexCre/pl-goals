@@ -1,184 +1,217 @@
-# PROPOSAL — Score Predictor two-halves prize structure (40 / 40 / 20)
+# SPECIFICATION (RECOMMENDED) — Score Predictor two-halves prizes (40 / 40 / 20)
 
 **Status: PENDING OWNER APPROVAL. Not a business rule. Not implemented.** Payout logic
-is unchanged until the owner approves the final rules; once approved, the agreed
-rules move into [business-rules.md](../business-rules.md) and this file is marked
-superseded (kept for history).
+is unchanged until the owner approves. On approval, the agreed rules move into
+[business-rules.md](../business-rules.md) and this file is marked superseded (kept for
+history).
 
-Raised: 2026-11-02 · Requested by: owner · Context:
-[finalisation-status.md § 10](../finalisation-status.md#10-product-decisions).
-**Deadline:** an H1 payout on time needs this decided, built and deployed before
-the gameweek 19 deadline; otherwise H1 can be paid retrospectively once built.
+Version 2 — 2026-11-02 (v1 was the initial proposal earlier the same day). Each rule
+is labelled:
 
-Each rule below is marked **[proposed]** (a recommendation the owner can accept as
-written) or **[decide]** (a genuine choice with options, no default assumed).
+- **[RULE]** — follows from the 40 / 40 / 20 structure the owner chose, or from
+  existing platform rules. Recommended as written.
+- **[OWNER DECISION n]** — a genuine choice. A recommendation is given, but **nothing
+  is assumed** until the owner decides.
 
 ---
 
-## 1. Today's behaviour (verified in code, 2026-11-02)
+## 0. Deadline (from production's fixture schedule, read 2026-11-02)
+
+| Milestone | Date (UTC) |
+|---|---|
+| GW17 / GW18 (holiday fixtures) | 26 Dec / 29 Dec 2026 |
+| **GW19 picks deadline** | **Fri 1 Jan 2027, 19:45** |
+| GW19 last kickoff (H1 could finalise ~2 h later) | Sun 3 Jan 2027, 16:30 |
+| GW20 deadline (H2 starts) | Tue 5 Jan 2027, 19:15 |
+
+- **Hard deadline:** the H1 finalisation code must be in production before GW19's last
+  match finishes (3 Jan 2027, ~18:30 UTC) to pay H1 on time.
+- **Recommended deploy-by date: Monday 21 December 2026** — after a full local test
+  cycle and one live gameweek (GW16, 19–21 Dec) for verification, before the holiday
+  fixture congestion, and without deploying during a gameweek.
+- **Decisions needed by: ~30 November 2026** to leave about three weeks to build and
+  test (estimate: 3–5 working days of engineering plus verification).
+- If missed, H1 can be finalised retrospectively once deployed (the rules below don't
+  depend on running exactly at the boundary).
+
+## 1. Today's behaviour (verified in code)
 
 - `predictor_cycle_mode = 'two_halves'` (the default for every new Score Predictor pot)
   and `single_cycle` pay **identically**: one season-end prize.
-- One cumulative standings table across the whole competition.
-- `PredictorEngine.awardPrize()`: gross = `entry_fee` × non-void entries; admin and
-  charity fees (fixed or % of gross) deducted to give net; net ÷ winners, each share
-  floored to the cent (leftover cents are not allocated); one `pot_prizes` row
-  (`scope = 'season'`, `is_settled = true`); idempotent; `predictor.prize_awarded`
-  notification per winner.
-- Ties: points → exact scores → correct goalscorers → equal split.
-- Unpaid entries are voided at settlement; an admin can reinstate (Late Payment Override).
+- One cumulative standings table; ties broken by points → exact scores → correct
+  goalscorers → equal split.
+- `awardPrize()`: gross = `entry_fee` × non-void entries; admin and charity fees (fixed
+  or % of gross) give net; net ÷ winners, each share floored to the cent; leftover cents
+  unallocated; one settled `pot_prizes` row; idempotent; one notification per winner.
+- Unpaid entries in pots with a fee are voided at settlement (free pots: ISSUE-86); an
+  admin can reinstate.
+- **Production today:** no real player has a Score Predictor pot (all three are test
+  pots), so these rules affect future competitions only.
 
-## 2. Proposed structure
+## 2. The three prizes
 
-| Prize | Share of net pool | Won by |
-|---|---|---|
-| **H1** — first half | **40 %** | Most points from H1 gameweeks |
-| **H2** — second half | **40 %** | Most points from H2 gameweeks |
-| **Overall** — season | **20 %** | Most points across the whole competition |
+| Prize | Share | Won by | Scored over |
+|---|---|---|---|
+| **First-half winner (H1)** | 40 % | Highest H1 points | Gameweeks 1–19 |
+| **Second-half winner (H2)** | 40 % | Highest H2 points | Gameweeks 20–38 |
+| **Overall winner** | 20 % | Highest total points | The whole competition |
 
-One player can win more than one prize (e.g. H1 and Overall).
+- **[RULE]** Points per prediction are exactly as today (per-pot configurable
+  exact-score / correct-result / goalscorer points). H1 and H2 points are the same
+  points, counted by the gameweek the fixture belongs to; Overall = H1 + H2.
+- **[RULE]** One player may win any combination (e.g. H1 and Overall).
+- **[RULE]** The overall table shown today becomes the Overall table; two half tables
+  are added. No points are reset or lost — H2 simply starts its own count.
 
 ## 3. Gameweek boundaries
 
-- **[proposed]** H1 = Premier League gameweeks **1–19**; H2 = gameweeks **20–38**,
-  by `gameweeks.number` within the pot's league and season. Overall = every
-  gameweek from the pot's start to its end gameweek.
-- **[proposed]** A fixture counts toward the half of **its own gameweek**, even if it
-  is played (rescheduled) on a date inside the other half.
-- **[decide] Pots starting in H2** (start gameweek ≥ 20): there is no H1 competition.
-  Options: (a) H1's 40 % goes to the H2 winner (0 / 80 / 20); (b) it goes to Overall
-  (0 / 40 / 60); (c) such pots cannot use two-halves mode (force `single_cycle`).
-  Recommendation: **(c)** — simplest to explain; the create-pot form already knows
-  the start gameweek.
-- **[decide] Pots ending before GW38** (`end_gameweek_id` earlier than 38): H2 runs
-  from GW20 to the end gameweek. Confirm, or disallow custom ends for two-halves pots.
+- **[RULE]** H1 = Premier League gameweeks **1–19**, H2 = **20–38**, by
+  `gameweeks.number` in the pot's league and season.
+- **[RULE]** A fixture counts toward the half of **its own gameweek**, even if it is
+  played on a date inside the other half (rescheduling never moves a fixture between
+  halves).
+- **[OWNER DECISION 1] Pots that start in the second half** (start gameweek ≥ 20).
+  (a) H1's 40 % goes to the H2 winner (0 / 80 / 20). (b) It goes to Overall (0 / 40 / 60).
+  (c) Such pots can't be created as two-halves (they become single-cycle).
+  **Recommendation: (c)** — simplest to explain; the create-pot form already knows the
+  start gameweek.
+- **[OWNER DECISION 2] Pots that end before GW38** (custom `end_gameweek_id`).
+  (a) H2 runs from GW20 to the end gameweek. (b) Two-halves pots must end at GW38.
+  **Recommendation: (b)** — a "half" shorter than the other is confusing. (A pot ending
+  before GW20 would have no H2 at all.)
 
-## 4. Eligibility
+## 4. Prize allocation
 
-- **[proposed]** An entry is eligible for a prize if it is **not void** at the moment
-  that prize is finalised. This is exactly today's settlement rule, applied per prize.
-- **[proposed]** Season payment (`entry_payments.scope = 'season'`) covers all three
-  prizes; no separate H2 fee.
-- **[proposed]** An entry voided for non-payment and later reinstated (Late Payment
-  Override) is eligible for any prize **not yet finalised** at reinstatement. Prizes
-  already finalised stand (no retroactive re-award).
-- **[proposed]** Points are counted only from gameweeks the entry was eligible for
-  (existing rule: picks for a void entry are not scored).
+Definitions are unchanged from today: **gross** = entry fee × non-void entries;
+**net** = gross − admin fee − charity fee.
 
-## 5. Tie-breaking
-
-- **[proposed]** Within each prize, use the **existing** hierarchy, computed over that
-  prize's gameweeks only: total points → exact-score count → correct-goalscorer
-  count → equal split between those still tied.
-- **[proposed]** No extra tiebreak (e.g. head-to-head, earliest entry). Equal split is
-  already the platform's final tiebreak in all three modes.
-
-## 6. Prize calculations
-
-Definitions (unchanged formulas from `awardPrize()`): **gross** = entry fee ×
-non-void entries; **net** = gross − admin fee − charity fee.
-
-- **[proposed] H1 prize** = 40 % × net, where net is computed **when H1 is finalised**.
-- **[proposed] Season-end prizes** use the final net, minus what H1 already paid:
+- **[RULE] H1 prize** = 40 % of the net pool **at the moment H1 is finalised**.
+- **[RULE] Season-end prizes** use the final pool minus what H1 already paid:
   `remaining = final net − H1 paid`; **H2 = ⅔ × remaining**, **Overall = ⅓ × remaining**.
-  If the pool never changes, this is exactly 40 / 40 / 20. If late joiners grow the
-  pool after H1, the growth goes to H2 and Overall in the same 2 : 1 ratio, and H1 is
-  never clawed back.
-- **[proposed]** Fees are never taken twice: because the season-end prizes are
-  `final net − H1 paid`, total payouts always equal the final net, i.e. exactly what a
-  single-payout pot pays after its fees.
-- **[decide]** Whether H1's 40 % is calculated **before or after fixed fees**.
-  (a) After: H1 = 40 % × (gross − all fees at H1). Simple, but a fixed fee is borne
-  mostly by H1 early in the season. (b) Before: H1 = 40 % × (gross − percentage fees
-  only); fixed fees come out of the season-end remainder. Recommendation: **(b)** —
-  H1 isn't penalised by a fixed fee meant for the whole season. (The worked example
-  below uses a percentage fee, so both options give the same numbers.)
-- **[proposed]** Rounding as today: each winner's share is floored to the cent;
-  leftover cents stay unallocated (recorded, never silently paid out).
-- **[proposed]** If a prize has no eligible entries (e.g. everyone void), that prize
-  is not paid and its amount carries to the **next** prize to be finalised
-  (H1 → season-end remainder; H2/Overall → recorded as unallocated).
+  With an unchanged pool this is exactly 40 / 40 / 20. If the pool grows after H1 (late
+  joiners), the growth is shared by H2 and Overall in the same 2 : 1 ratio. H1 is never
+  clawed back.
+- **[RULE]** Fees are never taken twice: total payouts always equal the final net — the
+  same total a single-payout pot pays.
+- **[OWNER DECISION 3] Is H1 calculated before or after fixed fees?**
+  (a) After all fees at H1 time — simple, but a fixed fee then comes mostly out of H1.
+  (b) Before fixed fees: H1 = 40 % × (gross − percentage fees only); fixed fees come out
+  of the season-end remainder.
+  **Recommendation: (b)** — a fixed fee meant for the whole season shouldn't fall
+  mostly on H1.
+- **[RULE]** Ties within a prize split that prize equally; each share is floored to the
+  cent; leftover cents stay unallocated and are recorded (as today).
+- **[RULE]** A prize with no eligible winner (e.g. every entry void) isn't paid; its
+  amount carries forward (H1 → season-end remainder; season-end → recorded unallocated).
+- **[RULE]** Free pots (€0): all prizes are €0 and are still recorded, so winners are
+  shown and notified.
 
-**Worked example:** 10 paid entries × €20 = €200 gross; 10 % admin fee = €20; net
-€180. H1 = €72. Two players tie for H2 → €36 each. Overall winner €36.
-(€180 − €72 = €108; H2 = €72 split two ways, Overall = €36.)
+**Worked example.** 10 entries × €20 = €200 gross; 10 % admin fee (a percentage fee, so
+decision 3 doesn't change the numbers) → net €180.
+H1 = 40 % × €180 = **€72**. At season end: remaining = €180 − €72 = €108; H2 = €72
+(two tied winners → **€36 each**); Overall = **€36**. Total paid €180.
 
-## 7. Players joining late
+## 5. Tiebreakers
 
-Depends on the separate **entry-window decision** (finalisation-status.md § 10,
-item 4), which is still open.
+- **[RULE]** Within each prize, the **existing** hierarchy, computed over that prize's
+  gameweeks only: total points → number of exact scores → number of correct
+  goalscorers → equal split between those still tied.
+- **[RULE]** No new tiebreak (no head-to-head, no earliest-entry). Equal split is
+  already the final tiebreak in all three game modes.
 
-- **[proposed] If mid-season joining stays allowed:** a late joiner scores only from
-  gameweeks after joining (no retroactive picks), is eligible for every prize not yet
-  finalised, and pays the **full** season fee (no pro-rata).
-- **[proposed] If an entry window is introduced:** joining closes at the deadline of
-  the pot's start gameweek (matching Last Man Standing), and this section no longer
-  applies.
-- **[decide]** Full fee vs pro-rata for late joiners. Recommendation: full fee, since
-  the app never handles money and pro-rata would be an off-platform arrangement anyway.
+## 6. Eligibility
+
+- **[RULE]** An entry is eligible for a prize if it is **not void when that prize is
+  finalised** — today's settlement rule, applied per prize.
+- **[RULE]** One season entry (and, in pots with a fee, one season payment) covers all
+  three prizes.
+- **[RULE]** An entry reinstated after being voided (Late Payment Override) is eligible
+  for prizes **not yet finalised**; prizes already finalised stand.
+- **[RULE]** Picks of a void entry earn no points (existing rule).
+
+## 7. Late entrants
+
+Tied to the separate, still-open **entry-window** decision
+([finalisation-status.md § 10](../finalisation-status.md#10-product-decisions), item 4).
+
+- **[OWNER DECISION 4] Can players join mid-season?**
+  (a) Yes, as today: a late joiner scores only from gameweeks after joining (no
+  retroactive predictions) and is eligible for every prize not yet finalised.
+  (b) No: joining closes at the deadline of the pot's start gameweek (as in Last Man
+  Standing).
+  **Recommendation: (a) with a cut-off at the GW19 deadline** — joiners after that can't
+  compete for H1 in any meaningful way and would only dilute H1 money they can't win.
+- **[OWNER DECISION 5] Fee for late joiners** (pots with a fee).
+  (a) Full season fee. (b) Pro-rata.
+  **Recommendation: (a) full fee** — the app never handles money; pro-rata would be an
+  off-platform arrangement the app can't verify.
 
 ## 8. Withdrawals
 
-There is no self-withdrawal feature today; only a pot admin can remove a member
-(`admin-actions` `remove_member`).
+There is no self-withdrawal today; only a pot admin can remove a member.
 
-- **[proposed]** A removed or withdrawn player is ineligible for every prize not yet
+- **[RULE]** A removed or withdrawn player is ineligible for every prize not yet
   finalised. Prizes they already won stand.
-- **[proposed]** Their entry still counts toward gross (their fee was collected), unless
-  their entry is voided. Refunds are off-platform and the app does not model them.
-- **[decide]** Should removal void the entry (shrinking the pool) or keep it in the
-  pool? Recommendation: keep it in the pool — the organiser decides any refund outside
-  the app, and the pool shown to players doesn't shrink unexpectedly.
+- **[OWNER DECISION 6] Does a removed player's entry stay in the prize pool?**
+  (a) Keep it in gross (their fee was collected; any refund is off-platform).
+  (b) Void it (shrinks the pool).
+  **Recommendation: (a)** — the pool players were shown doesn't shrink unexpectedly;
+  refunds are the organiser's call outside the app.
+- **[OWNER DECISION 7] Self-withdrawal** — should players be able to leave a
+  competition themselves (a new feature)? **Recommendation:** not for this release.
 
-## 9. Incomplete competitions
+## 9. Incomplete seasons
 
-- **[proposed] Postponed fixtures:** a half is not finalised while any of its fixtures
-  is postponed. **[decide]** A cut-off after which a still-unplayed fixture is ignored
-  for that half (recommendation: the deadline of gameweek 21 for H1; the season's
-  final day for H2), so one postponement can't block H1 indefinitely.
-- **[proposed] Cancelled fixtures** are excluded (no points), as today.
-- **[proposed] Season curtailed / abandoned:** an admin can trigger season-end
-  finalisation on the gameweeks played so far; H2 and Overall are then judged on those.
-  Needs an explicit admin action (none exists today). **[decide]** whether to build it
-  now or handle such a case manually.
+- **[RULE] Postponed fixtures** belong to their original gameweek and half (§3). A half
+  isn't finalised while one of its fixtures is postponed — subject to decision 8.
+- **[OWNER DECISION 8] Postponement cut-off** for finalising a half.
+  (a) Wait indefinitely. (b) After a cut-off, ignore still-unplayed fixtures for that
+  half's prize.
+  **Recommendation: (b)** — cut-off = the GW21 deadline for H1 (16 Jan 2027 14:45 UTC
+  this season), the season's final day for H2 — so one postponement can't hold H1 open
+  for months.
+- **[RULE] Cancelled / awarded fixtures** earn no points (as today).
+- **[RULE] Season curtailed or abandoned:** H2 and Overall are finalised on the
+  gameweeks completed by an admin-confirmed end date. This needs an admin action that
+  doesn't exist yet; until it's built, such a case is handled manually and documented.
 
-## 10. Finalisation of results
+## 10. Finalisation
 
-- **[proposed] H1 is finalised** by `settle-gameweek` once the gameweek-19 deadline has
-  passed **and** every H1 fixture is finished or cancelled (or past the postponement
-  cut-off). This is the same readiness gate settlement uses today.
-- **[proposed] Season-end prizes** are finalised exactly as today (end gameweek
-  complete), together.
-- **[proposed]** Each prize writes its own settled `pot_prizes` row (new scope values,
-  e.g. `half_1`, `half_2`, `season`), idempotent like today: a settled prize is never
-  re-awarded by later runs.
-- **[proposed]** Each winner gets a `predictor.prize_awarded` notification with the
-  prize name (`half_1` / `half_2` / `overall`) in the payload.
-- **[proposed]** Standings show the current half's table and the overall table; after
-  H1 is finalised, its winners and amounts are shown permanently on the pot page.
-- **[proposed] Corrections** after finalisation (e.g. a scoring error found later) are
-  admin-only and audited, using the same pattern as Late Payment Override; no automatic
-  re-award.
+- **[RULE] H1** is finalised by `settle-gameweek` once the GW19 deadline has passed and
+  every H1 fixture is finished, cancelled or past the decision-8 cut-off.
+- **[RULE] H2 and Overall** are finalised together at season end, exactly as today's
+  single prize.
+- **[RULE]** Each prize writes its own settled `pot_prizes` row (new scopes, e.g.
+  `half_1`, `half_2`, `season`), idempotently: a finalised prize is never re-awarded by
+  a later run. Each winner gets a `predictor.prize_awarded` notification naming the
+  prize.
+- **[RULE]** After H1 is finalised, its winners and amounts are shown permanently on the
+  pot page; the H2 and Overall tables are live.
+- **[RULE]** Corrections after finalisation are admin-only and audited (same pattern as
+  Late Payment Override); never automatic.
 
-## 11. Engineering implications (for estimating — nothing started)
+## 11. Engineering outline (for estimating — not started)
 
-- Half-scoped standings (a `half` dimension on `pot_standings_snapshots`, or computed).
-- `pot_prizes` scope values for halves (migration) and the H1/season split calculation.
-- An extra finalisation call at the H1 boundary in `PredictorEngine.settle()`.
-- UI: current-half table, H1 result banner, create-pot form handling for pots that
-  start in H2.
-- Tests: unit tests for the split and rounding (incl. the worked example), H1
-  finalisation gate, reinstatement and late-joiner cases; live verification on the
-  local stack.
-- Does **not** affect Pick 5 or Last Man Standing.
+Schema: `pot_prizes.scope` values for halves (migration). Engine: half-scoped standings,
+an H1 finalisation in `PredictorEngine.settle()`, the §4 split and rounding, decision-8
+cut-off. UI: half tables, H1 result banner, create-pot validation for decisions 1–2.
+Tests: the worked example, rounding, ties, reinstatement, late joiners, postponement
+cut-off. **Acceptance tests are already written and skipped** in
+`supabase/functions/_shared/game-engine/predictor/twoHalves.acceptance.test.ts`; they are
+enabled when the rules are approved and the calculation exists. Pick 5 and Last Man
+Standing are not affected.
 
 ## 12. Owner decisions required (summary)
 
-1. Approve the 40 / 40 / 20 split (or choose another).
-2. Pots starting in H2 (§3).
-3. Pots ending before GW38 (§3).
-4. H1 calculated before or after fixed fees (§6).
-5. Late joiners: full fee or pro-rata (§7) — and the entry-window decision itself.
-6. Removal: keep the entry in the pool or void it (§8).
-7. Postponement cut-off for finalising a half (§9).
-8. Curtailed-season admin action: build now or handle manually (§9).
+| # | Decision | Recommendation |
+|---|---|---|
+| 1 | Pots starting in H2 | Not allowed as two-halves |
+| 2 | Pots ending before GW38 | Two-halves pots must end at GW38 |
+| 3 | H1 before or after fixed fees | Before fixed fees |
+| 4 | Mid-season joining | Allowed until the GW19 deadline |
+| 5 | Late-joiner fee | Full fee |
+| 6 | Removed player's entry in the pool | Keep it in the pool |
+| 7 | Self-withdrawal feature | Not this release |
+| 8 | Postponement cut-off | GW21 deadline for H1; season end for H2 |
+
+Plus approval of the [RULE] items as written.
