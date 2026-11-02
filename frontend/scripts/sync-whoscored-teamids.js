@@ -35,10 +35,6 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 // ── Same name-normalization logic as sync-whoscored-fixture-map.js ───────────
 // (kept identical on purpose — already proven against real DB team names)
 const COUNTRY_ALIASES = {

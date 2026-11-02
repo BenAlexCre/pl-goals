@@ -15,7 +15,7 @@ import EmptyState from '../components/ui/EmptyState'
 import FixtureCard from '../components/matchcentre/FixtureCard'
 import {
   Trophy, Users, Shield, Target, CalendarOff, CheckCircle2, CreditCard,
-  CalendarClock, Radio, Lock, ArrowRight, PlusCircle, LogIn, Settings, ListChecks,
+  CalendarClock, Radio, ArrowRight, PlusCircle, LogIn, Settings, ListChecks,
   ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { isPastDeadline, toLocalTimeShort, toLocalDateTimeLong } from '../utils/time'

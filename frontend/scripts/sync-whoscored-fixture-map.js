@@ -618,7 +618,7 @@ async function main() {
     // Working copy — we remove matched fixtures so later iterations are faster
     const remaining = [...dbFixtures];
 
-    for (const { wsFixtureId, url } of wsFixtures) {
+    for (const { wsFixtureId } of wsFixtures) {
       if (!remaining.length) {
         console.log('All DB fixtures matched — stopping early.');
         break;

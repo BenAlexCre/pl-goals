@@ -263,7 +263,9 @@ export function useRecordPayment() {
 export function useBulkVerifyPayments() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async ({ potId, gameweekId, rows, dryRun }) => {
+    // bulk_verify_payments is cross-pot by design (each CSV row names its
+    // pot); potId is only used below, via vars, to invalidate the cache.
+    mutationFn: async ({ gameweekId, rows, dryRun }) => {
       const { data, error } = await supabase.functions.invoke('admin-actions', {
         body: { action: 'bulk_verify_payments', gameweek_id: gameweekId, rows, dry_run: dryRun },
       })

@@ -16,7 +16,7 @@ const results = []
 for (const w of widths) {
   const mobile = w < 768
   const ctx = await browser.newContext({ viewport: { width: w, height: mobile ? 760 : 900 }, isMobile: mobile && engine === chromium, hasTouch: mobile, deviceScaleFactor: 1 })
-  if (sess) await ctx.addInitScript(([k, v]) => { try { localStorage.setItem(k, v) } catch {} }, [sess.key, JSON.stringify(sess.session)])
+  if (sess) await ctx.addInitScript(([k, v]) => { try { localStorage.setItem(k, v) } catch { /* storage blocked: run continues signed-out and the sweep flags the redirect */ } }, [sess.key, JSON.stringify(sess.session)])
   for (const route of routes) {
     const page = await ctx.newPage()
     const errs = [], fails = []

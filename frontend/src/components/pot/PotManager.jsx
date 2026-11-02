@@ -233,7 +233,6 @@ export default function PotManager() {
     // Only ever reacts to the query param itself — never re-collapses a
     // form the user has already opened manually, and never re-fires on
     // unrelated re-renders (pots/leagues finishing their own load, etc.).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantsCreateExpanded])
 
   // Basics
