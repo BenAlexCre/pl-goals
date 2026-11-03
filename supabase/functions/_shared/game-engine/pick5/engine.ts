@@ -7,6 +7,8 @@
 // All eight GameEngine contract methods are now implemented.
 
 import type { GameEngine, GameEngineContext } from '../contracts.ts'
+import { derivePickResult } from './pickResult.ts'
+import { loadFreePotIds } from '../paymentEligibility.ts'
 import type { GameEntry, NotificationEvent, StandingsRow } from '../types.ts'
 import { resolveNextSeasonLeague, resolveSeasonGameweekBounds } from '../season-resolution.ts'
 import { Pick5PrizePoolExceededError, Pick5ValidationError } from './errors.ts'
@@ -220,23 +222,55 @@ export class Pick5Engine implements GameEngine {
   // automatically refreshed, so this always read zero goals) is fixed at
   // the call site: compute-scores/index.ts now refreshes the view once per
   // run, before calling this method for any mode.
+  // ISSUE-85 — player id -> statuses of their team's fixtures in this gameweek
+  // (usually one; two in a double gameweek; none if the team doesn't play or
+  // the data is missing — derivePickResult() then reports 'pending').
+  private async loadFixtureStatusesByPlayer(
+    ctx: GameEngineContext,
+    gameweekId: number,
+    playerIds: number[],
+  ): Promise<Map<number, string[]>> {
+    const result = new Map<number, string[]>()
+    const { data: gameweek, error: gameweekError } = await ctx.supabase
+      .from('gameweeks')
+      .select('season_id')
+      .eq('id', gameweekId)
+      .maybeSingle()
+    if (gameweekError) throw new Error(`Failed to look up gameweek season: ${gameweekError.message}`)
+    if (!gameweek) return result
+
+    const [{ data: teamRows, error: teamError }, { data: fixtureRows, error: fixtureError }] = await Promise.all([
+      ctx.supabase
+        .from('player_team_history')
+        .select('player_id, team_id')
+        .eq('season_id', (gameweek as { season_id: number }).season_id)
+        .eq('is_active', true)
+        .in('player_id', playerIds),
+      ctx.supabase
+        .from('fixtures')
+        .select('home_team_id, away_team_id, status')
+        .eq('gameweek_id', gameweekId),
+    ])
+    if (teamError) throw new Error(`Failed to look up player teams: ${teamError.message}`)
+    if (fixtureError) throw new Error(`Failed to look up gameweek fixtures: ${fixtureError.message}`)
+
+    const statusesByTeam = new Map<number, string[]>()
+    for (const f of (fixtureRows ?? []) as { home_team_id: number; away_team_id: number; status: string }[]) {
+      for (const teamId of [f.home_team_id, f.away_team_id]) {
+        statusesByTeam.set(teamId, [...(statusesByTeam.get(teamId) ?? []), f.status])
+      }
+    }
+    for (const row of (teamRows ?? []) as { player_id: number; team_id: number }[]) {
+      result.set(row.player_id, statusesByTeam.get(row.team_id) ?? [])
+    }
+    return result
+  }
+
   async calculateScore(ctx: GameEngineContext, gameweekId: number): Promise<void> {
     const potIds = await this.getPick5PotIds(ctx)
     if (potIds.length === 0) {
       return
     }
-
-    const { data: liveFixtures, error: liveError } = await ctx.supabase
-      .from('fixtures')
-      .select('id')
-      .eq('gameweek_id', gameweekId)
-      .eq('status', 'live')
-      .limit(1)
-
-    if (liveError) {
-      throw new Error(`Failed to check live fixture status: ${liveError.message}`)
-    }
-    const isLive = (liveFixtures?.length ?? 0) > 0
 
     const { data: entries, error: entriesError } = await ctx.supabase
       .from('game_entries')
@@ -283,6 +317,12 @@ export class Pick5Engine implements GameEngine {
       goalsByPlayer.set(row.player_id, (goalsByPlayer.get(row.player_id) ?? 0) + (row.goals ?? 0))
     }
 
+    // ISSUE-85 — each pick's displayed result follows its OWN player's
+    // fixture(s), not whether anything in the gameweek is live. The player's
+    // team is their active team for this gameweek's season (the same mapping
+    // pick eligibility uses, available_players_by_gameweek).
+    const fixtureStatusesByPlayer = await this.loadFixtureStatusesByPlayer(ctx, gameweekId, playerIds)
+
     const picksWonByEntry = new Map<string, number>()
     type PickRow = { id: number; game_entry_id: string; player_id: number; pick_position: number; goal_threshold: number }
     // Upsert requires every NOT NULL column without a default (game_entry_id,
@@ -295,7 +335,11 @@ export class Pick5Engine implements GameEngine {
     const pickUpdates = picks.map((pick: PickRow) => {
       const goals = goalsByPlayer.get(pick.player_id) ?? 0
       const met = goals >= pick.goal_threshold
-      const result = met ? (isLive ? 'winning' : 'won') : (isLive ? 'losing' : 'lost')
+      const result = derivePickResult({
+        goals,
+        threshold: pick.goal_threshold,
+        teamFixtureStatuses: fixtureStatusesByPlayer.get(pick.player_id) ?? [],
+      })
       if (met) {
         picksWonByEntry.set(pick.game_entry_id, (picksWonByEntry.get(pick.game_entry_id) ?? 0) + 1)
       }
@@ -385,10 +429,14 @@ export class Pick5Engine implements GameEngine {
         .map((p) => `${p.pot_id}:${p.user_id}`)
     )
 
+    // ISSUE-86 — an entry in a free (€0) pot is financially settled without a
+    // payment record; see paymentEligibility.ts.
+    const freePotIds = await loadFreePotIds(ctx, potIds)
+
     const unpaidEntryIds: string[] = []
     const paidEntryIds: string[] = []
     for (const entry of entries as { id: string; pot_id: string; user_id: string }[]) {
-      if (paidKeys.has(`${entry.pot_id}:${entry.user_id}`)) {
+      if (paidKeys.has(`${entry.pot_id}:${entry.user_id}`) || freePotIds.has(entry.pot_id)) {
         paidEntryIds.push(entry.id)
       } else {
         unpaidEntryIds.push(entry.id)

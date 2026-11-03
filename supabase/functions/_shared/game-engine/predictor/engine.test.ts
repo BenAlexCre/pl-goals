@@ -996,7 +996,8 @@ function fakeSettleContext(db: FakeSettleDb): GameEngineContext {
 
 function baseSettleDb(overrides: Partial<FakeSettleDb> = {}): FakeSettleDb {
   return {
-    pots: [{ id: 'pot-1', game_type: 'score_predictor' }],
+    // entry_fee made explicit for ISSUE-86: a pot WITH a fee (free pots have their own tests).
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', entry_fee: 10 }],
     game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'pending' }],
     entry_payments: [{ pot_id: 'pot-1', user_id: 'user-1', scope: 'season', is_paid: true }],
     game_entry_predictor: [{ game_entry_id: 'entry-1', total_points: 0, exact_score_count: 0, correct_scorer_count: 0 }],
@@ -1925,4 +1926,55 @@ Deno.test('awardPrize does not write a duplicate notification on an idempotent s
   await engine.awardPrize(ctx, 'pot-1')
 
   assertEquals(db.notifications.length, 1)
+})
+
+// --- ISSUE-86: free (€0) pots -------------------------------------------------
+
+Deno.test('ISSUE-86: settle leaves an unmarked entry in a free pot pending, no payment row written', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({ pots: [{ id: 'pot-1', game_type: 'score_predictor', entry_fee: 0 }], entry_payments: [] })
+
+  await engine.settle(fakeSettleContext(db), 13)
+
+  assertEquals(db.game_entries[0].status, 'pending')
+  assertEquals(db.entry_payments.length, 0)
+})
+
+Deno.test('ISSUE-86: a free pot settles while an unpaid entry in a pot with a fee is still voided', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [
+      { id: 'pot-free', game_type: 'score_predictor', entry_fee: 0 },
+      { id: 'pot-paid', game_type: 'score_predictor', entry_fee: 10 },
+    ],
+    game_entries: [
+      { id: 'entry-free', pot_id: 'pot-free', user_id: 'user-1', status: 'pending' },
+      { id: 'entry-unpaid', pot_id: 'pot-paid', user_id: 'user-2', status: 'pending' },
+      { id: 'entry-paid', pot_id: 'pot-paid', user_id: 'user-3', status: 'pending' },
+    ],
+    entry_payments: [
+      { pot_id: 'pot-paid', user_id: 'user-2', scope: 'season', is_paid: false },
+      { pot_id: 'pot-paid', user_id: 'user-3', scope: 'season', is_paid: true },
+    ],
+    game_entry_predictor: [],
+  })
+
+  await engine.settle(fakeSettleContext(db), 13)
+
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-free')?.status, 'pending')
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-paid')?.status, 'pending')
+  assertEquals(db.game_entries.find((e) => e.id === 'entry-unpaid')?.status, 'void')
+})
+
+Deno.test('ISSUE-86: an entry already void in a free pot stays void', async () => {
+  const engine = new PredictorEngine()
+  const db = baseSettleDb({
+    pots: [{ id: 'pot-1', game_type: 'score_predictor', entry_fee: 0 }],
+    game_entries: [{ id: 'entry-1', pot_id: 'pot-1', user_id: 'user-1', status: 'void' }],
+    entry_payments: [],
+  })
+
+  await engine.settle(fakeSettleContext(db), 13)
+
+  assertEquals(db.game_entries[0].status, 'void')
 })

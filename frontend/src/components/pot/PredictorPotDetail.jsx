@@ -221,7 +221,7 @@ export default function PredictorPotDetail({ pot, potId }) {
           </div>
         ) : (
           <div className="mt-5 border-t border-white/6 pt-4 text-sm">
-            <SeasonPaymentStatus potId={potId} />
+            <SeasonPaymentStatus potId={potId} entryFee={pot.entry_fee} />
           </div>
         )}
       </section>

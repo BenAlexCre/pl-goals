@@ -1,6 +1,6 @@
 # Project Board
 
-Last reviewed: 2026-11-02, release preparation — release candidate, runbook, rollback and owner approval checklist in [finalisation-status.md](./finalisation-status.md).
+Last reviewed: 2026-11-03, Release 2 backend deployed; frontend PR #2 awaiting merge approval — see [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03).
 
 This is the **active work tracker** — a Kanban view of what's queued, in progress,
 blocked, or done. It's derived from, and must stay consistent with,
@@ -32,6 +32,9 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
+- **ISSUE-87** (P3) — map provider `SUSPENDED` (abandoned) explicitly instead of `tbd`.
+- **Optional: raise pg_net timeout for `sync-fixtures-daily`** (42 s daily run) — observability only, follow-up to `ISSUE-83`.
+- **Security advisor follow-ups** — `ISSUE-84` (P2) remaining items: pin search_path on 7 invoker functions, enable leaked-password protection (owner, dashboard), `pg_trgm` schema. The anon-EXECUTE item is fixed in repo (046).
 - **Fix the 7 `exhaustive-deps` warnings** — folds into `ISSUE-10`/`ISSUE-27` (TanStack Query migration of `PotDetail.jsx`); lint ratchets at 7 meanwhile.
 - **Add a Deno lockfile for Edge Functions; add the Playwright mobile sweep to CI** — P3, follow-ups from release preparation.
 - **`.maybeSingle()` for the non-member pot view** — `ISSUE-80` (P3) → [current-state.md](./current-state.md#issue-80--viewing-a-pot-you-arent-a-member-of-logs-a-406-error-to-the-console).
@@ -69,9 +72,13 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Blocked
 
+- **Merge PR #2 (Release 2 frontend)** — backend already live; blocked on the owner's explicit merge approval after reviewing CI + preview. finalisation-status.md § 0d.
+- **Clean up the six void test entries' accounts and pots** — owner decision 2026-11-03: leave untouched until signed-in testing is done, then delete by exact id.
+- **Score Predictor 40/40/20 rules** — proposal written ([docs/proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md)); 8 owner decisions listed; no logic changed.
+- **Signed-in production testing** — approved 2026-11-03 (labelled test accounts, isolated €0 `[QA]` pots); owner-run, since the assistant does not create accounts or enter passwords in production. Plan: [production-testing-plan.md](./production-testing-plan.md).
 - **Finish the `pot-admin-a11y-remediation` worktree and ship migration 045** — `ISSUE-77` resolved (renumbered to 045, uncommitted); blocked on the owner finishing that work. Original card: **`ISSUE-77` — migration version `043` collision (main vs uncommitted worktree)** (P1) → [current-state.md](./current-state.md#issue-77--migration-version-043-collision-between-main-and-an-uncommitted-worktree). Blocked on: the owner's decision about the in-progress `pot-admin-a11y-remediation` worktree — its `043_prevent_pot_admin_orphaning.sql` must be renumbered (now `045`) before merging.
-- **Deploy the release candidate (`fix/mobile-finalisation-audit`) + apply migration `044`** (`ISSUE-81`, `ISSUE-82`, `ISSUE-78`) — release candidate prepared and verified; blocked on owner approval. Runbook + approval checklist: [finalisation-status.md § 7, § 11](./finalisation-status.md#7-deployment-instructions-owner-run).
-- **Product decision: Score Predictor `two_halves` payout (once vs twice)** — default mode for every Predictor pot; must be decided before gameweek 19. See [finalisation-status.md § 10](./finalisation-status.md#10-product-decisions).
+- **Signed-in production smoke tests** — blocked on the owner choosing a test-account approach (owner-supplied account, or a named test account created in production). Checklist: [finalisation-status.md § 9](./finalisation-status.md#9-post-deployment-verification-checklist).
+- **Product decision: Score Predictor `two_halves` payout (once vs twice)** — default mode for every Predictor pot; must be decided before gameweek 19. Proposed structure (options A/B/C, recommendation B 40/40/20): [finalisation-status.md § 10a](./finalisation-status.md#10a-pending-decision--proposed-score-predictor-two-half-payout-structure). Payout logic unchanged until decided.
 - **ISSUE-24 — undocumented SQL trigger overwrites `gameweeks.deadline_utc` with a conflicting 15-minute offset** → [current-state.md](./current-state.md#issue-24--an-undocumented-sql-trigger-recomputes-gameweeksdeadline_utc-with-a-conflicting-incorrect-offset). Discovered 2026-08-05, live-confirmed via direct reproduction. `supabase_admin`-owned, not in any migration — same out-of-band pattern as ISSUE-1/ISSUE-21. Blocked on: a decision on which offset (15 min or the documented 30 min) is actually correct before either removing the trigger or changing `compute-deadlines` to match.
 - **ISSUE-20 — prototype tables have RLS disabled and full anonymous write access** → [current-state.md](./current-state.md#issue-20--prototype-tables-have-rls-disabled-and-full-anonymous-write-access). Narrowed 2026-08-03 — the new schema ships fully RLS-protected; the 7 original prototype tables remain exposed. Blocked on: Phase 8 of `deployment-checklist.md` (final removal), or a Dashboard/support RLS fix on the old tables directly.
 - **`sync-live-events-every-5-min` cron job removal** — `supabase_admin`-owned, `postgres` cannot unschedule it. Low severity (no data/security impact). Folded into Track B/Phase 8 scope, not tracked separately.
@@ -84,6 +91,10 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Done
 
+- **Release 2 backend deployed** — 2026-11-03. Restore-verified backup; migration 046 (alone, then verified) and 048 (Postponed status); seven Edge Functions; cron and scoring verified (ISSUE-83 fixed in production). `.gitignore` for local Codex files. PR #2 opened.
+- **Release 2 prepared (not deployed)** — 2026-11-02. ISSUE-86 free pots (engines, reinstatement, CSV, UI, business rule), ISSUE-85 per-fixture pick status, worktree migration renumbered 045→047, 40/40/20 specification v2 with skipped acceptance tests, live local settlement check; six void entries investigated (test accounts only).
+- **Post-release hardening (code + tests, not deployed)** — 2026-11-02. Migration 046 (`ISSUE-84` anon EXECUTE) with pgTAP tests; compute-scores selective dispatch (`ISSUE-83` root cause) with unit + equivalence tests; production testing plan; 40/40/20 proposal; `ISSUE-85`/`ISSUE-86` found.
+- **Production deployment of the mobile finalisation release** — 2026-11-02. Backup taken and restore-verified; migration 044 applied (09:06 UTC, `ISSUE-78` resolved); PR #1 merged (fast-forward to `a7b7804`) and deployed (09:46 UTC); signed-out, performance, data-preservation, cron and advisor smoke tests passed. Live 4G first paint 3.5 s → 0.57 s.
 - **Release preparation (`ISSUE-77`, `ISSUE-79`, `ISSUE-38` resolved)** — 2026-11-02. Migration 045 renumbered in the worktree; local migration history repaired; 044 reviewed (grants, triggers, rollback tested); 001→045 replayed on a fresh DB; production state read-only verified (schema dump + push dry run); ESLint 9 toolchain; CI workflow; deployment runbook, rollback and approval checklist. Nothing pushed/deployed.
 - **Finalisation audit — mobile responsiveness overhaul (`ISSUE-81`, `ISSUE-82` resolved; `ISSUE-44` closed; `ISSUE-42` revalidated)** — 2026-11-02, implemented and verified locally (Chromium 8 widths + WebKit), **not yet deployed**. Root cause of "doesn't load on my phone": a 3.5–6 s blank screen on mobile networks plus mobile navigation/layout defects — not a runtime crash. See [finalisation-status.md](./finalisation-status.md) and [session-log.md](./session-log.md) entry 83.
 - **`ISSUE-44` — player-facing payment status** — 2026-11-02. LMS/Score Predictor pot pages now show the player's own season payment status (Dashboard and Pick 5 already did).

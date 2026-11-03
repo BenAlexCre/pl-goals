@@ -60,3 +60,9 @@ desktop.ini
 # Local scratch / test artifacts
 *.tmp
 *.tmp.*
+
+# Local OpenAI Codex configuration (a Codex import of this repo's Claude Code setup).
+# Kept locally, never committed — owner decision 2026-11-03.
+.agents/
+.codex/
+AGENTS.md

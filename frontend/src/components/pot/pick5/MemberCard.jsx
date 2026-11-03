@@ -37,10 +37,11 @@ export default function MemberCard({ member, isAdmin, deadlineClosed, onRemove }
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* ISSUE-86 — paid / free / unpaid (member.paymentState from PotDetail). */}
           <Chip
-            icon={member.isPaid ? CheckCircle2 : CreditCard}
-            label={member.isPaid ? 'Paid' : 'Unpaid'}
-            tone={member.isPaid ? 'success' : 'danger'}
+            icon={(member.paymentState ?? (member.isPaid ? 'paid' : 'unpaid')) === 'unpaid' ? CreditCard : CheckCircle2}
+            label={{ paid: 'Paid', free: 'Free entry', unpaid: 'Unpaid' }[member.paymentState ?? (member.isPaid ? 'paid' : 'unpaid')]}
+            tone={{ paid: 'success', free: 'neutral', unpaid: 'danger' }[member.paymentState ?? (member.isPaid ? 'paid' : 'unpaid')]}
           />
           <Chip
             icon={member.hasEntry ? CheckCircle2 : XCircle}

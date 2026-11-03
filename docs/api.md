@@ -90,27 +90,30 @@ finds the earliest non-postponed/cancelled fixture kickoff and sets
 `{ success: true, updated }`.
 
 ### `POST /functions/v1/compute-scores`
-**Auth:** requires either the service-role key or a signed-in `app_admin`
-session (see `sync-fixtures` above — same helper, same fix, resolves
-[current-state.md ISSUE-26](./current-state.md#issue-26--compute-deadlinescompute-scoressettle-gameweeksync-fixtures-accepted-unauthenticated-requests)).
-No request body used. Creates a `sync_runs` row
-(`job_name: 'compute-scores'`). For every `upcoming`/`live` gameweek: determines
-`isLive` (any fixture in that gameweek has `status = 'live'`), then for every
-`user_entries` row in that gameweek:
-- if the matching `entry_payments.is_paid` is falsy, voids the entry
-  (`is_void = true`) and sets all its picks' `result = 'void'`, then skips scoring
-  (see [current-state.md ISSUE-6](./current-state.md#issue-6--payment-verification-has-no-ui-or-bulk-import-compute-scoressettle-will-void-every-entry)
-  for why this currently voids everything);
-- otherwise, for each pick, sums `player_fixture_goals.goals` for that player/gameweek
-  and compares against `goal_threshold` to set `result` to one of `winning/losing` (if
-  `isLive`) or `won/lost` (otherwise), and updates `user_entries.picks_won`/`status`
-  (`locked` if live, `settled` if not) accordingly.
+*(Rewritten 2026-11-02 for ISSUE-83. The previous text described the retired
+prototype `user_entries` scoring loop, removed in the red-team remediation, and
+named `app_admin` as the admin role — both no longer true.)*
 
-Reads from the `player_fixture_goals` **materialized view**, whose freshness is
-unverified — see [current-state.md ISSUE-3](./current-state.md#issue-3--player_fixture_goals-materialized-view-is-never-refreshed).
+**Auth:** the service-role key (cron) or a signed-in `super_admin` session —
+`_shared/adminOrCronAuth.ts` (ISSUE-26, ISSUE-51). Called by cron every 3 minutes
+(`compute-scores-every-3-min`).
 
-Response: `{ success: true, processed }` or `{ error }` with `500` (and the
-`sync_runs` row marked `failed`).
+**Body (optional):** `{ "full_scan": true }` forces the pre-ISSUE-83 behaviour
+(dispatch every `upcoming`/`live` gameweek) — an operational escape hatch. Any other
+body, or none, uses the selective path. `triggered_by` is accepted and ignored.
+
+**Behaviour:** creates a `sync_runs` row (`job_name: 'compute-scores'`), refreshes the
+`player_fixture_goals` materialized view (ISSUE-3), then calls each Game Engine's
+`calculateScore()` (Pick 5, Last Man Standing, Score Predictor) for every
+`upcoming`/`live` gameweek **except** those for which all three engines are provably
+no-ops: deadline set and in the future, **and** no live/finished fixture, **and** no
+locked entry (`compute-scores/selectGameweeks.ts`; equivalence-tested against
+`full_scan` by `frontend/scripts/qa/compute-scores-equivalence.mjs`). Scoring is a
+recompute, so repeated calls are idempotent; pg_net does not retry.
+
+**Response:** `{ success: true, gameEngineDispatches, gameweeksConsidered,
+gameweeksSkipped, fullScan }`, or `{ error }` with `500` (and the `sync_runs` row
+marked `failed`). `sync_runs.records_processed` = `gameEngineDispatches`.
 
 ### `POST /functions/v1/settle-gameweek`
 **Auth:** requires either the service-role key or a signed-in `app_admin`

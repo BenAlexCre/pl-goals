@@ -1,6 +1,16 @@
 # Current State
 
-Last reviewed: 2026-11-02, release preparation (ISSUE-77/79/38 resolved; release
+Last reviewed: 2026-11-03, Release 2 backend deployed (migrations 046 + 048, seven Edge
+Functions; ISSUE-83/84 anon item fixed in production; ISSUE-85/86 live in the backend,
+frontend in PR #2 awaiting merge approval — [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03)).
+Before that: 2026-11-02, Release 2 prepared (ISSUE-85/86 fixed in repo on
+`release-2/payments-rules`, not deployed; ISSUE-87 opened; six void entries investigated —
+all test accounts; see [finalisation-status.md § 0c](./finalisation-status.md#0c-release-2--payments--competition-rules-2026-11-02)).
+Before that: post-release hardening (ISSUE-83/84 fixed in repo — migration
+046 and the compute-scores change, both pending owner approval; ISSUE-85/86 opened;
+ISSUE-86 is P1). Before that: post-deployment (release deployed; ISSUE-78 resolved in
+production; ISSUE-83/84 opened — [finalisation-status.md § 0](./finalisation-status.md#0-deployment-record-2026-11-02)).
+Earlier: release preparation (ISSUE-77/79/38 resolved; release
 candidate and runbook in [finalisation-status.md](./finalisation-status.md)). Earlier the
 same day: finalisation audit — mobile responsiveness overhaul,
 ISSUE-42/44 revalidated and closed, ISSUE-77–82 opened; release-readiness summary in
@@ -370,6 +380,41 @@ now explicitly expected, not an open question.
 
 ### P1 — features that are half-built or internally inconsistent
 
+#### ISSUE-86 — Free (€0) pots void entries — **FIXED; backend live 2026-11-03, frontend in PR #2**
+**2026-11-03:** settlement/reinstatement/CSV rule deployed with the seven Edge Functions
+(free-pot entries are no longer voided in production). The "Free entry" UI ships with
+PR #2. Owner decision: the six void test entries stay untouched; their test accounts
+and pots are removed by exact id after signed-in testing. Move to Resolved once the
+frontend is live.
+
+Owner-specified rule implemented: entries in €0 pots are financially settled without a
+payment record (derived from the pot's immutable fee, never stored), shown as "Free
+entry", never voided for non-payment, reinstatable without a payment; CSV import refuses
+free pots. Already-void entries untouched; pots with a fee unchanged. **The six void
+production entries were investigated individually: all belong to three disposable-inbox
+test accounts in single-member QA pots — no real player affected** (details in
+finalisation-status.md § 0c; names kept out of this public repo). Move to Resolved once
+deployed.
+
+#### ISSUE-86 (original entry, kept for history) — Free (€0) pots void their players' entries unless every member is manually marked paid
+**Discovered 2026-11-02** while preparing the production testing plan. Settlement
+voids every entry not marked paid (`Pick5Engine`/`LmsEngine`/`PredictorEngine`
+`settle()` read only `entry_payments.is_paid`), **regardless of the entry fee**. For
+LMS/Score Predictor the "Record payment received" form refuses a €0 pot
+(`validateSeasonPayment`: "no entry fee configured"); the only path is the per-member
+**Mark paid** toggle, which nothing prompts an organiser of a free pot to use.
+**Production (read-only counts, 2026-11-02):** all 12 pots are free (9 Pick 5, 3 Score
+Predictor), **0 payment records exist, and 6 entries are already void** (3 Pick 5,
+3 Predictor). The landing page advertises "free to play". business-rules.md states the
+voiding rule without a free-pot exception, so this is a **product decision**, not a
+bug to fix silently. **Recommendation (pending owner approval):** an entry in a pot
+whose `entry_fee = 0` is treated as paid — implemented in each engine's `settle()`
+(and payment-status display), not by writing fake payment rows. Affected real entries
+could then be restored with the existing Late Payment Override (reinstate), **only with
+the owner's approval** (real player records). No code or data changed.
+**Status: confirmed, open (P1), awaiting decision.**
+
+
 **Status: confirmed, not fixed.** This is the largest single gap between what
 the backend can do and what a real user can do — see
 [project-board.md](./project-board.md) for the prioritized implementation plan.
@@ -573,7 +618,117 @@ deliberate design choice, not an open question.
 
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
 
-#### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path`
+#### ISSUE-83 — ~25 % of cron → Edge Function calls hit pg_net's 5-second timeout
+**2026-11-03: fixed in production** — compute-scores v4 (selective dispatch) deployed;
+first runs avg 0.28 s / max 0.39 s (was 6.56 s / 8.32 s); 15/15 pg_net calls 200, 0
+timeouts. Move to Resolved after a day of clean `net._http_response` history.
+
+**Discovered 2026-11-02** in the post-deploy smoke test (read-only queries on
+production `net._http_response`). Last 24 h: 371 × HTTP 200, 128 × `status_code`
+null with "Timeout of 5000 ms reached"; ~35 % of those stall in DNS resolution for
+the full 5 s, the rest wait on a slow response. **Not caused by the release** — rate
+25.9 % before vs 24.1 % after. Functional impact appears low: `sync_runs` shows
+compute-scores 480/480 successful in the same 24 h (the functions finish after pg_net
+stops waiting). Risk: a DNS stall may mean a call never reaches the function; the
+logs can't yet distinguish this per job. Fix: pass a larger `timeout_milliseconds` to
+the cron jobs' `net.http_post` calls (new migration) and track per-job outcomes.
+**Status: confirmed, open (P2).**
+
+**Correction:** "last 24 h" above was effectively the last ~6 h — pg_net keeps
+responses for 6 hours. **Root cause found and fixed in repo (2026-11-02, post-release hardening, commit
+10d74ff — not deployed).** Attributing responses to jobs by body signature showed the
+timeouts are almost entirely **compute-scores** (0 of ~120 calls answered in time over
+pg_net's 6-hour window; other jobs ~99 %). compute-scores ran every engine for all ~30
+upcoming/live gameweeks × 3 modes sequentially (90 dispatches): p50 6.3 s, p95 8.3 s,
+max 20 s against a 5 s client timeout. The work always completed (cron fired 120 /
+function ran 120 / 120 success in 6 h); 0 overlapping runs in 480; pg_net does not
+retry, so no duplicate processing. The "DNS time 5000 ms" figures are a pg_net
+reporting artefact — those requests demonstrably executed. Not network latency, not
+platform limits, not a database bottleneck as such: round-trip count. **Fix:** dispatch
+only gameweeks where an engine can act (deadline passed or unknown, or a live/finished
+fixture, or locked entries) — production shape 29 of 30 gameweeks idle, ~3 dispatches
+instead of 90. Unit-tested (8) and equivalence-tested locally from a stale state
+(byte-identical to the old path, idempotent). The timeout was **not** raised: with the
+fix, the expected runtime is well under 5 s. sync-fixtures (42 s, once daily) still
+exceeds 5 s — it completes and logs to `sync_runs`; raising its pg_net timeout is
+optional observability work. **Status: fixed in repo, pending deploy; verify in
+production with the § 0 queries in finalisation-status.md.**
+
+#### ISSUE-84 — Supabase security advisor warnings (post-044)
+**2026-11-03:** the anon-EXECUTE item is **fixed in production** (migration 046,
+10:22 UTC; advisor 28 → 16, no anon items). Remaining items unchanged (below).
+
+**Discovered 2026-11-02** (`supabase db advisors --linked --type security`): 28
+warnings, 0 errors. Notable: (1) **anon can EXECUTE 8 `SECURITY DEFINER` functions**
+— `create_entry_payment`, `handle_new_user`, `is_banned`, `is_email_verified`,
+`is_pot_admin`, `is_pot_member`, `refresh_gameweek_deadlines`,
+`trigger_refresh_gameweek_deadlines`; `refresh_gameweek_deadlines` writes data, so an
+anonymous caller may be able to trigger a deadline recompute via `/rpc` (not
+probed — doing so would modify production); (2) 7 *invoker* functions without a
+pinned search_path (`set_updated_at`, `recompute_goal_thresholds`,
+`refresh_player_fixture_goals`, `is_app_admin`, `prevent_pot_contract_change`,
+`recompute_pick5_goal_thresholds`, `is_super_admin`) — low risk, they run with the
+caller's rights; (3) leaked-password protection disabled; insufficient MFA options;
+`pg_trgm` in `public`; materialized view exposed to the API (anon already revoked,
+043). Fix: migration revoking anon EXECUTE where not required and pinning search_path;
+enable leaked-password protection in the Auth dashboard (owner). **Status:
+confirmed, open (P2).**
+
+**Update 2026-11-02 (post-release hardening): item (1) fixed in repo — migration 046
+(commit 3e2f8a5), not applied to production.** Full audit of the eight functions
+(purpose, callers, writes, abuse) is in the migration header. `refresh_gameweek_deadlines`
+had no direct caller at all (only its fixtures trigger); anonymous `POST
+/rest/v1/rpc/refresh_gameweek_deadlines` could force full-table rewrites of
+`gameweeks` on demand. 046 revokes EXECUTE from PUBLIC/anon on all eight and from
+authenticated on the four write/trigger functions; service_role keeps all; a guard
+aborts the migration if any grant survives (REVOKE by a non-owner only warns —
+reproduced locally, where two functions are `supabase_admin`-owned; production's
+owner is `postgres`). Tested locally: pgTAP `supabase/tests/046_*.test.sql` 31/31
+(15 fail before 046); HTTP probes; real sign-up; triggers; cron functions; frontend
+sweep. Items (2)–(5) remain open. **Note for publishing:** this repository is public —
+apply 046 before pushing these docs, or push both together.
+
+#### ISSUE-85 — Pick 5 "lost" before kickoff — **FIXED; backend live 2026-11-03, frontend in PR #2**
+**2026-11-03 owner decision (resolves the open question below):** a pick whose player's
+match is postponed shows a distinct **Postponed** status (migration 048 adds the enum
+value; `pickResult.ts`; UI badge), never pending or void; it is not a win and stays
+excluded from completed-gameweek scoring. Cancelled matches still show pending. Deployed
+in compute-scores v4. Move to Resolved once the frontend is live.
+
+Each pick's displayed result now follows its own player's fixture(s): pending before
+kickoff, winning/losing while live (or with a double-gameweek match to come), won/lost
+when every expected match has finished; postponed/cancelled excluded like gameweek
+completion; status from the fixture row, not the clock. Display only — `picks_won`,
+winners and prizes unchanged. **Open owner decision:** what a postponed player's pick
+shows once the gameweek has completed (currently stays `pending`; recommended: void).
+Move to Resolved once deployed and that decision is made.
+
+#### ISSUE-85 (original entry, kept for history) — Pick 5 shows a pick as "lost" before its player's match has started
+**Discovered 2026-11-02** reading `Pick5Engine.calculateScore()` during the ISSUE-83
+work. Once a gameweek's entries are locked, every run scores each pick from goals so
+far, and when **no fixture in the gameweek is live at that moment** a pick below its
+goal threshold gets `result = 'lost'` — including picks whose player hasn't played
+yet: between the deadline and the first kickoff, and between match windows (e.g. a
+Sunday player on Saturday evening). `GameweekPage` renders that via `LivePickCard`
+with a red warning icon. The final result is correct once every fixture has finished
+(settlement re-scores), so this is a misleading interim state, not a wrong payout.
+**Recommendation (needs owner approval — scoring display rule):** derive each pick's
+interim result from its own player's fixture: `pending` before kickoff,
+`winning`/`losing` while that fixture is live, `won`/`lost` once it has finished.
+**Status: confirmed, open (P2).**
+
+#### ISSUE-87 — An abandoned (provider `SUSPENDED`) match is stored as `tbd`
+**Discovered 2026-11-02** reviewing fixture states for ISSUE-85. `fixtureStatus()` in
+`sync-fixtures` and `sync-live-scores` maps football-data.org's `SUSPENDED` to the
+default `tbd` (and `AWARDED` to `cancelled`). ISSUE-85's pick rule handles it safely
+(goals already scored still count; never shown as lost), and gameweek completion would
+wait for it like any unfinished fixture, but the UI can't say "abandoned". Fix: an
+explicit mapping (possibly a new `fixture_status` value — schema change, needs a
+decision). **Status: confirmed, open (P3).**
+
+#### ISSUE-78 — Four `SECURITY DEFINER` functions had no pinned `search_path` — **RESOLVED 2026-11-02 (044 applied to production), see [Resolved issues](#resolved-issues)**
+
+#### ISSUE-78 (original entry, kept for history) — Four `SECURITY DEFINER` functions had no pinned `search_path`
 **Discovered 2026-11-02** via `pg_proc`: `is_pot_member`, `is_pot_admin`,
 `create_entry_payment`, `handle_new_user` run with owner privileges but resolved
 names through the caller's `search_path` (Supabase advisor
@@ -829,6 +984,13 @@ a real regression risk with no safety net. Plan:
 [roadmap.md § P3](./roadmap.md#p3--known-product-gaps-unbuilt-not-broken).
 
 ## Resolved issues
+
+#### ISSUE-78 — `SECURITY DEFINER` search_path (resolved 2026-11-02 09:06 UTC)
+Migration 044 applied to production after a restore-verified backup. Verified from
+production: `migration list` shows 044; a schema dump before/after differs only in
+the four `SET search_path` lines; grants unchanged; anon RLS probes unchanged; the
+security advisor no longer flags the four functions. Remaining advisor items:
+ISSUE-84.
 
 #### ISSUE-77 — Migration `043` collision (resolved 2026-11-02, release preparation)
 The worktree migration was renumbered to `045_prevent_pot_admin_orphaning.sql`

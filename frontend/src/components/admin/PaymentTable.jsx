@@ -4,8 +4,9 @@ import Card from '../ui/Card'
 import Badge from '../ui/Badge'
 import Button from '../ui/Button'
 import Modal from '../ui/Modal'
+import { paymentState, PAYMENT_LABEL } from '../../utils/paymentStatus'
 
-export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onReinstate, loadingUserId = null, reinstatingUserId = null, weekly = true }) {
+export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onReinstate, loadingUserId = null, reinstatingUserId = null, weekly = true, entryFee }) {
   const [pendingReinstate, setPendingReinstate] = useState(null)
 
   function confirmReinstate() {
@@ -21,16 +22,17 @@ export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onRe
       </div>
 
       <div className="divide-y divide-white/6">
-        {rows.map((row) => (
+        {rows.map((row) => {
+          // ISSUE-86 — free (€0) pots: "Free entry", no payment to mark.
+          const state = paymentState({ isPaid: row.is_paid, entryFee }) ?? 'unpaid'
+          return (
           <div key={row.user_id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <div>
               <p className="text-sm text-white">{row.display_name}</p>
               <p className="text-xs text-white/35">@{row.username}</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge status={row.is_paid ? 'paid' : 'unpaid'}>
-                {row.is_paid ? 'Paid' : 'Unpaid'}
-              </Badge>
+              <Badge status={state}>{PAYMENT_LABEL[state]}</Badge>
               {row.canReinstate && onReinstate && (
                 <Button
                   size="sm"
@@ -43,7 +45,9 @@ export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onRe
                   Reinstate entry
                 </Button>
               )}
-              {row.is_paid ? (
+              {state === 'free' ? (
+                <span className="text-xs text-white/45">No payment needed</span>
+              ) : row.is_paid ? (
                 <Button
                   size="sm"
                   variant="danger"
@@ -64,7 +68,8 @@ export default function PaymentTable({ rows = [], onMarkPaid, onMarkUnpaid, onRe
               )}
             </div>
           </div>
-        ))}
+          )
+        })}
       </div>
 
       <Modal open={!!pendingReinstate} onClose={() => setPendingReinstate(null)} title="Reinstate entry" size="sm">

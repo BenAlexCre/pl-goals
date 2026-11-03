@@ -1,0 +1,24 @@
+-- Pick 5 "Postponed" pick status (ISSUE-85 follow-up, owner decision 2026-11-03).
+--
+-- A pick whose player's only fixture(s) in the gameweek are postponed is now
+-- shown as 'postponed' — distinct from 'pending' (not started yet) and from
+-- 'void' (entry voided for non-payment), neither of which is true. Written by
+-- Pick5Engine.calculateScore() via pick5/pickResult.ts.
+--
+-- Scoring is unaffected: winners, standings and prizes use picks_won
+-- (goals >= threshold), and a postponed fixture contributes no goals — the pick
+-- is neither won nor lost, exactly as gameweek completion already excludes
+-- postponed fixtures (business-rules.md § Gameweek lifecycle).
+--
+-- Additive and safe to run on a live database: existing rows and existing values
+-- are untouched. NOTE: Postgres cannot drop an enum value, so this cannot be
+-- rolled back by a simple DROP — rolling back the feature means redeploying the
+-- previous Edge Functions (which never write 'postponed') and, if any rows hold
+-- 'postponed', updating them back to 'pending'. The value itself is harmless if
+-- left unused. 045 is intentionally unused; 047 is reserved for the
+-- pot-admin-a11y-remediation worktree.
+--
+-- pick_result is also used by lms_team_picks / user_entry_picks; neither writes
+-- the new value.
+
+alter type public.pick_result add value if not exists 'postponed';

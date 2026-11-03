@@ -184,3 +184,22 @@ Deno.test('a mixed batch produces a summary that adds up to processed', () => {
   assertEquals(summary, { processed: 4, updated: 2, skipped: 1, failed: 1 })
   assertEquals(summary.updated + summary.skipped + summary.failed, summary.processed)
 })
+
+Deno.test('ISSUE-86: a row for a free (€0) pot is rejected — free entries have no payment to record', () => {
+  const { results, toWrite, summary } = classifyBulkPaymentRows(
+    [{ identifier: 'ben@example.com', pot: 'Premier League Pool', status: 'Paid' }],
+    baseLookups({ freePotIds: new Set(['pot-1']) })
+  )
+  assertEquals(results[0].outcome, 'failed')
+  assertEquals(results[0].reason?.includes('free pot'), true)
+  assertEquals(toWrite, [], 'nothing is written, so the free entry is never recorded as "paid"')
+  assertEquals(summary, { processed: 1, updated: 0, skipped: 0, failed: 1 })
+})
+
+Deno.test('ISSUE-86: lookups without freePotIds behave exactly as before', () => {
+  const { results } = classifyBulkPaymentRows(
+    [{ identifier: 'ben@example.com', pot: 'Premier League Pool', status: 'Paid' }],
+    baseLookups()
+  )
+  assertEquals(results[0].outcome, 'updated')
+})

@@ -1,5 +1,6 @@
 import { CheckCircle2, CreditCard, Lock, XCircle } from 'lucide-react'
 import CountdownTimer from '../../ui/CountdownTimer'
+import { paymentState, PAYMENT_LABEL } from '../../../utils/paymentStatus'
 
 function StatusChip({ icon: Icon, label, tone }) {
   const tones = {
@@ -23,19 +24,21 @@ function StatusChip({ icon: Icon, label, tone }) {
 // follows the brief's own scheme: green only for a genuinely good state,
 // amber for "still time, but not done," red for "needs attention," grey
 // for the immutable locked/settled state.
-export default function EntryStatusBar({ isPaid, hasEntry, entryStatus, deadlineUtc, loading }) {
+export default function EntryStatusBar({ isPaid, entryFee, hasEntry, entryStatus, deadlineUtc, loading }) {
   if (loading) {
     return <div className="h-8 w-full max-w-md animate-pulse rounded-full bg-white/5" />
   }
 
   const isLocked = entryStatus === 'locked' || entryStatus === 'settled'
+  // ISSUE-86 — free (€0) pots read "Free entry", never "Payment due".
+  const payment = paymentState({ isPaid, entryFee }) ?? 'unpaid'
 
   return (
     <div className="flex flex-wrap items-center gap-2">
       <StatusChip
-        icon={isPaid ? CheckCircle2 : CreditCard}
-        label={isPaid ? 'Paid' : 'Payment due'}
-        tone={isPaid ? 'success' : 'danger'}
+        icon={payment === 'unpaid' ? CreditCard : CheckCircle2}
+        label={payment === 'unpaid' ? 'Payment due' : PAYMENT_LABEL[payment]}
+        tone={payment === 'paid' ? 'success' : payment === 'free' ? 'neutral' : 'danger'}
       />
 
       <StatusChip

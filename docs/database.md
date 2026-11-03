@@ -235,14 +235,27 @@ RLS helper functions (all `security definer`, used only inside policy definition
 **`search_path` (migration 044, ISSUE-78):** `is_pot_member`, `is_pot_admin`,
 `create_entry_payment` and `handle_new_user` are pinned to `search_path = ''` (their
 bodies are fully schema-qualified). Any new `security definer` function must declare
-`set search_path = ''` at creation. **044 is in the repo but not yet applied to
-production** (as of 2026-11-02).
+`set search_path = ''` at creation. 044 was **applied to production on 2026-11-02
+09:06 UTC**.
+
+**EXECUTE (migration 046, ISSUE-84 — in repo, not yet in production):** the eight
+`security definer` functions are not executable by PUBLIC/anon. `is_pot_member`,
+`is_pot_admin`, `is_banned`, `is_email_verified`: authenticated + service_role (used
+by `TO authenticated` RLS policies). `refresh_gameweek_deadlines`,
+`trigger_refresh_gameweek_deadlines`, `handle_new_user`, `create_entry_payment`:
+service_role only (trigger functions need no EXECUTE for the firing role). New
+functions inherit Supabase's default grants to anon — revoke explicitly when adding a
+`security definer` function. Tests: `supabase test db` (`supabase/tests/`). Local-DB
+note: those two deadline functions were `supabase_admin`-owned locally (drift); local
+ownership was aligned to `postgres` to match production. Remaining advisor items (anon EXECUTE on `security definer` functions,
+invoker functions without a pinned search_path): ISSUE-84.
 
 **Migration numbering (ISSUE-77, resolved 2026-11-02):** `043` is
 `043_views_security_invoker.sql` (repo and production), `044` is
-`044_pin_security_definer_search_path.sql`, and the pot-admin-orphaning migration is
-**`045_prevent_pot_admin_orphaning.sql`** — renumbered from 043, currently only in the
-uncommitted `pot-admin-a11y-remediation` worktree, not in production. It adds
+`044_pin_security_definer_search_path.sql`, `045` is **intentionally unused**, `046` is
+`046_restrict_security_definer_execute.sql`, and the pot-admin-orphaning migration is
+**`047_prevent_pot_admin_orphaning.sql`** — renumbered 043 → 045 → 047, currently only in
+the uncommitted `pot-admin-a11y-remediation` worktree, not in production. It adds
 `enforce_pot_has_admin()` (`security definer`, `search_path = ''`) with BEFORE
 DELETE / BEFORE UPDATE OF role triggers on `pot_members`, blocking any change that
 would leave an active pot without an admin. Document it in the tables above when it

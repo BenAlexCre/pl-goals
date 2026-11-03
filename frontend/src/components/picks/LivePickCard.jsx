@@ -1,7 +1,7 @@
 import Card from '../ui/Card'
 import Badge from '../ui/Badge'
 import Avatar from '../ui/Avatar'
-import { Trophy, AlertTriangle, Minus, ArrowRightLeft, Armchair, Play } from 'lucide-react'
+import { Trophy, AlertTriangle, Minus, ArrowRightLeft, Armchair, Play, CalendarClock } from 'lucide-react'
 
 const resultIcons = {
   won: Trophy,
@@ -10,6 +10,13 @@ const resultIcons = {
   losing: AlertTriangle,
   pending: Minus,
   void: Minus,
+  postponed: CalendarClock, // the player's match was postponed (not won, not lost)
+}
+
+// Readable labels (the badge previously printed the raw stored value, e.g. "won").
+const resultLabels = {
+  won: 'Won', winning: 'Winning', lost: 'Lost', losing: 'Losing',
+  pending: 'Pending', void: 'Void', postponed: 'Postponed',
 }
 
 const appearanceConfig = {
@@ -85,7 +92,7 @@ export default function LivePickCard({ pick, className = '' }) {
             <p className="text-sm font-medium text-white truncate">
               {pick.player_name}
             </p>
-            <Badge status={status}>{status}</Badge>
+            <Badge status={status}>{resultLabels[status] ?? status}</Badge>
           </div>
 
           <p className="text-xs text-white/35 mt-1">

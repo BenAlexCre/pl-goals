@@ -11,7 +11,7 @@ export function usePots() {
       const { data, error } = await supabase
         .from('pots')
         .select(`
-          id, name, description, status, game_type, created_at, season_id, league_id,
+          id, name, description, status, game_type, created_at, season_id, league_id, entry_fee,
           seasons(name, year_start),
           leagues(name),
           pot_members!inner(user_id, role)

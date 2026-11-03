@@ -7275,3 +7275,99 @@ removed by ISSUE-10/27; the ratchet must be lowered as they are fixed. Revisit
 react-hooks 7 if the React Compiler is ever adopted. CI uses non-secret placeholder
 `VITE_SUPABASE_*` values and never talks to Supabase; the Playwright mobile sweep is
 not yet in CI.
+
+
+### SECURITY DEFINER EXECUTE privileges — decision (2026-11-02, ISSUE-84)
+
+**Decision:** migration 046 removes EXECUTE from PUBLIC and anon on all eight
+`security definer` functions, and from authenticated on the four write/trigger
+functions; service_role keeps all; a DO-block guard aborts the migration unless the
+final privileges are exactly as intended.
+
+**Context:** Supabase's advisor flagged anon-executable `security definer` functions.
+`refresh_gameweek_deadlines()` writes every `gameweeks` row and was callable
+anonymously via `/rpc`, with no legitimate direct caller.
+
+**Reason:** least privilege with evidence: every policy using the read-only helpers is
+`TO authenticated` (verified in production's schema), the frontend calls none of them,
+Edge Functions call `is_banned` with a user token, and trigger functions don't need
+EXECUTE for the firing role. The guard exists because REVOKE by a non-owner only warns
+— reproduced locally.
+
+**Alternatives considered:** revoking from anon only (ineffective — anon inherits
+PUBLIC); dropping SECURITY DEFINER from the helpers (would change RLS evaluation and
+needs per-table review); changing default privileges for all future functions
+(broader platform change — left as a recommendation).
+
+**Consequences:** any future anonymous RPC need must be granted explicitly. New
+`security definer` functions must revoke PUBLIC/anon themselves (Supabase defaults
+grant them). Rollback: re-grant EXECUTE to anon/authenticated/PUBLIC.
+
+### compute-scores selective dispatch — decision (2026-11-02, ISSUE-83)
+
+**Decision:** compute-scores dispatches a gameweek only when at least one engine can
+act on it (deadline passed or unknown, a live/finished fixture, or locked entries);
+`{ "full_scan": true }` keeps the previous dispatch-everything behaviour.
+
+**Context:** ~25 % of cron calls hit pg_net's 5 s timeout; investigation showed it was
+compute-scores on essentially every call (p50 6.3 s), because it ran all three
+engines for ~30 idle future gameweeks every 3 minutes.
+
+**Reason:** fixes the cause (round-trip count) instead of raising the observer's
+timeout. Each skip condition mirrors an engine's own early return, and the rule is
+conservative (null deadlines always scored). The earlier entry-based pre-filter was
+removed because it missed LMS/Predictor's season-scoped entries; this one does not
+depend on entries for those modes.
+
+**Alternatives considered:** raising `timeout_milliseconds` (hides the cost, keeps
+~150 sequential round trips every 3 minutes); parallelising engine calls (risk of
+concurrent season-aggregate recomputes, no reduction in total work); moving the skip
+logic into each engine (more change surface for the same result).
+
+**Consequences:** a future engine whose `calculateScore()` can act on a future
+gameweek without locked entries or active fixtures must extend `selectGameweeks.ts`
+— the equivalence test (`frontend/scripts/qa/compute-scores-equivalence.mjs`) is the
+check. `full_scan` is the escape hatch.
+
+
+### Free pots: financial settlement is derived, not stored — decision (2026-11-02, ISSUE-86)
+
+**Decision:** an entry in a pot with `entry_fee = 0` is treated as financially settled
+by computing it from the pot's fee at the point of use (`paymentEligibility.ts` in the
+engines and reinstatement; `utils/paymentStatus.js` in the UI). No `entry_payments`
+row is written or changed for free entries; the UI shows a third state, "Free entry".
+
+**Context:** settlement voided every entry without `is_paid = true`, and free LMS/
+Predictor pots could not record a payment at all. The owner specified the rule and
+required free entries to stay distinguishable from paid ones and history to stay intact.
+
+**Reason:** `pots.entry_fee` is immutable once a pot has entries
+(`prevent_pot_contract_change`), so deriving "free" is exact and needs no backfill;
+storing synthetic `is_paid` rows would make free indistinguishable from paid and
+rewrite payment history.
+
+**Alternatives considered:** auto-marking free entries paid (rejected — loses the
+distinction, writes fake records); a new `payment_status` column/enum (schema change
+and backfill for a fact already derivable); exempting free pots only in the UI (would
+leave settlement voiding them).
+
+**Consequences:** every payment reader must use the shared helpers; a future change
+allowing fee edits after entries would invalidate the derivation and must revisit this.
+
+### Pick 5 displayed result from the player's own fixture — decision (2026-11-02, ISSUE-85)
+
+**Decision:** `pick5_picks.result` is derived per pick from the player's team's fixtures
+in the gameweek (`pick5/pickResult.ts`), excluding postponed/cancelled ones exactly as
+gameweek completion does; fixture status, not the clock, decides "started".
+
+**Context:** a gameweek-wide "anything live?" check showed picks as "lost" before their
+player had played.
+
+**Reason:** owner-requested; `result` is display-only (the engine scores with
+`picks_won`), so the change cannot alter winners or prizes.
+
+**Alternatives considered:** deriving status client-side from fixtures (two sources of
+truth); using kickoff time (wrong for delayed kickoffs).
+
+**Consequences:** two extra batched reads per scored gameweek; the final display of a
+postponed player's pick is an open owner decision.

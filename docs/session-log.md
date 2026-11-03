@@ -13,6 +13,126 @@ from here.
 
 ---
 
+## 2026-11-03 (88) — Release 2 deployment (backend) + Postponed status
+
+Owner decisions recorded in [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03).
+
+**Code:** distinct Postponed pick status (migration 048, `pickResult.ts`, badge and
+readable labels on `LivePickCard`, `summariseEntry` count; Deno + pgTAP + frontend
+tests); `.gitignore` for `.agents/`, `.codex/`, `AGENTS.md` (files kept locally).
+
+**Deployment:** fresh backup restore-verified; 046 applied alone from a clean checkout
+of `2340c34` (dry run listed only 046) and its permissions verified; 048 applied; seven
+Edge Functions deployed; cron + scoring verified (ISSUE-83 fixed in production). PR #2
+opened; merge to `main` awaits owner approval. Signed-in production testing left to the
+owner (the assistant doesn't create production accounts). 40/40/20 not implemented.
+
+---
+
+## 2026-11-02 (87) — Release 2: payments & competition rules (not deployed)
+
+Branch `release-2/payments-rules` on top of `hardening/post-release`.
+
+**Housekeeping:** `.agents/`, `.codex/`, `AGENTS.md` identified as an OpenAI Codex
+import of this repo's Claude Code setup (AGENTS.md = CLAUDE.md with two words changed;
+.codex/config.toml mirrors .mcp.json; skills = migrated .claude/commands), created
+17:59; not required, no secrets; left untracked. Worktree migration renumbered 045 →
+047; local history row updated; 001→047 replays clean.
+
+**ISSUE-86:** payment eligibility derived from the pot's immutable fee; engines,
+reinstatement, CSV import, five UI surfaces, business rule. Five existing Pick 5 tests
+had been asserting free-pot voiding via the fake's default €0 fee — moved to a pot with
+a fee; LMS/Predictor fixtures had no fee at all (so never exercised the free path) —
+made explicit. Mutation check: 7 free-pot tests fail with the rule disabled.
+
+**Six void entries (read-only):** all three owners are disposable-inbox test accounts
+in single-member QA pots; every production pot belongs to test accounts — no real
+player affected.
+
+**ISSUE-85:** `pick5/pickResult.ts` + integration; display only (picks_won unchanged);
+realtime already refreshes open pages. Found ISSUE-87 (SUSPENDED → tbd).
+
+**40/40/20:** spec v2 with [RULE]/[OWNER DECISION] labels; GW19 deadline from
+production (Fri 1 Jan 2027 19:45 UTC); 7 acceptance tests skipped until approval.
+
+**Testing:** frontend 33/33, Deno 391 (+7 ignored), deno check 16/16, pgTAP 31/31,
+replay 001→047, sweep 37 runs clean, rendered free-pot screens checked. A live
+settlement check initially proved nothing (0 dispatches) — rebuilt so it fails unless
+settlement really runs; then passed. Its first restore failed on a generated column
+(transaction rolled back, snapshot kept, restored manually, verified identical).
+
+---
+
+## 2026-11-02 (86) — Post-release hardening: ISSUE-84, ISSUE-83, testing plan, 40/40/20 proposal
+
+Branch `hardening/post-release` (on top of `docs/post-release-2026-11-02`, which is
+unchanged). No production changes; production read only via `supabase db query` and
+the earlier schema dump.
+
+**ISSUE-84:** audited the eight anon-executable SECURITY DEFINER functions (callers in
+migrations/policies/Edge Functions/frontend; production policy roles all
+`authenticated`). Migration 046 + pgTAP test (31/31; 15 fail before). The guard was
+proven by running 046 against local supabase_admin-owned functions (REVOKE only
+warned; guard aborted). Local ownership aligned to production. HTTP probes, a real
+local sign-up (test user deleted by exact id), trigger paths, all four cron functions,
+and a frontend sweep passed.
+
+**ISSUE-83:** attributed pg_net responses to jobs: compute-scores answered 0 of ~120
+calls in time; p50 6.3 s. Every call still executed; no overlaps; no retries. Cause:
+90 sequential dispatches for mostly idle gameweeks. Fixed with selective dispatch
+(`selectGameweeks.ts`, 8 unit tests) and a local equivalence test built in the
+production shape from a stale state (byte-identical, idempotent; local data restored
+byte-identical). Two test-harness defects were caught and fixed along the way (a
+non-deterministic scenario; a converged state that couldn't reveal a wrong skip).
+`api.md`'s compute-scores entry rewritten (it described the retired loop).
+
+**Found:** ISSUE-85 (Pick 5 interim "lost" before kickoff) and **ISSUE-86 (P1)**: all 12
+production pots are free, 0 payments recorded, 6 entries already void.
+
+**Docs:** production-testing-plan.md (new), proposals/score-predictor-40-40-20.md
+(new), finalisation-status, current-state, project-board, database, decisions (two
+ADRs), api.
+
+---
+
+## 2026-11-02 (85) — Production deployment of the mobile finalisation release
+
+**Owner approvals:** release scope (9 commits, excluding the worktree and 045);
+later the 10th lockfile-only commit and the merge to `main`.
+
+**Backup:** Supabase lists no managed backups (PITR off). Full roles/schema/data
+dumps taken to `C:\Users\benal\pl-goals-backups\2026-11-02-pre-044\` (manifest +
+SHA-256). Restore-tested into a disposable Supabase stack pinned to production
+versions: strict single-transaction restore exit 0, public 31/31 tables and
+46,765/46,765 rows, auth.users and identities 13/13. Several false starts were caught
+by checking numbers rather than exit codes (Git Bash rewrote container paths so psql
+never ran; an inline filter dropped 47k rows — rewritten as a script that refuses to
+drop any row it isn't told to).
+
+**Linked project** verified four ways. **Migration 044** applied 09:06:35 UTC;
+verified by migration list, schema dump diff (only the 4 SET lines), grants, anon
+probes. **PR #1** opened via the owner's signed-in Chrome; CI's first run failed on
+`npm ci` (npm 10 vs npm 11 lockfile difference, pre-existing on main) → fixed by
+`a7b7804` (additive lockfile entries; bundle byte-identical). All checks green;
+preview verified (identical bundle hashes; uses production Supabase).
+
+**Deploy:** owner approved; fast-forward merge `89735dc..a7b7804`, pushed 09:45:31;
+Vercel production deployment ready 09:46; both domains serve the new bundle.
+
+**Smoke tests:** live signed-out sweep 68 runs clean; auth guards; live CDN 4G first
+paint 3.5 s → 0.57 s; 21 core tables identical to the backup; cron healthy
+(compute-scores 480/480 in 24 h); security advisor 0 errors. New: ISSUE-83 (pg_net
+5 s timeouts, ~25 %, pre-existing), ISSUE-84 (advisor warnings incl. anon EXECUTE on
+SECURITY DEFINER functions). Signed-in flows pending a test-account decision.
+
+**Score Predictor:** proposed two-half payout structure documented as a pending
+decision (finalisation-status.md § 10a); no logic changed.
+
+**Docs** committed on `docs/post-release-2026-11-02` (not pushed to `main`, since
+any push to `main` redeploys production).
+
+---
+
 ## 2026-11-02 (84) — Release preparation: ISSUE-77 resolved, 044 reviewed, ESLint + CI, runbook
 
 **Inventory:** RC `fix/mobile-finalisation-audit` is a fast-forward of `main`

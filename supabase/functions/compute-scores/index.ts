@@ -3,6 +3,7 @@ import { corsHeaders } from '../_shared/cors.ts'
 import { isAuthorizedAdminOrCron } from '../_shared/adminOrCronAuth.ts'
 import { isRegistered, resolveEngine } from '../_shared/game-engine/dispatcher.ts'
 import type { GameType } from '../_shared/game-engine/types.ts'
+import { selectGameweeksToScore, type GameweekCandidate } from './selectGameweeks.ts'
 // Side-effecting imports — register each mode with the dispatcher (GE-7/
 // GE-18). Same pattern as compute-deadlines/index.ts. Milestone 6 Slice 4:
 // added the predictor import below — same reasoning as
@@ -87,12 +88,42 @@ Deno.serve(async (req) => {
     const { error: refreshError } = await sb.rpc('refresh_player_fixture_goals')
     if (refreshError) throw new Error(`Failed to refresh player_fixture_goals: ${refreshError.message}`)
 
-    const { data: gameweeks } = await sb
+    const { data: gameweeks, error: gameweeksError } = await sb
       .from('gameweeks')
-      .select('id')
+      .select('id, deadline_utc')
       .in('status', ['upcoming', 'live'])
+    if (gameweeksError) throw new Error(`Failed to load gameweeks: ${gameweeksError.message}`)
 
-    for (const gw of gameweeks ?? []) {
+    // ISSUE-83 — dispatch only gameweeks where at least one engine can act
+    // (see selectGameweeks.ts for the per-engine no-op proof). Three batched
+    // reads replace ~150 sequential round trips; `full_scan: true` in the
+    // request body restores the old dispatch-everything behaviour (operational
+    // escape hatch, and how the equivalence test compares the two).
+    const body = await req.json().catch(() => ({}))
+    const fullScan = body?.full_scan === true
+    const gameweekIds = (gameweeks ?? []).map((g: { id: number }) => g.id)
+    let toScore = (gameweeks ?? []) as GameweekCandidate[]
+    let gameweeksSkipped = 0
+    if (!fullScan && gameweekIds.length > 0) {
+      const [{ data: activeFixtures, error: fixturesError }, { data: lockedEntries, error: lockedError }] = await Promise.all([
+        sb.from('fixtures').select('gameweek_id').in('gameweek_id', gameweekIds).in('status', ['live', 'finished']),
+        // Pick 5 entries are per-gameweek; LMS/Predictor entries have a null
+        // gameweek_id and never match here — they are covered by the deadline
+        // and active-fixture rules instead (the bug the header comment
+        // describes is why this must not be the only signal).
+        sb.from('game_entries').select('gameweek_id').in('gameweek_id', gameweekIds).eq('status', 'locked'),
+      ])
+      if (fixturesError) throw new Error(`Failed to check active fixtures: ${fixturesError.message}`)
+      if (lockedError) throw new Error(`Failed to check locked entries: ${lockedError.message}`)
+      const selection = selectGameweeksToScore(toScore, {
+        gameweeksWithActiveFixtures: new Set((activeFixtures ?? []).map((f: { gameweek_id: number }) => f.gameweek_id)),
+        gameweeksWithLockedEntries: new Set((lockedEntries ?? []).map((e: { gameweek_id: number }) => e.gameweek_id)),
+      }, ctx.now())
+      toScore = selection.toScore
+      gameweeksSkipped = selection.skipped
+    }
+
+    for (const gw of toScore) {
       // Game Engine dispatch (GE-7/GE-8.3): call every registered mode's
       // calculateScore() unconditionally — see the header comment for why
       // this replaced a per-gameweek "discover which game types have
@@ -110,7 +141,7 @@ Deno.serve(async (req) => {
       records_processed: gameEngineDispatches,
     }).eq('id', run.id)
 
-    return new Response(JSON.stringify({ success: true, gameEngineDispatches }), {
+    return new Response(JSON.stringify({ success: true, gameEngineDispatches, gameweeksConsidered: gameweekIds.length, gameweeksSkipped, fullScan }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   } catch (error) {

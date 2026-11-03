@@ -92,9 +92,22 @@ prolific scorer 5 times is a legitimate (if concentrated) strategy, not a way to
 independent easy wins.
 
 An entry's overall score for the gameweek is `picks_won` — the count of its 5 picks
-that individually met their threshold. While the gameweek has a live fixture in
-progress, picks display as `winning`/`losing` rather than the final `won`/`lost`, but
-the underlying win/loss logic is identical either way.
+that individually met their threshold.
+
+**Displayed pick status follows the picked player's own match (ISSUE-85, owner-requested
+2026-11-02; ships with Release 2).** `pending` until that player's match kicks off;
+`winning`/`losing` while it is live (or, in a double gameweek, while one of the team's
+matches is still to come); `won`/`lost` once every one of the team's non-postponed,
+non-cancelled matches in the gameweek has finished. Status comes from the fixture's
+reported state, not the clock, so a delayed kickoff stays `pending`. A player whose
+only match(es) in the gameweek are **postponed** shows **`postponed`** (owner decision
+2026-11-03, migration 048) — not won, not lost, not void, and excluded from the
+gameweek's scoring exactly as postponed fixtures are excluded from gameweek completion.
+A **cancelled** match, or missing fixture data, shows `pending` (or `won` if goals were
+recorded). This is display only: `picks_won` — and so ranking,
+winners and prizes — is computed exactly as before. *(Previously: the whole gameweek
+was treated as live or not, so a pick could read `lost` before its player had played.)*
+
 
 Implementation: the `recompute_goal_thresholds()` trigger derives the threshold
 automatically from how many picks share a `(entry_id, player_id)` pair (see
@@ -194,6 +207,16 @@ as paid or unpaid in one of two ways:
   admin has explicitly confirmed; keep a full audit trail of what was
   imported, by whom, and when; and never partially apply an import without explicit
   confirmation — a batch either goes in as reviewed, or nothing does.
+
+**Free pots (ISSUE-86, owner-specified 2026-11-02; ships with Release 2).** An entry
+in a pot whose entry fee is €0 is **financially settled** without any payment record:
+it is never voided for non-payment, it can be reinstated without one, and it is shown
+as **"Free entry"** — never as "Paid" and never as "Unpaid". No `entry_payments` row is
+created or changed for it, so free entries stay distinguishable from genuinely paid
+ones, and there is nothing to record or import for a free pot (the payment forms and
+CSV import refuse it). Entries already voided are not restored automatically; that
+needs an explicit admin reinstatement. The rule depends on the pot's fee, which cannot
+change once the pot has entries. In pots with a fee, everything below applies unchanged.
 
 **An entry that is not verified as paid by the time settlement runs is automatically
 voided** — all of its picks are marked `void` and it's excluded from the leaderboard

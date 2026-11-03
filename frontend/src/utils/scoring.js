@@ -17,7 +17,9 @@ export function summariseEntry(picks = []) {
   const lost    = picks.filter((p) => ['lost', 'losing' ].includes(p.result)).length
   const pending = picks.filter((p) => p.result === 'pending').length
   const voided  = picks.filter((p) => p.result === 'void').length
-  return { won, lost, pending, voided, total: picks.length }
+  // Postponed picks (migration 048) are neither won nor lost, nor still pending.
+  const postponed = picks.filter((p) => p.result === 'postponed').length
+  return { won, lost, pending, voided, postponed, total: picks.length }
 }
 
 export function strikeRate(won, total) {
