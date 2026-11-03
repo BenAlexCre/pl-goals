@@ -4,6 +4,8 @@ const configs = {
   lost:     'bg-red-goal/15 text-red-goal border-red-goal/30',
   losing:   'bg-red-goal/15 text-red-goal border-red-goal/30',
   pending:  'bg-white/8 text-white/50 border-white/10',
+  // Pick 5: the player's match was postponed (migration 048) — not won, not lost.
+  postponed: 'bg-amber/10 text-amber border-amber/25',
   void:     'bg-white/5 text-white/25 border-white/8',
   locked:   'bg-amber/15 text-amber border-amber/30',
   settled:  'bg-accent/10 text-accent/70 border-accent/20',
@@ -30,7 +32,7 @@ const configs = {
 
 const defaultLabels = {
   won: '✓ Won', winning: '⚡ Winning', lost: '✗ Lost', losing: '↓ Losing',
-  pending: '· Pending', void: '∅ Void', locked: '🔒 Locked', settled: '✓ Settled',
+  pending: '· Pending', postponed: 'Postponed', void: '∅ Void', locked: '🔒 Locked', settled: '✓ Settled',
   paid: '✓ Paid', unpaid: '✗ Unpaid', free: 'Free entry', live: '● Live', upcoming: 'Upcoming',
   completed: 'Final', admin: 'Admin', member: 'Member',
   alive: '● Alive', eliminated: '✗ Eliminated',

@@ -100,12 +100,14 @@ that individually met their threshold.
 matches is still to come); `won`/`lost` once every one of the team's non-postponed,
 non-cancelled matches in the gameweek has finished. Status comes from the fixture's
 reported state, not the clock, so a delayed kickoff stays `pending`. A player whose
-match is postponed or cancelled, or whose fixture data is missing, shows `pending`
-(or `won` if goals were recorded). This is display only: `picks_won` — and so ranking,
+only match(es) in the gameweek are **postponed** shows **`postponed`** (owner decision
+2026-11-03, migration 048) — not won, not lost, not void, and excluded from the
+gameweek's scoring exactly as postponed fixtures are excluded from gameweek completion.
+A **cancelled** match, or missing fixture data, shows `pending` (or `won` if goals were
+recorded). This is display only: `picks_won` — and so ranking,
 winners and prizes — is computed exactly as before. *(Previously: the whole gameweek
 was treated as live or not, so a pick could read `lost` before its player had played.)*
-**Open decision:** what a postponed player's pick shows once the gameweek has completed
-(it currently stays `pending`; see finalisation-status.md).
+
 
 Implementation: the `recompute_goal_thresholds()` trigger derives the threshold
 automatically from how many picks share a `(entry_id, player_id)` pair (see

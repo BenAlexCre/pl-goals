@@ -15,7 +15,7 @@
 // delayed kickoff stays 'pending' until the provider reports it live.
 
 export type FixtureStatus = 'scheduled' | 'tbd' | 'live' | 'finished' | 'postponed' | 'cancelled'
-export type PickResult = 'pending' | 'winning' | 'losing' | 'won' | 'lost'
+export type PickResult = 'pending' | 'winning' | 'losing' | 'won' | 'lost' | 'postponed'
 
 export function derivePickResult(input: {
   goals: number
@@ -26,10 +26,19 @@ export function derivePickResult(input: {
   const met = input.goals >= input.threshold
   const expected = input.teamFixtureStatuses.filter((s) => s !== 'postponed' && s !== 'cancelled')
 
-  // No expected match this gameweek (all postponed/cancelled), or no fixture
-  // data for the player's team: nothing has been played, so it cannot be lost.
-  // Goals can only exist if a match was played, so meeting the threshold is a win.
-  if (expected.length === 0) return met ? 'won' : 'pending'
+  // No expected match this gameweek: nothing has been played, so it cannot be
+  // lost. Goals can only exist if a match was played, so meeting the threshold
+  // is a win.
+  if (expected.length === 0) {
+    if (met) return 'won'
+    // Owner decision 2026-11-03 (migration 048): a postponed match gets its own
+    // status — neither 'pending' (it isn't coming this gameweek) nor 'void'
+    // (the entry is valid). picks_won is unaffected: no goals, so not a win.
+    if (input.teamFixtureStatuses.includes('postponed')) return 'postponed'
+    // Cancelled (or awarded) matches, and missing fixture data, stay 'pending' —
+    // a cancelled match is not "postponed"; see finalisation-status.md.
+    return 'pending'
+  }
 
   if (expected.every((s) => s === 'finished')) return met ? 'won' : 'lost'
 

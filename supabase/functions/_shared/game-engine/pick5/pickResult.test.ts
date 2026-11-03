@@ -28,9 +28,20 @@ Deno.test('ISSUE-85: threshold above one goal', () => {
   assertEquals(r(1, ['live'], 2), 'losing')
 })
 
-Deno.test('ISSUE-85: postponed or cancelled match -> pending (not played this gameweek)', () => {
-  assertEquals(r(0, ['postponed']), 'pending')
+Deno.test('postponed match -> its own "postponed" status (owner decision 2026-11-03), never lost or void', () => {
+  assertEquals(r(0, ['postponed']), 'postponed')
+})
+
+Deno.test('cancelled match -> pending (not labelled postponed)', () => {
   assertEquals(r(0, ['cancelled']), 'pending')
+})
+
+Deno.test('double gameweek with both matches postponed -> postponed', () => {
+  assertEquals(r(0, ['postponed', 'postponed']), 'postponed')
+})
+
+Deno.test('a postponed match plus a cancelled one -> postponed (one of them is still to be played)', () => {
+  assertEquals(r(0, ['postponed', 'cancelled']), 'postponed')
 })
 
 Deno.test('ISSUE-85: rescheduled into the same gameweek -> follows the new fixture status', () => {

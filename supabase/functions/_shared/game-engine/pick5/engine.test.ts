@@ -2363,11 +2363,11 @@ Deno.test('ISSUE-85: one live match does not make an unplayed player "losing"', 
   assertEquals(state.picks.map((p) => p.result), ['losing', 'pending'])
 })
 
-Deno.test('ISSUE-85: a postponed match leaves the pick pending; picks_won unaffected', async () => {
+Deno.test('ISSUE-85: a postponed match shows the pick as "postponed" and it is excluded from picks_won', async () => {
   const state = issue85State([{ home_team_id: 1, away_team_id: 2, status: 'postponed' }], { 100: 1 }, {}, [100])
   await new Pick5Engine().calculateScore(fakeCalculateScoreContext(state), 4)
-  assertEquals(state.picks[0].result, 'pending')
-  assertEquals(state.entryPick5Rows[0].picks_won, 0)
+  assertEquals(state.picks[0].result, 'postponed')
+  assertEquals(state.entryPick5Rows[0].picks_won, 0, 'a postponed pick is not a win (excluded from scoring)')
 })
 
 Deno.test('ISSUE-85: a player with no team/fixture data is pending, not lost', async () => {

@@ -57,9 +57,27 @@ try {
       where gameweek_id = (select id from gw);
     with gw as (select gameweek_id id from public.game_entries where status = 'locked' and gameweek_id is not null limit 1)
     update public.gameweeks set status = 'live' where id = (select id from gw);
+    -- Migration 048: postpone ONE picked player's fixture (the gameweek stays
+    -- ready to settle, because postponed fixtures are excluded from completion).
+    update public.fixtures set status = 'postponed' where id = (
+      select f.id from public.pick5_picks pk
+        join public.game_entries e on e.id = pk.game_entry_id and e.status = 'locked'
+        join public.gameweeks g on g.id = e.gameweek_id
+        join public.player_team_history h on h.player_id = pk.player_id and h.is_active and h.season_id = g.season_id
+        join public.fixtures f on f.gameweek_id = g.id and (f.home_team_id = h.team_id or f.away_team_id = h.team_id)
+      order by pk.id limit 1);
     select 1;`)
   const paymentsBefore = freePayments()
   console.log(report('before'))
+  // Score first (settled entries are not re-scored), then check the postponed pick.
+  const firstScores = await call('compute-scores')
+  console.log(`compute-scores (pre-settle) -> HTTP ${firstScores.status}`)
+  const postponedPicks = Number(psql(`select count(*) from public.pick5_picks where result = 'postponed'`))
+  const postponedWon = Number(psql(`select count(*) from public.pick5_picks pk join public.fixtures f on f.status = 'postponed'
+    join public.game_entries e on e.id = pk.game_entry_id join public.gameweeks g on g.id = e.gameweek_id and f.gameweek_id = g.id
+    join public.player_team_history h on h.player_id = pk.player_id and h.is_active and h.season_id = g.season_id and (f.home_team_id = h.team_id or f.away_team_id = h.team_id)
+    where pk.result in ('won','winning')`))
+  console.log(`picks marked "postponed" by the real compute-scores: ${postponedPicks}  (must be > 0)`)
   const settle = await call('settle-gameweek')
   console.log(`settle-gameweek -> HTTP ${settle.status} ${JSON.stringify(settle.body).slice(0, 140)}`)
   const scores = await call('compute-scores')
@@ -84,7 +102,8 @@ try {
   console.log(`entries newly voided in FREE pots: ${freeVoided}  (must be 0)`)
   console.log(`free-pot entry_payments before: ${paymentsBefore}  after: ${paymentsAfter}  (must be identical)`)
   console.log(`Pick 5 picks shown "lost" without a finished fixture: ${prematureLost}  (must be 0)`)
-  process.exitCode = (settle.status === 200 && scores.status === 200 && dispatches > 0 && paidPotVoided > 0 &&
+  console.log(`postponed picks counted as wins: ${postponedWon}  (must be 0)`)
+  process.exitCode = (firstScores.status === 200 && postponedPicks > 0 && postponedWon === 0 && settle.status === 200 && scores.status === 200 && dispatches > 0 && paidPotVoided > 0 &&
     freeVoided === 0 && paymentsBefore === paymentsAfter && prematureLost === 0) ? 0 : 1
 } finally {
   let restored = false
