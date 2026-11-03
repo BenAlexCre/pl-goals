@@ -1,6 +1,9 @@
 # Current State
 
-Last reviewed: 2026-11-02, Release 2 prepared (ISSUE-85/86 fixed in repo on
+Last reviewed: 2026-11-03, Release 2 backend deployed (migrations 046 + 048, seven Edge
+Functions; ISSUE-83/84 anon item fixed in production; ISSUE-85/86 live in the backend,
+frontend in PR #2 awaiting merge approval — [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03)).
+Before that: 2026-11-02, Release 2 prepared (ISSUE-85/86 fixed in repo on
 `release-2/payments-rules`, not deployed; ISSUE-87 opened; six void entries investigated —
 all test accounts; see [finalisation-status.md § 0c](./finalisation-status.md#0c-release-2--payments--competition-rules-2026-11-02)).
 Before that: post-release hardening (ISSUE-83/84 fixed in repo — migration
@@ -377,7 +380,13 @@ now explicitly expected, not an open question.
 
 ### P1 — features that are half-built or internally inconsistent
 
-#### ISSUE-86 — Free (€0) pots void entries — **FIXED IN REPO (Release 2, `3f9777e`), pending deploy**
+#### ISSUE-86 — Free (€0) pots void entries — **FIXED; backend live 2026-11-03, frontend in PR #2**
+**2026-11-03:** settlement/reinstatement/CSV rule deployed with the seven Edge Functions
+(free-pot entries are no longer voided in production). The "Free entry" UI ships with
+PR #2. Owner decision: the six void test entries stay untouched; their test accounts
+and pots are removed by exact id after signed-in testing. Move to Resolved once the
+frontend is live.
+
 Owner-specified rule implemented: entries in €0 pots are financially settled without a
 payment record (derived from the pot's immutable fee, never stored), shown as "Free
 entry", never voided for non-payment, reinstatable without a payment; CSV import refuses
@@ -610,6 +619,10 @@ deliberate design choice, not an open question.
 ### P2 — cleanup and consolidation (tech debt, not incorrect behavior)
 
 #### ISSUE-83 — ~25 % of cron → Edge Function calls hit pg_net's 5-second timeout
+**2026-11-03: fixed in production** — compute-scores v4 (selective dispatch) deployed;
+first runs avg 0.28 s / max 0.39 s (was 6.56 s / 8.32 s); 15/15 pg_net calls 200, 0
+timeouts. Move to Resolved after a day of clean `net._http_response` history.
+
 **Discovered 2026-11-02** in the post-deploy smoke test (read-only queries on
 production `net._http_response`). Last 24 h: 371 × HTTP 200, 128 × `status_code`
 null with "Timeout of 5000 ms reached"; ~35 % of those stall in DNS resolution for
@@ -642,6 +655,9 @@ optional observability work. **Status: fixed in repo, pending deploy; verify in
 production with the § 0 queries in finalisation-status.md.**
 
 #### ISSUE-84 — Supabase security advisor warnings (post-044)
+**2026-11-03:** the anon-EXECUTE item is **fixed in production** (migration 046,
+10:22 UTC; advisor 28 → 16, no anon items). Remaining items unchanged (below).
+
 **Discovered 2026-11-02** (`supabase db advisors --linked --type security`): 28
 warnings, 0 errors. Notable: (1) **anon can EXECUTE 8 `SECURITY DEFINER` functions**
 — `create_entry_payment`, `handle_new_user`, `is_banned`, `is_email_verified`,
@@ -672,7 +688,13 @@ owner is `postgres`). Tested locally: pgTAP `supabase/tests/046_*.test.sql` 31/3
 sweep. Items (2)–(5) remain open. **Note for publishing:** this repository is public —
 apply 046 before pushing these docs, or push both together.
 
-#### ISSUE-85 — Pick 5 "lost" before kickoff — **FIXED IN REPO (Release 2, `f4480f5`), pending deploy**
+#### ISSUE-85 — Pick 5 "lost" before kickoff — **FIXED; backend live 2026-11-03, frontend in PR #2**
+**2026-11-03 owner decision (resolves the open question below):** a pick whose player's
+match is postponed shows a distinct **Postponed** status (migration 048 adds the enum
+value; `pickResult.ts`; UI badge), never pending or void; it is not a win and stays
+excluded from completed-gameweek scoring. Cancelled matches still show pending. Deployed
+in compute-scores v4. Move to Resolved once the frontend is live.
+
 Each pick's displayed result now follows its own player's fixture(s): pending before
 kickoff, winning/losing while live (or with a double-gameweek match to come), won/lost
 when every expected match has finished; postponed/cancelled excluded like gameweek

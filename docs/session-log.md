@@ -13,6 +13,22 @@ from here.
 
 ---
 
+## 2026-11-03 (88) — Release 2 deployment (backend) + Postponed status
+
+Owner decisions recorded in [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03).
+
+**Code:** distinct Postponed pick status (migration 048, `pickResult.ts`, badge and
+readable labels on `LivePickCard`, `summariseEntry` count; Deno + pgTAP + frontend
+tests); `.gitignore` for `.agents/`, `.codex/`, `AGENTS.md` (files kept locally).
+
+**Deployment:** fresh backup restore-verified; 046 applied alone from a clean checkout
+of `2340c34` (dry run listed only 046) and its permissions verified; 048 applied; seven
+Edge Functions deployed; cron + scoring verified (ISSUE-83 fixed in production). PR #2
+opened; merge to `main` awaits owner approval. Signed-in production testing left to the
+owner (the assistant doesn't create production accounts). 40/40/20 not implemented.
+
+---
+
 ## 2026-11-02 (87) — Release 2: payments & competition rules (not deployed)
 
 Branch `release-2/payments-rules` on top of `hardening/post-release`.

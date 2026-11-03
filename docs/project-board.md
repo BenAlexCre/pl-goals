@@ -1,6 +1,6 @@
 # Project Board
 
-Last reviewed: 2026-11-02, Release 2 prepared — see [finalisation-status.md § 0c](./finalisation-status.md#0c-release-2--payments--competition-rules-2026-11-02).
+Last reviewed: 2026-11-03, Release 2 backend deployed; frontend PR #2 awaiting merge approval — see [finalisation-status.md § 0d](./finalisation-status.md#0d-release-2-deployment-record-2026-11-03).
 
 This is the **active work tracker** — a Kanban view of what's queued, in progress,
 blocked, or done. It's derived from, and must stay consistent with,
@@ -32,7 +32,6 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Backlog
 
-- **ISSUE-85 follow-up** — final display of a postponed player's pick after gameweek completion (owner decision; recommended void).
 - **ISSUE-87** (P3) — map provider `SUSPENDED` (abandoned) explicitly instead of `tbd`.
 - **Optional: raise pg_net timeout for `sync-fixtures-daily`** (42 s daily run) — observability only, follow-up to `ISSUE-83`.
 - **Security advisor follow-ups** — `ISSUE-84` (P2) remaining items: pin search_path on 7 invoker functions, enable leaked-password protection (owner, dashboard), `pg_trgm` schema. The anon-EXECUTE item is fixed in repo (046).
@@ -73,11 +72,10 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Blocked
 
-- **Deploy Release 2** (`release-2/payments-rules`: ISSUE-86, ISSUE-85, plus ISSUE-83/84 and migration 046) — implemented and tested; blocked on owner approval. Exact steps: finalisation-status.md § 0c.
-- **Six void test entries** — investigated (all test accounts); owner to choose leave / delete test data.
-- **Apply migration 046 to production + deploy the compute-scores change** (`ISSUE-84`, `ISSUE-83`) — implemented and tested locally on `hardening/post-release`; blocked on owner approval.
+- **Merge PR #2 (Release 2 frontend)** — backend already live; blocked on the owner's explicit merge approval after reviewing CI + preview. finalisation-status.md § 0d.
+- **Clean up the six void test entries' accounts and pots** — owner decision 2026-11-03: leave untouched until signed-in testing is done, then delete by exact id.
 - **Score Predictor 40/40/20 rules** — proposal written ([docs/proposals/score-predictor-40-40-20.md](./proposals/score-predictor-40-40-20.md)); 8 owner decisions listed; no logic changed.
-- **Signed-in production testing** — plan ready ([production-testing-plan.md](./production-testing-plan.md)); blocked on approval to create the test accounts.
+- **Signed-in production testing** — approved 2026-11-03 (labelled test accounts, isolated €0 `[QA]` pots); owner-run, since the assistant does not create accounts or enter passwords in production. Plan: [production-testing-plan.md](./production-testing-plan.md).
 - **Finish the `pot-admin-a11y-remediation` worktree and ship migration 045** — `ISSUE-77` resolved (renumbered to 045, uncommitted); blocked on the owner finishing that work. Original card: **`ISSUE-77` — migration version `043` collision (main vs uncommitted worktree)** (P1) → [current-state.md](./current-state.md#issue-77--migration-version-043-collision-between-main-and-an-uncommitted-worktree). Blocked on: the owner's decision about the in-progress `pot-admin-a11y-remediation` worktree — its `043_prevent_pot_admin_orphaning.sql` must be renumbered (now `045`) before merging.
 - **Signed-in production smoke tests** — blocked on the owner choosing a test-account approach (owner-supplied account, or a named test account created in production). Checklist: [finalisation-status.md § 9](./finalisation-status.md#9-post-deployment-verification-checklist).
 - **Product decision: Score Predictor `two_halves` payout (once vs twice)** — default mode for every Predictor pot; must be decided before gameweek 19. Proposed structure (options A/B/C, recommendation B 40/40/20): [finalisation-status.md § 10a](./finalisation-status.md#10a-pending-decision--proposed-score-predictor-two-half-payout-structure). Payout logic unchanged until decided.
@@ -93,6 +91,7 @@ See also: [roadmap.md](./roadmap.md) (why things are prioritized this way),
 
 ## Done
 
+- **Release 2 backend deployed** — 2026-11-03. Restore-verified backup; migration 046 (alone, then verified) and 048 (Postponed status); seven Edge Functions; cron and scoring verified (ISSUE-83 fixed in production). `.gitignore` for local Codex files. PR #2 opened.
 - **Release 2 prepared (not deployed)** — 2026-11-02. ISSUE-86 free pots (engines, reinstatement, CSV, UI, business rule), ISSUE-85 per-fixture pick status, worktree migration renumbered 045→047, 40/40/20 specification v2 with skipped acceptance tests, live local settlement check; six void entries investigated (test accounts only).
 - **Post-release hardening (code + tests, not deployed)** — 2026-11-02. Migration 046 (`ISSUE-84` anon EXECUTE) with pgTAP tests; compute-scores selective dispatch (`ISSUE-83` root cause) with unit + equivalence tests; production testing plan; 40/40/20 proposal; `ISSUE-85`/`ISSUE-86` found.
 - **Production deployment of the mobile finalisation release** — 2026-11-02. Backup taken and restore-verified; migration 044 applied (09:06 UTC, `ISSUE-78` resolved); PR #1 merged (fast-forward to `a7b7804`) and deployed (09:46 UTC); signed-out, performance, data-preservation, cron and advisor smoke tests passed. Live 4G first paint 3.5 s → 0.57 s.

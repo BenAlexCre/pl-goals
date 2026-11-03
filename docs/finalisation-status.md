@@ -1,6 +1,6 @@
 # PL-GOALS — FINALISATION STATUS & MASTER TODO
 
-Last updated: **2026-11-02, Release 2 prepared (§0c)** — previously: **2026-11-02, post-deployment** (sessions 83–85 in
+Last updated: **2026-11-03, Release 2 backend deployed; frontend PR #2 awaiting merge approval (§0d)** — previously: **2026-11-02, Release 2 prepared (§0c)**; **2026-11-02, post-deployment** (sessions 83–85 in
 [session-log.md](./session-log.md)). **Status: DEPLOYED to production** —
 migration 044 applied 09:06 UTC, frontend live 09:46 UTC (`main` = `a7b7804`).
 Signed-out and database-side smoke tests pass; signed-in smoke tests await an owner
@@ -112,11 +112,50 @@ GW19) and ISSUE-85, all behind the existing engine tests plus new ones, then run
 signed-in production test plan across one real gameweek. Feature work should wait
 until those rules are settled, because real players' entries are affected today.
 
+## 0d. Release 2 deployment record (2026-11-03)
+
+### Owner decisions (2026-11-03)
+
+| # | Decision | Done |
+|---|---|---|
+| 1 | Release 2 approved for production, subject to backup, migration and deployment verification | Backend live (below); frontend in PR #2, **merge awaits explicit owner approval** |
+| 2 | The six void test entries stay untouched; the disposable test accounts and pots are removed (by exact id) **after** signed-in testing | Untouched |
+| 3 | Postponed picks get a distinct **Postponed** status (not pending, not void); still excluded from completed-gameweek scoring | Migration 048 + `pickResult.ts` + UI badge; business-rules.md |
+| 4 | `.agents/`, `.codex/`, `AGENTS.md` ignored, kept locally, not committed | `.gitignore` (`edfe0b9`) |
+| 5 | Clearly labelled production test accounts and isolated `[QA]` test pots approved; no real financial transactions; no changes to existing competitions | ⛔ owner-run — the assistant does not create accounts or enter passwords in production; see [production-testing-plan.md](./production-testing-plan.md) |
+| — | 40/40/20 payout logic: **not implemented**; the 8 decisions are to be finalised separately | No payout code changed |
+
+### Deployment steps
+
+| Step | When (UTC) | Result | Evidence |
+|---|---|---|---|
+| Production backup | 10:21 | ✅ verified | Full dump to `C:\Users\benal\pl-goals-backups\2026-11-03-pre-046\` (private, outside the repo). SHA-256: data `c1f138f3…16d2`, roles `168a95a9…2308`, schema `cc60c830…4d38`. Public 31 tables / 47,436 rows; 31/31 match live stats. Restore-tested into a disposable stack (Postgres 17.6.1.155, Auth v2.195.0), single transaction, ON_ERROR_STOP: **exit 0; 31/31 tables, 47,436/47,436 rows; auth.users 13/13; identities 13/13.** Stack torn down. |
+| Migration 046 (alone) | 10:22:01 | ✅ applied | Pushed from a clean checkout at `2340c34`, so the dry run listed **only 046**. |
+| 046 permission checks | 10:22 | ✅ | Before: all 8 functions executable by anon + PUBLIC. After: privilege matrix 8/8 as intended. Anon `rpc/refresh_gameweek_deadlines` → 401 (42501); anon `is_pot_member` → 401; anon table reads 200 with 0 rows; auth health 200; site 200. Security advisor **28 → 16**, every anon item gone (remaining: intentional signed-in helpers + `redeem_invite`). |
+| Migration 048 | 10:22:51 | ✅ applied | `pick_result` = pending, winning, losing, won, lost, void, **postponed**. `migration list`: 046, 048 remote. |
+| 7 Edge Functions | 10:23:17–10:23:32 | ✅ all ACTIVE | settle-gameweek v4, compute-scores v4, compute-deadlines v3, admin-actions v3, submit-pick5-picks v3, submit-lms-pick v3, submit-predictor-picks v3 — all from `b89b7b1`, deployed between settle's :00/:30 runs. |
+| Scheduled jobs + scoring | 10:33 | ✅ | compute-scores 4/4 success, avg **0.28 s** / max 0.39 s (was 6.56 s / 8.32 s — ISSUE-83 fixed in production); settle 10:30 → 200; live-scores 10 runs; **15/15 pg_net calls HTTP 200, 0 timeouts**. compute-scores skipped 29/29 gameweeks — correct (GW9 complete, GW10 deadline Fri 6 Nov 19:45), so the first live scoring dispatch follows that deadline. |
+| PR #2 | 2026-11-03 | ✅ opened | https://github.com/BenAlexCre/pl-goals/pull/2 (`release-2/payments-rules` → `main`) |
+| CI + Vercel Preview | — | see PR #2 | Preview uses the **production** Supabase project. |
+| Merge to `main` (frontend production deploy) | — | ⛔ awaiting owner approval | |
+| Signed-in production testing | — | ⛔ owner-run | Also the first post-046 check of `handle_new_user` on a real sign-up. |
+
+### Rollback (Release 2)
+
+| What | How |
+|---|---|
+| Frontend (after merge) | Vercel → previous production deployment (`pl-goals-i4g3ywh5m`, commit `a7b7804`) → **Instant Rollback**; then `git revert` the merge on `main`. |
+| Edge Functions | Redeploy all seven from `main` @ `a7b7804` (`git worktree add <dir> a7b7804`, then the § 0c deploy loop from that directory). Deploy all seven together. |
+| Migration 048 | An enum value **cannot be dropped**. Leave it; after redeploying the old functions, run `update public.pick5_picks set result = 'pending' where result = 'postponed';` — the old code never writes it, so the value just stays unused. |
+| Migration 046 | `grant execute on function <each of the 8> to public, anon, authenticated;` then `npx supabase migration repair --status reverted 046 --linked` (the 8 functions are listed in the migration header). |
+| Data | No stored data was changed by this release. The 2026-11-03 backup is the last resort. |
+
 ## 0c. Release 2 — payments & competition rules (2026-11-02)
 
 Branch **`release-2/payments-rules`** (on top of `hardening/post-release`, which is on
-top of `docs/post-release-2026-11-02`; both earlier branches unchanged). **Nothing in
-this section is in production** — no deploys, no merges, no production data changes.
+top of `docs/post-release-2026-11-02`; both earlier branches unchanged). *As written on
+2026-11-02, nothing here was in production. Superseded by § 0d: the owner's decisions
+are recorded there, and the backend has since been deployed.*
 Production was read only (`supabase db query`).
 
 ### Completed fixes (in repo, tested, not deployed)
